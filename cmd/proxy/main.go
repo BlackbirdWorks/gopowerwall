@@ -10,6 +10,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 	"github.com/blackbirdworks/gopowerwall/proxy"
@@ -18,6 +20,15 @@ import (
 const defaultProxyTimeout = 15 * time.Second
 
 func main() {
+	// Load .env before reading configuration, so a container can be
+	// configured either by real environment variables (docker-compose) or a
+	// mounted .env file (local testing). Real environment variables always
+	// win: godotenv.Load never overwrites a variable that is already set. A
+	// missing .env file is a silent no-op; only a malformed one is reported.
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: failed to load .env: %v\n", err)
+	}
+
 	cfg := proxy.DefaultConfig()
 	ctx := logger.Into(context.Background(), logger.New(os.Stderr, logger.LevelFor(cfg.DebugMode)))
 	srv := proxy.NewServer(ctx, cfg, nil)

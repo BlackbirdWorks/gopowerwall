@@ -592,4 +592,124 @@ func TestCloudNetworkBackedBehavior(t *testing.T) {
 
 		require.Error(t, c.Authenticate(t.Context()))
 	})
+
+	t.Run("Authenticate refreshes an empty access token exactly once and persists it with 0600", func(t *testing.T) {
+		var tokenCalls int
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/oauth2/v3/token":
+				tokenCalls++
+				assert.NoError(t, r.ParseForm())
+				assert.Equal(t, "refresh_token", r.PostForm.Get("grant_type"))
+				assert.Equal(t, "r1", r.PostForm.Get("refresh_token"))
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"access_token":  "at-fresh",
+					"refresh_token": "r1",
+					"token_type":    "Bearer",
+					"expires_in":    28800,
+				})
+			case "/api/1/products":
+				_, _ = w.Write([]byte(`{"response":[{"energy_site_id":789}]}`))
+			case "/api/1/energy_sites/789/live_status":
+				_, _ = w.Write([]byte(`{"response":{}}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}
+		withRedirectedDefaultTransport(t, newCloudTestServer(t, handler))
+		dir := t.TempDir()
+		writeAuthFile(t, dir, testEmail, "") // empty access token forces an immediate refresh
+		c := cloud.New(testEmail, testCacheTTL, testTimeout, "", dir)
+
+		require.NoError(t, c.Authenticate(t.Context()))
+		assert.Equal(t, 1, tokenCalls, "the token endpoint should be hit exactly once")
+
+		authPath := filepath.Join(dir, cloud.AuthFile)
+		info, statErr := os.Stat(authPath)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+		authBytes, readErr := os.ReadFile(authPath)
+		require.NoError(t, readErr)
+		var authData map[string]map[string]any
+		require.NoError(t, json.Unmarshal(authBytes, &authData))
+		assert.Equal(t, "at-fresh", authData[testEmail]["access_token"])
+		assert.NotEmpty(t, authData[testEmail]["expires_at"])
+
+		// A second call should reuse the now-valid cached token.
+		_, pollErr := c.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
+		require.NoError(t, pollErr)
+		assert.Equal(t, 1, tokenCalls, "a valid cached token must not be refreshed again")
+	})
+
+	t.Run("GetGridCharging returns ErrLogin on a 401 response", func(t *testing.T) {
+		handler := func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+		withRedirectedDefaultTransport(t, newCloudTestServer(t, handler))
+		c := cloud.New(testEmail, testCacheTTL, testTimeout, testSiteID, t.TempDir())
+
+		_, err := c.GetGridCharging(t.Context())
+		require.ErrorIs(t, err, backend.ErrLogin)
+	})
+}
+
+// TestCloudAuthenticateBootstrapsFromEnv covers bootstrapping AuthFile from
+// TESLA_REFRESH_TOKEN when no auth file exists yet, so a container's first
+// run can start from a .env file alone. It uses t.Setenv, so - like
+// TestCloudNetworkBackedBehavior - it must not run in parallel.
+//
+//nolint:paralleltest // subtests use t.Setenv, which panics if combined with t.Parallel(); must run sequentially
+func TestCloudAuthenticateBootstrapsFromEnv(t *testing.T) {
+	t.Run("bootstraps the auth file from TESLA_REFRESH_TOKEN and refreshes immediately", func(t *testing.T) {
+		t.Setenv("TESLA_REFRESH_TOKEN", "env-refresh-token")
+
+		var tokenCalls int
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/oauth2/v3/token":
+				tokenCalls++
+				assert.NoError(t, r.ParseForm())
+				assert.Equal(t, "env-refresh-token", r.PostForm.Get("refresh_token"))
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"access_token":  "at-bootstrapped",
+					"refresh_token": "env-refresh-token",
+					"token_type":    "Bearer",
+					"expires_in":    28800,
+				})
+			case "/api/1/products":
+				_, _ = w.Write([]byte(`{"response":[{"energy_site_id":789}]}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}
+		withRedirectedDefaultTransport(t, newCloudTestServer(t, handler))
+
+		dir := t.TempDir()
+		c := cloud.New(testEmail, testCacheTTL, testTimeout, "", dir)
+
+		require.NoError(t, c.Authenticate(t.Context()))
+		assert.Equal(t, 1, tokenCalls)
+
+		authPath := filepath.Join(dir, cloud.AuthFile)
+		info, statErr := os.Stat(authPath)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+		authBytes, readErr := os.ReadFile(authPath)
+		require.NoError(t, readErr)
+		var authData map[string]map[string]any
+		require.NoError(t, json.Unmarshal(authBytes, &authData))
+		assert.Equal(t, "at-bootstrapped", authData[testEmail]["access_token"])
+	})
+
+	t.Run("missing auth file and no env refresh token still fails", func(t *testing.T) {
+		dir := t.TempDir()
+		c := cloud.New(testEmail, testCacheTTL, testTimeout, testSiteID, dir)
+
+		err := c.Authenticate(t.Context())
+		require.ErrorIs(t, err, backend.ErrMissingAuthFile)
+	})
 }

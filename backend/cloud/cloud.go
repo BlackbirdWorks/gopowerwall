@@ -12,11 +12,15 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/stubs"
+	"github.com/blackbirdworks/gopowerwall/pkgs/atomicfile"
 	"github.com/blackbirdworks/gopowerwall/pkgs/cache"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
+	"github.com/blackbirdworks/gopowerwall/pkgs/oauthclient"
 )
 
 const (
@@ -30,6 +34,10 @@ const (
 	// TeslaOwnerURL is the Tesla Owner API base endpoint.
 	TeslaOwnerURL = "https://owner-api.teslamotors.com"
 
+	// teslaOwnerAPIClientID is the public OAuth2 client id Tesla's own apps
+	// use to refresh Owner API tokens. It requires no client secret.
+	teslaOwnerAPIClientID = "ownerapi"
+
 	statusKey     = "status"
 	statusSuccess = "success"
 	filePerm      = 0o600
@@ -38,17 +46,16 @@ const (
 
 // PyPowerwallCloud implements the Tesla Cloud Owner API backend.
 type PyPowerwallCloud struct {
-	cache       *cache.ResponseCache
-	client      *http.Client
-	tokenData   map[string]any
-	pollAPIMap  map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
-	postAPIMap  map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
-	email       string
-	siteID      string
-	authPath    string
-	accessToken string
-	timeout     time.Duration
-	mu          sync.Mutex
+	cache      *cache.ResponseCache
+	client     *http.Client
+	tokenData  map[string]any
+	pollAPIMap map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
+	email      string
+	siteID     string
+	authPath   string
+	timeout    time.Duration
+	mu         sync.Mutex
 }
 
 // New creates a new PyPowerwallCloud backend.
@@ -159,14 +166,10 @@ func (c *PyPowerwallCloud) Authenticate(ctx context.Context) error {
 
 	logger.Load(ctx).DebugContext(ctx, "cloud mode enabled")
 	authFilePath := filepath.Join(c.authPath, AuthFile)
-	b, err := os.ReadFile(authFilePath)
-	if err != nil {
-		return fmt.Errorf("%w: %s - run setup", backend.ErrMissingAuthFile, authFilePath)
-	}
 
-	var authData map[string]any
-	if unmarshalErr := json.Unmarshal(b, &authData); unmarshalErr != nil {
-		return fmt.Errorf("failed to parse auth file: %w", unmarshalErr)
+	authData, err := c.loadOrBootstrapAuthFile(ctx, authFilePath)
+	if err != nil {
+		return err
 	}
 
 	// Email key resolution
@@ -181,9 +184,21 @@ func (c *PyPowerwallCloud) Authenticate(ctx context.Context) error {
 		return fmt.Errorf("%w: %s", backend.ErrEmailNotFound, c.email)
 	}
 	c.tokenData = tokMap
-	if tok, tokOk := tokMap["access_token"].(string); tokOk {
-		c.accessToken = tok
+
+	tok, err := oauthclient.TokenFromFields(tokMap)
+	if err != nil {
+		return fmt.Errorf("%w: %w", backend.ErrLogin, err)
 	}
+
+	c.client = oauthclient.New(ctx, oauthclient.Config{
+		ClientID: teslaOwnerAPIClientID,
+		TokenURL: TeslaAuthURL,
+		Token:    tok,
+		Timeout:  c.timeout,
+		OnRefresh: func(newTok *oauth2.Token) error {
+			return c.persistToken(authFilePath, authData, newTok)
+		},
+	})
 
 	// Resolve site ID if not provided
 	if c.siteID == "" {
@@ -206,18 +221,96 @@ func (c *PyPowerwallCloud) Authenticate(ctx context.Context) error {
 	return nil
 }
 
+// loadOrBootstrapAuthFile reads authFilePath, or - when it does not exist
+// and the TESLA_REFRESH_TOKEN environment variable is set - bootstraps it
+// from the refresh token (and optional access token) obtained via
+// tesla_auth, so a container's first run can start from a .env file alone
+// rather than a pre-existing auth file.
+func (c *PyPowerwallCloud) loadOrBootstrapAuthFile(ctx context.Context, authFilePath string) (map[string]any, error) {
+	b, err := os.ReadFile(authFilePath)
+	if err == nil {
+		var authData map[string]any
+		if unmarshalErr := json.Unmarshal(b, &authData); unmarshalErr != nil {
+			return nil, fmt.Errorf("failed to parse auth file: %w", unmarshalErr)
+		}
+
+		return authData, nil
+	}
+
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("%w: %s - run setup", backend.ErrMissingAuthFile, authFilePath)
+	}
+
+	const envVarName = "TESLA_REFRESH_TOKEN"
+
+	refreshToken := os.Getenv(envVarName)
+	if refreshToken == "" {
+		return nil, fmt.Errorf("%w: %s - run setup", backend.ErrMissingAuthFile, authFilePath)
+	}
+
+	email := c.email
+	if email == "" {
+		email = "nobody@nowhere.com"
+	}
+
+	logger.Load(ctx).InfoContext(ctx, "bootstrapping cloud auth file from "+envVarName,
+		"path", authFilePath, "email", email)
+
+	authData := map[string]any{
+		email: map[string]any{
+			"access_token":  os.Getenv("TESLA_ACCESS_TOKEN"),
+			"refresh_token": refreshToken,
+			"token_type":    "Bearer",
+		},
+	}
+
+	if writeErr := atomicfile.WriteJSON(authFilePath, authData, filePerm); writeErr != nil {
+		return nil, fmt.Errorf("bootstrap auth file %s: %w", authFilePath, writeErr)
+	}
+
+	return authData, nil
+}
+
+// persistToken merges tok into authData's entry for c.email and writes the
+// whole auth file back atomically, so a refreshed access token survives a
+// container restart. Called by the oauth2 client whenever the token used by
+// c.client changes.
+func (c *PyPowerwallCloud) persistToken(authFilePath string, authData map[string]any, tok *oauth2.Token) error {
+	entry, _ := authData[c.email].(map[string]any)
+	authData[c.email] = oauthclient.MergeToken(entry, tok)
+
+	return atomicfile.WriteJSON(authFilePath, authData, filePerm)
+}
+
+// checkStatus maps a non-2xx Tesla API response to a sentinel error, so
+// callers can distinguish an authentication failure from other unexpected
+// responses.
+func checkStatus(resp *http.Response) error {
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return backend.ErrLogin
+	case resp.StatusCode >= http.StatusBadRequest:
+		return fmt.Errorf("%w: HTTP %d", backend.ErrUnexpectedStatus, resp.StatusCode)
+	default:
+		return nil
+	}
+}
+
 func (c *PyPowerwallCloud) findEnergySite(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, TeslaOwnerURL+"/api/1/products", nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return "", statusErr
+	}
 
 	var data struct {
 		Response []map[string]any `json:"response"`
@@ -281,13 +374,16 @@ func (c *PyPowerwallCloud) getSiteData(ctx context.Context, force bool) (map[str
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return nil, statusErr
+	}
 
 	var data map[string]any
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
@@ -313,13 +409,16 @@ func (c *PyPowerwallCloud) getSiteConfig(ctx context.Context, force bool) (map[s
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return nil, statusErr
+	}
 
 	var data map[string]any
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {

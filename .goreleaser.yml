@@ -41,6 +41,22 @@ builds:
       - goos: windows
         goarch: arm64
 
+  # healthcheck is not a user-facing binary - it only backs the Docker image's
+  # HEALTHCHECK instruction, which has no shell/curl/wget available in a
+  # scratch image. It is built for linux only and is not included in the
+  # release archives, only in the proxy Docker image (see dockers_v2 below).
+  - id: healthcheck
+    main: ./cmd/healthcheck
+    binary: healthcheck
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    tags: [netgo, osusergo, static_build]
+    ldflags:
+      - -s -w
+      - -extldflags "-static"
+
 archives:
   - id: gopowerwall-archive
     ids: [gopowerwall, proxy]
@@ -96,7 +112,7 @@ changelog:
 dockers_v2:
   - id: proxy
     dockerfile: Dockerfile.goreleaser
-    ids: [proxy]
+    ids: [proxy, healthcheck]
     images:
       - "ghcr.io/blackbirdworks/gopowerwall"
     tags:

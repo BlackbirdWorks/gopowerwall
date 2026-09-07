@@ -35,11 +35,11 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 }
 
 // writeConfigFile writes a FleetAPI config JSON file to dir, merging any
-// extra fields on top of the required access_token.
+// extra fields on top of the required access_token and refresh_token.
 func writeConfigFile(t *testing.T, dir string, extra map[string]any) {
 	t.Helper()
 
-	data := map[string]any{"access_token": "tok-abc"}
+	data := map[string]any{"access_token": "tok-abc", "refresh_token": "rt-abc", "client_id": "test-client"}
 	maps.Copy(data, extra)
 	b, err := json.Marshal(data)
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestFleetAPIAuthenticate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "missing access_token returns ErrLogin",
+			name: "missing refresh_token returns ErrLogin",
 			setup: func(t *testing.T, dir string) {
 				t.Helper()
 				b, err := json.Marshal(map[string]any{"site_id": "x"})
@@ -566,6 +566,19 @@ func TestFleetAPIGridChargingAndExport(t *testing.T) {
 		_, err := f.GetGridExport(t.Context())
 		require.ErrorIs(t, err, backend.ErrNotFound)
 	})
+
+	t.Run("GetGridCharging returns ErrLogin on a 401 response", func(t *testing.T) {
+		t.Parallel()
+
+		handler := func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+		srv := newTestServer(t, handler)
+		f := newAuthenticatedBackend(t, srv)
+
+		_, err := f.GetGridCharging(t.Context())
+		require.ErrorIs(t, err, backend.ErrLogin)
+	})
 }
 
 func TestFleetAPIPowerAndFetchPower(t *testing.T) {
@@ -590,4 +603,100 @@ func TestFleetAPIPowerAndFetchPower(t *testing.T) {
 	single, err := f.FetchPower(t.Context(), "battery", false)
 	require.NoError(t, err)
 	assert.InDelta(t, 6.0, single, 0.001)
+}
+
+// withRedirectedDefaultTransport points http.DefaultTransport at a local
+// test server for the life of the current test, then restores it. Unlike
+// fleet_api_url, TeslaAuthURL is a fixed constant, so exercising a real
+// token refresh needs the same global-transport redirection cloud's tests
+// use for the (also fixed) Tesla Owner API URL.
+//
+// http.DefaultTransport is process-global mutable state, so callers of this
+// helper must not call t.Parallel().
+func withRedirectedDefaultTransport(t *testing.T, addr string) {
+	t.Helper()
+
+	original := http.DefaultTransport
+	//nolint:reassign // deliberate: see doc comment above
+	http.DefaultTransport = &localRedirectTransport{addr: addr, upstream: &http.Transport{}}
+	t.Cleanup(func() {
+		//nolint:reassign // deliberate: restores the original
+		http.DefaultTransport = original
+	})
+}
+
+// localRedirectTransport rewrites every outgoing request to target addr
+// instead of its original host, so a test can intercept calls fleetapi makes
+// to the hardcoded TeslaAuthURL.
+type localRedirectTransport struct {
+	upstream http.RoundTripper
+	addr     string
+}
+
+func (l *localRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = "http"
+	clone.URL.Host = l.addr
+	clone.Host = l.addr
+
+	return l.upstream.RoundTrip(clone)
+}
+
+// TestFleetAPIAuthenticateRefresh exercises the OAuth2 refresh path against a
+// fake Tesla token endpoint. It does not call t.Parallel() because it
+// redirects the process-global http.DefaultTransport.
+//
+//nolint:paralleltest // subtest redirects the process-global http.DefaultTransport; must run sequentially
+func TestFleetAPIAuthenticateRefresh(t *testing.T) {
+	t.Run("refreshes an empty access token exactly once and persists it with 0600", func(t *testing.T) {
+		var tokenCalls int
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/oauth2/v3/token":
+				tokenCalls++
+				assert.NoError(t, r.ParseForm())
+				assert.Equal(t, "refresh_token", r.PostForm.Get("grant_type"))
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"access_token":  "at-fresh",
+					"refresh_token": "rt-abc",
+					"token_type":    "Bearer",
+					"expires_in":    28800,
+				})
+			case "/api/1/energy_sites/" + testSiteID + "/live_status":
+				assert.Equal(t, "Bearer at-fresh", r.Header.Get("Authorization"))
+				_, _ = w.Write([]byte(`{"response":{}}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}
+		srv := newTestServer(t, handler)
+		withRedirectedDefaultTransport(t, srv.Listener.Addr().String())
+
+		dir := t.TempDir()
+		writeConfigFile(t, dir, map[string]any{"access_token": "", "fleet_api_url": srv.URL})
+		f := fleetapi.New(testEmail, testCacheTTL, testTimeout, testSiteID, dir)
+
+		require.NoError(t, f.Authenticate(t.Context()))
+
+		_, err := f.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
+		require.NoError(t, err)
+		assert.Equal(t, 1, tokenCalls, "the token endpoint should be hit exactly once")
+
+		cfgPath := filepath.Join(dir, fleetapi.ConfigFile)
+		info, statErr := os.Stat(cfgPath)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+		b, readErr := os.ReadFile(cfgPath)
+		require.NoError(t, readErr)
+		var cfgData map[string]any
+		require.NoError(t, json.Unmarshal(b, &cfgData))
+		assert.Equal(t, "at-fresh", cfgData["access_token"])
+
+		// A second call should reuse the now-valid cached token.
+		_, err = f.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
+		require.NoError(t, err)
+		assert.Equal(t, 1, tokenCalls, "a valid cached token must not be refreshed again")
+	})
 }

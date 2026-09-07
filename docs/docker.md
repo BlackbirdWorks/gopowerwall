@@ -19,23 +19,40 @@ Internally this runs:
 
 ```dockerfile
 FROM golang:1.27-alpine AS builder
+RUN apk add --no-cache ca-certificates
 ...
 RUN go build \
     -tags 'netgo osusergo static_build' \
     -trimpath \
     -ldflags="-w -s -extldflags '-static -fno-PIC'" \
     -o proxy ./cmd/proxy
+RUN go build ... -o healthcheck ./cmd/healthcheck
 FROM scratch
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /app/proxy .
+COPY --from=builder /app/healthcheck .
 EXPOSE 8675
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/healthcheck"]
+USER 65532:65532
 CMD ["./proxy"]
 ```
 
-Because the final stage is `scratch`, there is no shell, no CA bundle, and no other tooling
-in the image — just the `proxy` binary. `Dockerfile.goreleaser` is a separate, simpler
-Dockerfile used only by the goreleaser release pipeline (it copies in an
-already-cross-compiled binary rather than building one); use the top-level `Dockerfile` for
-a local build.
+Because the final stage is `scratch`, there is no shell and no other tooling in the image —
+just the `proxy` binary, a small `healthcheck` binary, and a CA certificate bundle. The CA
+bundle matters specifically for **cloud** and **fleetapi** mode: those backends make
+verified TLS connections to Tesla's APIs (unlike the local/tedapi/v1r backends, which talk
+to the gateway's self-signed certificate on the LAN with verification intentionally
+disabled), and without a CA bundle those connections fail with
+`x509: certificate signed by unknown authority`. The `healthcheck` binary exists only
+because a `scratch` image has no `curl`/`wget` for Docker's `HEALTHCHECK` instruction to
+shell out to; it performs a single GET against the proxy's own `/health` route and exits
+0/1 accordingly. The container also runs as a fixed non-root UID/GID (`65532:65532`) rather
+than root.
+
+`Dockerfile.goreleaser` is a separate, simpler Dockerfile used only by the goreleaser
+release pipeline (it copies in already-cross-compiled `proxy` and `healthcheck` binaries
+rather than building them, and gets its CA bundle from a small `alpine` stage instead of a
+Go builder stage); use the top-level `Dockerfile` for a local build.
 
 ## Run it
 
@@ -116,10 +133,33 @@ docker run --rm -p 8675:8675 \
   ghcr.io/blackbirdworks/gopowerwall:latest
 ```
 
-For `cloud`/`fleetapi` modes, place a pre-existing `.pypowerwall.auth` or
-`.pypowerwall.fleetapi` file in that same volume before starting the container — gopowerwall
-does not generate either file itself yet (see
+For `cloud` mode, you can either place a pre-existing `.pypowerwall.auth` file in that same
+volume before starting the container, or set `TESLA_REFRESH_TOKEN` (obtained via
+[tesla_auth](https://github.com/adriankumpf/tesla_auth) — see the README's
+[Tesla Cloud mode setup](../README.md#tesla-cloud-mode-setup-tesla_auth--env) section) and
+let gopowerwall bootstrap the file itself on first run. Either way, gopowerwall refreshes
+the Tesla access token automatically as it expires and persists the new one back to that
+file, so the container never needs a freshly minted token after the first run. `fleetapi`
+mode still requires a pre-existing `.pypowerwall.fleetapi` file — gopowerwall does not
+generate one itself (see
 [MISSING.md](../MISSING.md#cli-subcommands-that-only-print-guidance-text)).
+
+## Using a `.env` file
+
+Both the `proxy` binary and the `gopowerwall` CLI load a `.env` file (via
+[godotenv](https://github.com/joho/godotenv)) from their working directory before reading
+configuration, if one is present. Real environment variables always win over `.env`
+values, so the same image works unmodified whether it's configured with real environment
+variables or a `.env` file.
+
+Note that `docker run --env-file` and Compose's `env_file:` already inject `.env` entries
+as real environment variables into the container before the process starts — godotenv
+never even sees a file in those cases, since there isn't one on the container's
+filesystem. godotenv's own loading matters when you mount an actual `.env` file into the
+container's `/app` working directory (`-v $(pwd)/.env:/app/.env:ro`), or when running the
+`proxy`/`gopowerwall` binaries directly on a host without Docker at all. Either way, the
+same [`.env.example`](../.env.example) at the repository root documents every supported
+variable, including `TESLA_REFRESH_TOKEN`/`TESLA_ACCESS_TOKEN` for cloud mode.
 
 ## Docker Compose example
 
@@ -144,3 +184,6 @@ volumes:
 docker compose up -d
 docker compose logs -f
 ```
+
+For a complete example wiring the proxy to Telegraf, InfluxDB, and Grafana (Tesla Cloud
+mode via tesla_auth), see [examples/metrics-stack](../examples/metrics-stack).

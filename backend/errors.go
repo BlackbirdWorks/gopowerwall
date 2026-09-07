@@ -78,4 +78,12 @@ var (
 
 	// ErrInvalidGridExportMode indicates an unrecognised grid export mode.
 	ErrInvalidGridExportMode = errors.New("invalid grid export mode")
+
+	// ErrOperationBackfillFailed indicates that a local-mode partial
+	// SetOperation call could not read back the current backup_reserve_percent
+	// or real_mode value needed to avoid clobbering the field the caller did
+	// not supply. The local gateway's /api/operation endpoint is a full
+	// overwrite, so the write is refused rather than sent as a dangerous
+	// partial payload.
+	ErrOperationBackfillFailed = errors.New("failed to read current operation settings for local-mode backfill")
 )

@@ -12,11 +12,15 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/stubs"
+	"github.com/blackbirdworks/gopowerwall/pkgs/atomicfile"
 	"github.com/blackbirdworks/gopowerwall/pkgs/cache"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
+	"github.com/blackbirdworks/gopowerwall/pkgs/oauthclient"
 )
 
 const (
@@ -30,8 +34,13 @@ const (
 	// FleetAPIURLCN is the Chinese FleetAPI URL.
 	FleetAPIURLCN = "https://fleet-api.prd.cn.vn.cloud.tesla.cn"
 
+	// TeslaAuthURL is the Tesla OAuth2 token endpoint, shared by Owner API
+	// and Fleet API refresh_token grants.
+	TeslaAuthURL = "https://auth.tesla.com/oauth2/v3/token"
+
 	statusKey     = "status"
 	statusSuccess = "success"
+	filePerm      = 0o600
 	siteConfigTTL = 59 * time.Second
 )
 
@@ -49,18 +58,17 @@ func BaseURL(region string) string {
 
 // PyPowerwallFleetAPI implements the Tesla FleetAPI backend.
 type PyPowerwallFleetAPI struct {
-	cache       *cache.ResponseCache
-	client      *http.Client
-	configData  map[string]any
-	pollAPIMap  map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
-	postAPIMap  map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
-	email       string
-	siteID      string
-	authPath    string
-	accessToken string
-	baseURL     string
-	timeout     time.Duration
-	mu          sync.Mutex
+	cache      *cache.ResponseCache
+	client     *http.Client
+	configData map[string]any
+	pollAPIMap map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
+	email      string
+	siteID     string
+	authPath   string
+	baseURL    string
+	timeout    time.Duration
+	mu         sync.Mutex
 }
 
 // New creates a new PyPowerwallFleetAPI backend.
@@ -174,9 +182,6 @@ func (f *PyPowerwallFleetAPI) Authenticate(ctx context.Context) error {
 	}
 	f.configData = cfgData
 
-	if tok, ok := cfgData["access_token"].(string); ok {
-		f.accessToken = tok
-	}
 	if sid, ok := cfgData["site_id"].(string); ok && sid != "" && f.siteID == "" {
 		f.siteID = sid
 	}
@@ -184,13 +189,50 @@ func (f *PyPowerwallFleetAPI) Authenticate(ctx context.Context) error {
 		f.baseURL = strings.TrimRight(u, "/")
 	}
 
-	if f.accessToken == "" {
-		return fmt.Errorf("%w: missing access_token in FleetAPI config file", backend.ErrLogin)
+	clientID, _ := cfgData["client_id"].(string)
+
+	tok, err := oauthclient.TokenFromFields(cfgData)
+	if err != nil {
+		return fmt.Errorf("%w: %w", backend.ErrLogin, err)
 	}
+
+	f.client = oauthclient.New(ctx, oauthclient.Config{
+		ClientID: clientID,
+		TokenURL: TeslaAuthURL,
+		Token:    tok,
+		Timeout:  f.timeout,
+		OnRefresh: func(newTok *oauth2.Token) error {
+			return f.persistToken(cfgPath, newTok)
+		},
+	})
 
 	logger.Load(ctx).DebugContext(ctx, "FleetAPI connected", "site", f.siteID, "base_url", f.baseURL)
 
 	return nil
+}
+
+// persistToken merges tok into f.configData and writes the FleetAPI config
+// file back atomically, so a refreshed access token survives a container
+// restart. Called by the oauth2 client whenever the token used by f.client
+// changes.
+func (f *PyPowerwallFleetAPI) persistToken(cfgPath string, tok *oauth2.Token) error {
+	oauthclient.MergeToken(f.configData, tok)
+
+	return atomicfile.WriteJSON(cfgPath, f.configData, filePerm)
+}
+
+// checkStatus maps a non-2xx Tesla API response to a sentinel error, so
+// callers can distinguish an authentication failure from other unexpected
+// responses.
+func checkStatus(resp *http.Response) error {
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return backend.ErrLogin
+	case resp.StatusCode >= http.StatusBadRequest:
+		return fmt.Errorf("%w: HTTP %d", backend.ErrUnexpectedStatus, resp.StatusCode)
+	default:
+		return nil
+	}
 }
 
 // Close closes any open sessions.
@@ -236,13 +278,16 @@ func (f *PyPowerwallFleetAPI) getSiteData(ctx context.Context, force bool) (map[
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+f.accessToken)
 
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return nil, statusErr
+	}
 
 	var data map[string]any
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
@@ -268,13 +313,16 @@ func (f *PyPowerwallFleetAPI) getSiteConfig(ctx context.Context, force bool) (ma
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+f.accessToken)
 
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return nil, statusErr
+	}
 
 	var data map[string]any
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {

@@ -38,6 +38,11 @@ var (
 
 	// ErrInvalidGridExportMode indicates an unrecognised grid export mode.
 	ErrInvalidGridExportMode = backend.ErrInvalidGridExportMode
+
+	// ErrOperationBackfillFailed indicates a local-mode partial SetOperation
+	// call could not read back the field the caller omitted, so the write
+	// was refused rather than sent as a dangerous partial payload.
+	ErrOperationBackfillFailed = backend.ErrOperationBackfillFailed
 )
 
 type InvalidConfigError = backend.InvalidConfigError
