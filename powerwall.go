@@ -159,6 +159,11 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 		p.tedapi = tedapi.NewBackend(tedClient, v1r)
 		p.tedapiMode = TEDAPIV1r
 		p.tedapiFlag = true
+		// Pure v1r: no local HTTP backend exists (p.local stays nil), so the
+		// facade's reads must dispatch on ModeV1r rather than the leftover
+		// ModeLocal value New() assigned before Connect ran - see
+		// pollInternal and friends' `case ModeTEDAPI, ModeV1r:` arms.
+		p.mode = ModeV1r
 
 		return true
 	}
@@ -176,6 +181,10 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 		p.tedapi = tedapi.NewBackend(tedClient, nil)
 		p.tedapiMode = TEDAPIFull
 		p.tedapiFlag = true
+		// Pure TEDAPI: same reasoning as the v1r branch above - no local
+		// backend, so p.mode must reflect TEDAPI or every mode-dispatching
+		// read method silently falls through the dead ModeLocal branch.
+		p.mode = ModeTEDAPI
 
 		return true
 	}
@@ -940,7 +949,19 @@ func (p *Powerwall) GridStatusResponse(ctx context.Context) (models.GridStatusRe
 
 // Operation returns active mode and backup reserve percentage.
 func (p *Powerwall) Operation(ctx context.Context) (models.Operation, error) {
-	raw := p.PollRaw(ctx, "/api/operation")
+	return p.readOperation(ctx, false)
+}
+
+// readOperation fetches /api/operation, optionally bypassing the poll cache.
+// force must be true whenever a stale cached value would be unsafe to use -
+// e.g. SetOperation's local-mode back-fill, or confirming the value a
+// cloud/FleetAPI write actually applied.
+func (p *Powerwall) readOperation(ctx context.Context, force bool) (models.Operation, error) {
+	opts := make([]PollOption, 0, 1)
+	if force {
+		opts = append(opts, WithForce(true))
+	}
+	raw := p.PollRaw(ctx, "/api/operation", opts...)
 	if len(raw) == 0 {
 		return models.Operation{}, ErrNotFound
 	}
@@ -980,6 +1001,20 @@ func (p *Powerwall) GetReserve(ctx context.Context, scale ...bool) *float64 {
 	return &val
 }
 
+// GetReserveForced returns the current backup reserve percentage (scaled),
+// bypassing the poll cache. Callers use this right after a reserve write to
+// confirm the value Tesla actually applied, since cloud/FleetAPI silently cap
+// the requested reserve (e.g. to 80%) rather than rejecting the write.
+func (p *Powerwall) GetReserveForced(ctx context.Context) *float64 {
+	op, err := p.readOperation(ctx, true)
+	if err != nil {
+		return nil
+	}
+	val := calc.ScaleBatteryLevel(op.BackupReservePercent)
+
+	return &val
+}
+
 // GetMode returns current real mode.
 func (p *Powerwall) GetMode(ctx context.Context) *string {
 	op, err := p.Operation(ctx)
@@ -1000,10 +1035,60 @@ func (p *Powerwall) SetMode(ctx context.Context, mode string) (models.Operation,
 	return p.SetOperation(ctx, nil, &mode)
 }
 
+// backfillLocalOperation fills in whichever of level/mode the caller omitted
+// using the CURRENT gateway state, but only when running in local mode - see
+// SetOperation's doc comment for why cloud/FleetAPI/TEDAPI must never receive
+// a back-filled payload. The read bypasses the poll cache: a stale cached
+// value here would defeat the safeguard. If that read fails, an error is
+// returned so the caller can refuse the write outright rather than fall back
+// to a partial (and potentially destructive) payload.
+func (p *Powerwall) backfillLocalOperation(
+	ctx context.Context,
+	level *float64,
+	mode *string,
+) (*float64, *string, error) {
+	haveLevel := level != nil
+	haveMode := mode != nil && *mode != ""
+	if !p.IsLocal() || haveLevel == haveMode {
+		return level, mode, nil
+	}
+
+	current, err := p.readOperation(ctx, true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", backend.ErrOperationBackfillFailed, err)
+	}
+	if !haveLevel {
+		backfillLevel := current.BackupReservePercent
+		level = &backfillLevel
+	}
+	if !haveMode {
+		backfillMode := current.RealMode
+		mode = &backfillMode
+	}
+
+	return level, mode, nil
+}
+
 // SetOperation sets battery reserve percentage and/or operation mode.
+//
+// The local gateway's /api/operation endpoint is a full overwrite: any field
+// omitted from the POST body is reset by the gateway rather than left
+// unchanged. So when running in local mode and the caller supplies only one
+// of level/mode, backfillLocalOperation reads back the current value of the
+// other field and merges it into the payload before it is sent.
+//
+// Cloud, FleetAPI and TEDAPI apply BACKUP_RESERVE and OPERATION_MODE as two
+// independent, asynchronous commands, so a partial payload must reach them
+// unchanged: back-filling the omitted field there would race the other
+// write. The back-fill therefore only ever applies in local mode.
 func (p *Powerwall) SetOperation(ctx context.Context, level *float64, mode *string) (models.Operation, error) {
 	if level != nil && (*level < 0 || *level > 100) {
 		return models.Operation{}, backend.ErrReserveOutOfRange
+	}
+
+	level, mode, err := p.backfillLocalOperation(ctx, level, mode)
+	if err != nil {
+		return models.Operation{}, err
 	}
 
 	payload := make(map[string]any)

@@ -1,8 +1,13 @@
 package gopowerwall_test
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -331,6 +336,93 @@ func TestAlertsIncludesDeviceStringSliceAlerts(t *testing.T) {
 			t.Parallel()
 
 			assert.Contains(t, alerts, tc.want)
+		})
+	}
+}
+
+// writeTestRSAKey generates a throwaway RSA private key and PEM-encodes it to
+// a file under t.TempDir(), for exercising connectLocal's v1r branch without
+// a reachable gateway - tedapi.NewTEDAPIv1r only ever parses this file
+// locally, it never dials the network.
+func writeTestRSAKey(t *testing.T) string {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	block := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}
+	path := filepath.Join(t.TempDir(), "tedapi.pem")
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(block), 0o600))
+
+	return path
+}
+
+// TestPureTEDAPIAndV1rModesReportTheirOwnConnectionMode is the regression
+// test for a dispatch bug in connectLocal: constructing a Powerwall for pure
+// TEDAPI (gateway password, no customer password) or pure v1r (RSA key, no
+// customer password) built a fully working tedapi backend and set
+// tedapiMode/tedapiFlag, but never assigned p.mode away from the ModeLocal
+// value New() sets by default. Every mode-dispatching read method (Poll,
+// Power, Vitals, GetTimeRemaining, ...) switches on p.mode, so with p.mode
+// stuck at ModeLocal and p.local nil (no local HTTP backend exists on these
+// paths), every read silently fell through to a nil/zero-value result while
+// IsConnected/IsTEDAPI still reported success.
+//
+// This does not need a reachable gateway: tedapi.NewClient and
+// tedapi.NewTEDAPIv1r only construct in-memory client state, so connectLocal
+// succeeds (and, with the fix, sets p.mode) purely from local configuration.
+func TestPureTEDAPIAndV1rModesReportTheirOwnConnectionMode(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name       string
+		wantMode   gopowerwall.ConnectionMode
+		useV1rKey  bool
+		wantV1r    bool
+		wantTEDAPI bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:       "pure TEDAPI (gateway password, no customer password)",
+			wantMode:   gopowerwall.ModeTEDAPI,
+			wantTEDAPI: true,
+		},
+		{
+			name:       "pure v1r (RSA key, no customer password)",
+			useV1rKey:  true,
+			wantMode:   gopowerwall.ModeV1r,
+			wantV1r:    true,
+			wantTEDAPI: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := []gopowerwall.Option{
+				gopowerwall.WithHost("127.0.0.1:9"), // non-routable: reads are expected to fail over the wire
+				gopowerwall.WithCloudMode(false),
+				gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
+				gopowerwall.WithGwPwd("gatewaypassword"),
+			}
+			if tc.useV1rKey {
+				opts = append(opts, gopowerwall.WithRSAKeyPath(writeTestRSAKey(t)))
+			}
+
+			pw, err := gopowerwall.New(t.Context(), opts...)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = pw.Close(t.Context()) })
+
+			require.True(t, pw.IsConnected(), "connectLocal's pure TEDAPI/v1r branch should report success")
+			assert.Equal(t, tc.wantMode, pw.Mode())
+			assert.True(t, pw.IsTEDAPI())
+			assert.False(t, pw.IsLocal(), "pure TEDAPI/v1r has no local HTTP backend, so IsLocal must be false")
+
+			if tc.wantV1r {
+				assert.Equal(t, gopowerwall.TEDAPIV1r, pw.TEDAPIMode())
+			} else {
+				assert.Equal(t, gopowerwall.TEDAPIFull, pw.TEDAPIMode())
+			}
 		})
 	}
 }

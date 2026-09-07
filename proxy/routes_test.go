@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -599,4 +600,66 @@ func TestAllowlistRouteReturns502StyleTimeoutWhenGatewayFails(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "null", string(body))
+}
+
+// TestJSONAndCSVv2GridStatusReflectsRealGridState is a regression test for a
+// bug where /json and /csv/v2 hardcoded their grid_status field to 0
+// regardless of the gateway's actual grid state: both handlers compared
+// PW.GridStatus(ctx, gopowerwall.GridStatusString) against the literal "UP",
+// but GridStatusString only ever returns "Connected", "Transition", or
+// "Unknown" - so the comparison was always false. /freq (generateFreq) got
+// this right next to the buggy code by using GridStatusNumeric directly;
+// /json and /csv/v2 now do the same.
+func TestJSONAndCSVv2GridStatusReflectsRealGridState(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name           string
+		gridStatusJSON string
+		wantGridStatus int
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:           "grid connected reports 1",
+			gridStatusJSON: `{"grid_status":"SystemGridConnected","grid_services_active":false}`,
+			wantGridStatus: 1,
+		},
+		{
+			name:           "grid in transition reports 0",
+			gridStatusJSON: `{"grid_status":"SystemTransitionToGrid","grid_services_active":false}`,
+			wantGridStatus: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gw := newFakeGateway(t, map[string]http.HandlerFunc{
+				"/api/system_status/grid_status": func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(tc.gridStatusJSON))
+				},
+			})
+			pw := newLocalPowerwall(t, gw)
+			ts := newProxyServer(t, baseTestConfig(), pw)
+
+			jsonResp, err := ts.Client().Get(ts.URL + "/json")
+			require.NoError(t, err)
+			defer jsonResp.Body.Close()
+
+			var jsonBody map[string]any
+			require.NoError(t, json.NewDecoder(jsonResp.Body).Decode(&jsonBody))
+			assert.InDelta(t, float64(tc.wantGridStatus), jsonBody["grid_status"], 0, "/json grid_status")
+
+			csvResp, err := ts.Client().Get(ts.URL + "/csv/v2")
+			require.NoError(t, err)
+			defer csvResp.Body.Close()
+
+			csvBody, err := io.ReadAll(csvResp.Body)
+			require.NoError(t, err)
+			fields := strings.Split(strings.TrimSpace(string(csvBody)), ",")
+			require.Len(t, fields, 7, "csv: %s", csvBody)
+			assert.Equal(t, strconv.Itoa(tc.wantGridStatus), fields[5], "/csv/v2 GridStatus column")
+		})
+	}
 }

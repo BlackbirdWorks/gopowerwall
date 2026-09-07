@@ -123,10 +123,7 @@ func (s *Server) formatV2CSVRow(
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel,GridStatus,Reserve\n")
 	}
-	gridStatus := 0
-	if s.PW.GridStatus(ctx, gopowerwall.GridStatusString) == "UP" {
-		gridStatus = 1
-	}
+	gridStatus, _ := s.PW.GridStatus(ctx, gopowerwall.GridStatusNumeric).(int)
 	reserve := 0.0
 	if r := s.PW.GetReserve(ctx, false); r != nil {
 		reserve = *r
@@ -292,10 +289,7 @@ func (s *Server) generateJSON(ctx context.Context) (string, error) {
 	if lvl := s.PW.Level(ctx, false); lvl != nil {
 		batLevel = *lvl
 	}
-	gridStatus := 0
-	if s.PW.GridStatus(ctx, gopowerwall.GridStatusString) == "UP" {
-		gridStatus = 1
-	}
+	gridStatus, _ := s.PW.GridStatus(ctx, gopowerwall.GridStatusNumeric).(int)
 	reserve := 0.0
 	if r := s.PW.GetReserve(ctx, false); r != nil {
 		reserve = *r
