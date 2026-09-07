@@ -26,8 +26,8 @@ identifiers, function signatures — is idiomatic Go rather than a line-for-line
 | Local gateway mode (`local`) | Implemented — session auth, vitals, control endpoints |
 | TEDAPI WiFi mode (`tedapi`) | Implemented — protobuf queries over `192.168.91.1` |
 | TEDAPI v1r LAN mode (`v1r`) | Implemented — RSA-signed transport for Powerwall 3 |
-| Tesla Cloud mode (`cloud`) | Implemented for read/write operation, reads existing token file only |
-| Tesla Fleet API mode (`fleetapi`) | Implemented for read/write operation, reads existing config file only |
+| Tesla Cloud mode (`cloud`) | Reads implemented, existing token file only; writes are accepted and report success but are not forwarded to Tesla (see [MISSING.md](MISSING.md)) |
+| Tesla Fleet API mode (`fleetapi`) | Reads implemented, existing config file only; writes have the same no-op caveat as cloud mode (see [MISSING.md](MISSING.md)) |
 | HTTP proxy server | Implemented — routes, caching, health, control endpoints |
 | CLI: `get`, `set`, `scan`, `proxy` | Fully functional |
 | CLI: `setup`, `authtoken`, `register`, `cloudcheck`, `tedapi` | Print guidance text only; no OAuth flow or live diagnostics yet (see [MISSING.md](MISSING.md)) |
