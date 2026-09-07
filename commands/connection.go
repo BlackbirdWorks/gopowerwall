@@ -23,13 +23,21 @@ type ConnectionFlags struct {
 	Password   string `help:"Customer password = last 5 characters of gateway password"         name:"password"`
 	GwPwd      string `help:"Gateway password [required for -tedapi and -v1r]"                  name:"gw_pwd"`
 	RsaKeyPath string `help:"RSA private key PEM path [v1r; default: ./tedapi_rsa_private.pem]" name:"rsa_key_path"`
-	AuthPath   string `help:"Auth path"                                                         name:"authpath"     env:"PW_AUTH_PATH"` //nolint:lll // config struct tags are intentionally verbose
-	Local      bool   `help:"Connect via local Powerwall Gateway (requires -host)"              name:"local"`
-	Cloud      bool   `help:"Connect via Tesla Cloud (requires prior 'setup')"                  name:"cloud"`
-	FleetAPI   bool   `help:"Connect via Tesla Fleet API (requires prior 'setup -fleetapi')"    name:"fleetapi"`
-	TEDAPI     bool   `help:"Connect via TEDAPI (requires -gw_pwd)"                             name:"tedapi"`
-	V1r        bool   `help:"Connect via v1r LAN TEDAPI (requires -gw_pwd and RSA private key)" name:"v1r"`
-	Debug      bool   `help:"Enable debug output"                                               name:"debug"`
+
+	// AuthPath also carries an env tag, unlike its neighbours above, so a
+	// blank line keeps it out of their gofmt tag-alignment group: aligning
+	// it together with them would otherwise pad this line past the
+	// 120-character limit.
+
+	AuthPath string `help:"Auth path" name:"authpath" env:"PW_AUTH_PATH"`
+	workDir  string
+
+	Local    bool `help:"Connect via local Powerwall Gateway (requires -host)"              name:"local"`
+	Cloud    bool `help:"Connect via Tesla Cloud (requires prior 'setup')"                  name:"cloud"`
+	FleetAPI bool `help:"Connect via Tesla Fleet API (requires prior 'setup -fleetapi')"    name:"fleetapi"`
+	TEDAPI   bool `help:"Connect via TEDAPI (requires -gw_pwd)"                             name:"tedapi"`
+	V1r      bool `help:"Connect via v1r LAN TEDAPI (requires -gw_pwd and RSA private key)" name:"v1r"`
+	Debug    bool `help:"Enable debug output"                                               name:"debug"`
 }
 
 func (c *ConnectionFlags) resolveRSAKey() string {
@@ -43,7 +51,11 @@ func (c *ConnectionFlags) resolveRSAKey() string {
 			return cand
 		}
 	}
-	if _, err := os.Stat(defaultKey); err == nil {
+	dir := c.workDir
+	if dir == "" {
+		dir = "."
+	}
+	if _, err := os.Stat(filepath.Join(dir, defaultKey)); err == nil {
 		return defaultKey
 	}
 
@@ -61,7 +73,16 @@ func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*gopowerwall.Powe
 	var opts []gopowerwall.Option
 
 	if c.AuthPath != "" {
-		opts = append(opts, gopowerwall.WithAuthPath(c.AuthPath))
+		// The proxy server (see proxy.DefaultConfig) already relocates its
+		// session-cache file under AuthPath when one is configured; the CLI
+		// commands built through BuildPowerwall did not, so -authpath had no
+		// effect on where a local-mode connection wrote its session cache -
+		// it always fell back to the process's working directory. Mirror the
+		// proxy's behaviour so -authpath consistently controls both.
+		opts = append(opts,
+			gopowerwall.WithAuthPath(c.AuthPath),
+			gopowerwall.WithCacheFile(filepath.Join(c.AuthPath, ".powerwall")),
+		)
 	}
 	if c.Host != "" {
 		opts = append(opts, gopowerwall.WithHost(c.Host))

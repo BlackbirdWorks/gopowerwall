@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
@@ -11,8 +10,8 @@ import (
 type VersionCmd struct{}
 
 // Run executes the version command.
-func (c *VersionCmd) Run(_ *Context) error {
-	fmt.Fprintf(os.Stdout, "gopowerwall [%s]\n", version.Version)
+func (c *VersionCmd) Run(cmdCtx *Context) error {
+	fmt.Fprintf(cmdCtx.Output(), "gopowerwall [%s]\n", version.Version)
 
 	return nil
 }
@@ -28,12 +27,13 @@ type SetupCmd struct {
 }
 
 // Run executes the setup command.
-func (c *SetupCmd) Run(_ *Context) error {
-	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Setup Mode\n\n", version.Version)
-	fmt.Fprintln(os.Stdout, "To configure Cloud or FleetAPI credentials:")
-	fmt.Fprintln(os.Stdout, "  1. Run 'gopowerwall authtoken' to generate your Tesla OAuth tokens.")
-	fmt.Fprintln(os.Stdout, "  2. Place tokens in .pypowerwall.auth or set PW_AUTH_PATH.")
-	fmt.Fprintln(os.Stdout, "  3. For FleetAPI, configure .pypowerwall.fleetapi with your client credentials.")
+func (c *SetupCmd) Run(cmdCtx *Context) error {
+	w := cmdCtx.Output()
+	fmt.Fprintf(w, "gopowerwall [%s] - Setup Mode\n\n", version.Version)
+	fmt.Fprintln(w, "To configure Cloud or FleetAPI credentials:")
+	fmt.Fprintln(w, "  1. Run 'gopowerwall authtoken' to generate your Tesla OAuth tokens.")
+	fmt.Fprintln(w, "  2. Place tokens in .pypowerwall.auth or set PW_AUTH_PATH.")
+	fmt.Fprintln(w, "  3. For FleetAPI, configure .pypowerwall.fleetapi with your client credentials.")
 
 	return nil
 }
@@ -44,10 +44,11 @@ type AuthTokenCmd struct {
 }
 
 // Run executes the authtoken command.
-func (c *AuthTokenCmd) Run(_ *Context) error {
-	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Auth Token Helper\n\n", version.Version)
-	fmt.Fprintln(os.Stdout, "Authenticate via Tesla OAuth portal:")
-	fmt.Fprintln(os.Stdout, "Visit: https://auth.tesla.com/oauth2/v3/authorize")
+func (c *AuthTokenCmd) Run(cmdCtx *Context) error {
+	w := cmdCtx.Output()
+	fmt.Fprintf(w, "gopowerwall [%s] - Auth Token Helper\n\n", version.Version)
+	fmt.Fprintln(w, "Authenticate via Tesla OAuth portal:")
+	fmt.Fprintln(w, "Visit: https://auth.tesla.com/oauth2/v3/authorize")
 
 	return nil
 }
@@ -59,9 +60,10 @@ type CloudCheckCmd struct {
 }
 
 // Run executes the cloudcheck command.
-func (c *CloudCheckCmd) Run(_ *Context) error {
-	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Cloud Diagnostics\n\n", version.Version)
-	fmt.Fprintln(os.Stdout, "Checking network reachability to Tesla Auth and Owner APIs...")
+func (c *CloudCheckCmd) Run(cmdCtx *Context) error {
+	w := cmdCtx.Output()
+	fmt.Fprintf(w, "gopowerwall [%s] - Cloud Diagnostics\n\n", version.Version)
+	fmt.Fprintln(w, "Checking network reachability to Tesla Auth and Owner APIs...")
 
 	return nil
 }
@@ -75,9 +77,10 @@ type TedapiCmd struct {
 }
 
 // Run executes the tedapi command.
-func (c *TedapiCmd) Run(_ *Context) error {
-	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - TEDAPI Test\n\n", version.Version)
-	fmt.Fprintf(os.Stdout, "Connecting to gateway %s...\n", c.Host)
+func (c *TedapiCmd) Run(cmdCtx *Context) error {
+	w := cmdCtx.Output()
+	fmt.Fprintf(w, "gopowerwall [%s] - TEDAPI Test\n\n", version.Version)
+	fmt.Fprintf(w, "Connecting to gateway %s...\n", c.Host)
 
 	return nil
 }
@@ -86,9 +89,10 @@ func (c *TedapiCmd) Run(_ *Context) error {
 type RegisterCmd struct{}
 
 // Run executes the register command.
-func (c *RegisterCmd) Run(_ *Context) error {
-	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Fleet API Key Registration\n\n", version.Version)
-	fmt.Fprintln(os.Stdout, "Registering public RSA key for v1r LAN TEDAPI access...")
+func (c *RegisterCmd) Run(cmdCtx *Context) error {
+	w := cmdCtx.Output()
+	fmt.Fprintf(w, "gopowerwall [%s] - Fleet API Key Registration\n\n", version.Version)
+	fmt.Fprintln(w, "Registering public RSA key for v1r LAN TEDAPI access...")
 
 	return nil
 }

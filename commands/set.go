@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 
 	"github.com/blackbirdworks/gopowerwall"
@@ -33,6 +33,7 @@ type SetCmd struct {
 // Run executes the set command.
 func (c *SetCmd) Run(cmdCtx *Context) error {
 	ctx := c.WithLogger(cmdCtx.Context)
+	w := cmdCtx.Output()
 	if c.Mode == "" && c.Reserve == -1 && !c.Current && c.GridCharging == "" && c.GridExport == "" {
 		return ErrNoActionSpecified
 	}
@@ -46,23 +47,23 @@ func (c *SetCmd) Run(cmdCtx *Context) error {
 		return ErrUnableToConnect
 	}
 
-	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Set Powerwall settings using %s mode.\n\n", version.Version, pw.Mode())
+	fmt.Fprintf(w, "gopowerwall [%s] - Set Powerwall settings using %s mode.\n\n", version.Version, pw.Mode())
 
-	if errMode := c.applyMode(ctx, pw); errMode != nil {
+	if errMode := c.applyMode(ctx, pw, w); errMode != nil {
 		return errMode
 	}
-	c.applyReserve(ctx, pw)
-	if errCurrent := c.applyCurrent(ctx, pw); errCurrent != nil {
+	c.applyReserve(ctx, pw, w)
+	if errCurrent := c.applyCurrent(ctx, pw, w); errCurrent != nil {
 		return errCurrent
 	}
-	if errGrid := c.applyGridCharging(ctx, pw); errGrid != nil {
+	if errGrid := c.applyGridCharging(ctx, pw, w); errGrid != nil {
 		return errGrid
 	}
 
-	return c.applyGridExport(ctx, pw)
+	return c.applyGridExport(ctx, pw, w)
 }
 
-func (c *SetCmd) applyMode(ctx context.Context, pw *gopowerwall.Powerwall) error {
+func (c *SetCmd) applyMode(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
 	if c.Mode == "" {
 		return nil
 	}
@@ -74,7 +75,7 @@ func (c *SetCmd) applyMode(ctx context.Context, pw *gopowerwall.Powerwall) error
 			ErrNoActionSpecified,
 		)
 	}
-	fmt.Fprintf(os.Stdout, "Setting Powerwall Mode to %s\n", m)
+	fmt.Fprintf(w, "Setting Powerwall Mode to %s\n", m)
 	if _, err := pw.SetMode(ctx, m); err != nil {
 		logger.Load(ctx).ErrorContext(ctx, "failed to set mode", "error", err)
 	}
@@ -82,21 +83,29 @@ func (c *SetCmd) applyMode(ctx context.Context, pw *gopowerwall.Powerwall) error
 	return nil
 }
 
-func (c *SetCmd) applyReserve(ctx context.Context, pw *gopowerwall.Powerwall) {
+func (c *SetCmd) applyReserve(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) {
 	if c.Reserve == -1 {
 		return
 	}
 	resVal := c.Reserve
-	if resVal > 80 && (pw.IsCloud() || pw.IsFleetAPI()) {
+	capped := pw.IsCloud() || pw.IsFleetAPI()
+	if resVal > 80 && capped {
 		logger.Load(ctx).WarnContext(ctx, "Tesla cloud and FleetAPI limit backup reserve to 80% maximum")
 	}
-	fmt.Fprintf(os.Stdout, "Setting Powerwall Reserve to %v\n", resVal)
+	fmt.Fprintf(w, "Setting Powerwall Reserve to %v\n", resVal)
 	if _, err := pw.SetReserve(ctx, resVal); err != nil {
 		logger.Load(ctx).ErrorContext(ctx, "failed to set reserve", "error", err)
+
+		return
+	}
+	if capped {
+		if applied := pw.GetReserveForced(ctx); applied != nil {
+			fmt.Fprintf(w, "Powerwall Reserve actually set to %.1f\n", *applied)
+		}
 	}
 }
 
-func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall) error {
+func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
 	if !c.Current {
 		return nil
 	}
@@ -104,7 +113,7 @@ func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall) er
 	if lvl == nil {
 		return ErrBatteryLevelRead
 	}
-	fmt.Fprintf(os.Stdout, "Setting Powerwall Reserve to Current Charge Level %.1f\n", *lvl)
+	fmt.Fprintf(w, "Setting Powerwall Reserve to Current Charge Level %.1f\n", *lvl)
 	if _, err := pw.SetReserve(ctx, *lvl); err != nil {
 		logger.Load(ctx).ErrorContext(ctx, "failed to set reserve", "error", err)
 	}
@@ -112,7 +121,7 @@ func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall) er
 	return nil
 }
 
-func (c *SetCmd) applyGridCharging(ctx context.Context, pw *gopowerwall.Powerwall) error {
+func (c *SetCmd) applyGridCharging(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
 	if c.GridCharging == "" {
 		return nil
 	}
@@ -120,7 +129,7 @@ func (c *SetCmd) applyGridCharging(ctx context.Context, pw *gopowerwall.Powerwal
 	if gc != "on" && gc != "off" {
 		return fmt.Errorf("invalid Grid Charging Mode [%s] - must be on or off: %w", gc, ErrNoActionSpecified)
 	}
-	fmt.Fprintf(os.Stdout, "Setting Grid Charging Mode to %s\n", gc)
+	fmt.Fprintf(w, "Setting Grid Charging Mode to %s\n", gc)
 	if _, err := pw.SetGridCharging(ctx, gc == "on"); err != nil {
 		logger.Load(ctx).ErrorContext(ctx, "failed to set grid charging", "error", err)
 	}
@@ -128,7 +137,7 @@ func (c *SetCmd) applyGridCharging(ctx context.Context, pw *gopowerwall.Powerwal
 	return nil
 }
 
-func (c *SetCmd) applyGridExport(ctx context.Context, pw *gopowerwall.Powerwall) error {
+func (c *SetCmd) applyGridExport(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
 	if c.GridExport == "" {
 		return nil
 	}
@@ -140,7 +149,7 @@ func (c *SetCmd) applyGridExport(ctx context.Context, pw *gopowerwall.Powerwall)
 			ErrNoActionSpecified,
 		)
 	}
-	fmt.Fprintf(os.Stdout, "Setting Grid Export Mode to %s\n", ge)
+	fmt.Fprintf(w, "Setting Grid Export Mode to %s\n", ge)
 	if _, err := pw.SetGridExport(ctx, ge); err != nil {
 		logger.Load(ctx).ErrorContext(ctx, "failed to set grid export", "error", err)
 	}

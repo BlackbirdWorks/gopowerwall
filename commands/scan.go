@@ -1,10 +1,8 @@
 package commands
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
@@ -22,9 +20,10 @@ type ScanCmd struct {
 }
 
 // Run executes the scan command.
-func (c *ScanCmd) Run(_ *Context) error {
+func (c *ScanCmd) Run(cmdCtx *Context) error {
+	w := cmdCtx.Output()
 	if !c.JSON {
-		fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Scanner\n\n", version.Version)
+		fmt.Fprintf(w, "gopowerwall [%s] - Scanner\n\n", version.Version)
 	}
 
 	target := c.Network
@@ -32,14 +31,14 @@ func (c *ScanCmd) Run(_ *Context) error {
 		target = c.IP
 	}
 
-	results, err := scan.Scan(context.Background(), models.ScanOptions{
+	results, err := scan.Scan(cmdCtx.Context, models.ScanOptions{
 		CIDR:        target,
 		MaxHosts:    c.Hosts,
 		TimeoutSec:  c.Timeout,
 		Color:       !c.Nocolor,
 		Interactive: !c.JSON,
 		JSONOutput:  c.JSON,
-	}, os.Stdout)
+	}, w)
 	if err != nil {
 		return err
 	}
@@ -49,7 +48,7 @@ func (c *ScanCmd) Run(_ *Context) error {
 		if mErr != nil {
 			return mErr
 		}
-		fmt.Fprintln(os.Stdout, string(b))
+		fmt.Fprintln(w, string(b))
 	}
 
 	return nil

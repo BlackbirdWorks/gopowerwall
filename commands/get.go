@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -26,6 +27,7 @@ type GetCmd struct {
 // Run executes the get command.
 func (c *GetCmd) Run(cmdCtx *Context) error {
 	ctx := c.WithLogger(cmdCtx.Context)
+	w := cmdCtx.Output()
 	pw, err := c.BuildPowerwall(ctx)
 	if err != nil {
 		return err
@@ -37,7 +39,7 @@ func (c *GetCmd) Run(cmdCtx *Context) error {
 
 	if c.Format == "text" {
 		fmt.Fprintf(
-			os.Stdout,
+			w,
 			"gopowerwall [%s] - Get Powerwall settings using %s mode.\n\n",
 			version.Version,
 			pw.Mode(),
@@ -48,11 +50,11 @@ func (c *GetCmd) Run(cmdCtx *Context) error {
 
 	switch c.Format {
 	case "json":
-		return printJSON(out)
+		return printJSON(w, out)
 	case "csv":
-		return printCSV(out)
+		return printCSV(w, out)
 	default:
-		return printText(out)
+		return printText(w, out)
 	}
 }
 
@@ -76,38 +78,33 @@ func collectMetrics(ctx context.Context, pw *gopowerwall.Powerwall) map[string]a
 	}
 }
 
-func printJSON(out map[string]any) error {
+func printJSON(w io.Writer, out map[string]any) error {
 	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stdout, string(b))
+	fmt.Fprintln(w, string(b))
 
 	return nil
 }
 
-func printCSV(out map[string]any) error {
+func printCSV(w io.Writer, out map[string]any) error {
 	keys := make([]string, 0, len(out))
 	for k := range out {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	fmt.Fprintln(os.Stdout, strings.Join(keys, ","))
+	fmt.Fprintln(w, strings.Join(keys, ","))
 	vals := make([]string, 0, len(keys))
 	for _, k := range keys {
-		v := out[k]
-		if v == nil {
-			vals = append(vals, "N/A")
-		} else {
-			vals = append(vals, fmt.Sprintf("%v", v))
-		}
+		vals = append(vals, formatMetricValue(out[k]))
 	}
-	fmt.Fprintln(os.Stdout, strings.Join(vals, ","))
+	fmt.Fprintln(w, strings.Join(vals, ","))
 
 	return nil
 }
 
-func printText(out map[string]any) error {
+func printText(w io.Writer, out map[string]any) error {
 	labels := map[string]string{
 		"site_id": "Site ID",
 		"din":     "DIN",
@@ -123,14 +120,39 @@ func printText(out map[string]any) error {
 		if name == "" {
 			name = strings.ReplaceAll(item, "_", " ")
 		}
-		val := out[item]
-		if val == nil {
-			fmt.Fprintf(os.Stdout, "  %-18s%s\n", name, "N/A")
-		} else {
-			fmt.Fprintf(os.Stdout, "  %-18s%v\n", name, val)
-		}
+		fmt.Fprintf(w, "  %-18s%s\n", name, formatMetricValue(out[item]))
 	}
-	fmt.Fprintln(os.Stdout)
+	fmt.Fprintln(w)
 
 	return nil
+}
+
+// formatMetricValue renders a collectMetrics value for the human-readable
+// and CSV output formats. Metrics are typically nil-able pointers (so a
+// caller can tell "unavailable" apart from a legitimate zero value). A bare
+// fmt.Sprintf("%v", v) mishandles both cases here: a *string/*float64/etc.
+// boxed in the map's `any` value is a typed nil, and a typed nil pointer
+// compares unequal to a literal nil interface, so the old "v == nil" guard
+// never actually fired; and printing a non-nil pointer to a plain type such
+// as *string with %v prints its memory address rather than the pointed-to
+// value. Both bugs meant `gopowerwall get` printed either "<nil>" for every
+// missing field or a raw pointer address (e.g. "0xc0000a4010") for din,
+// mode, reserve, site, site_id and soc whenever they were populated, in
+// both the default text output and --format=csv. Dereferencing one level
+// via reflection fixes both.
+func formatMetricValue(v any) string {
+	if v == nil {
+		return "N/A"
+	}
+
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return "N/A"
+		}
+
+		return fmt.Sprintf("%v", rv.Elem().Interface())
+	}
+
+	return fmt.Sprintf("%v", v)
 }

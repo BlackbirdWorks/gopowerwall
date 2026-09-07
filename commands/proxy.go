@@ -3,7 +3,6 @@ package commands
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
@@ -48,7 +47,7 @@ func (c *ProxyCmd) Run(cmdCtx *Context) error {
 	srv := proxy.NewServer(ctx, cfg, nil)
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
 	fmt.Fprintf(
-		os.Stdout,
+		cmdCtx.Output(),
 		"gopowerwall [%s] Proxy Server [%s] starting on http://%s\n",
 		version.Version,
 		proxy.Build,
