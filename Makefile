@@ -76,8 +76,13 @@ total-coverage:
 	go tool gotestsum --format pkgname -- -race -shuffle on -short -timeout 5m \
 		-coverpkg=$(COVERPKGS) -coverprofile=unit-coverage.out -covermode=atomic ./...
 	@echo "Running integration tests with coverage..."
-	go tool gotestsum --format pkgname -- -race -shuffle on -timeout 10m -tags=integration \
-		-coverpkg=$(COVERPKGS) -coverprofile=integration-coverage.out -covermode=atomic ./test/integration/...
+	@if [ -d test/integration ]; then \
+		go tool gotestsum --format pkgname -- -race -shuffle on -timeout 10m -tags=integration \
+			-coverpkg=$(COVERPKGS) -coverprofile=integration-coverage.out -covermode=atomic ./test/integration/...; \
+	else \
+		echo "No integration tests yet; skipping."; \
+		echo "mode: atomic" > integration-coverage.out; \
+	fi
 	@echo "Merging coverage profiles..."
 	@echo "mode: atomic" > coverage.out
 	@tail -n +2 unit-coverage.out >> coverage.out

@@ -27,9 +27,17 @@ and return `nil`:
 | `tedapi` | Opens a live TEDAPI connection and reports connection status/diagnostics | Prints the target host and nothing else; `TedapiCmd.Run` never calls `backend/tedapi` |
 
 Practical effect: `.pypowerwall.auth` and `.pypowerwall.fleetapi` must be produced by
-another tool (e.g. pypowerwall itself) and placed under `--authpath`/`PW_AUTH_PATH` before
-`cloud` or `fleetapi` mode can be used. This is documented in the README's CLI section and
-status table.
+another tool and placed under `--authpath`/`PW_AUTH_PATH` before `cloud` or `fleetapi` mode
+can be used. This is documented in the README's CLI section and status table. The
+recommended tool for cloud mode is [tesla_auth](https://github.com/adriankumpf/tesla_auth):
+its refresh token, set as `TESLA_REFRESH_TOKEN`, lets gopowerwall bootstrap
+`.pypowerwall.auth` itself on first run (see the README's
+[Tesla Cloud mode setup](README.md#tesla-cloud-mode-setup-tesla_auth--env) section) — this
+narrows the gap to "no interactive OAuth login flow", not "no way to get a token in at
+all". Once an auth file exists (bootstrapped or otherwise), `backend/cloud` and
+`backend/fleetapi` both refresh the Tesla access token automatically via
+`golang.org/x/oauth2` as it expires and persist the refreshed token back to the file, so a
+long-running proxy does not need re-authentication.
 
 `get`, `set`, `scan`, and `proxy` are fully implemented and exercise the real backends.
 

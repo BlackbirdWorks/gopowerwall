@@ -26,8 +26,8 @@ identifiers, function signatures — is idiomatic Go rather than a line-for-line
 | Local gateway mode (`local`) | Implemented — session auth, vitals, control endpoints |
 | TEDAPI WiFi mode (`tedapi`) | Implemented — protobuf queries over `192.168.91.1` |
 | TEDAPI v1r LAN mode (`v1r`) | Implemented — RSA-signed transport for Powerwall 3 |
-| Tesla Cloud mode (`cloud`) | Reads implemented, existing token file only; writes are accepted and report success but are not forwarded to Tesla (see [MISSING.md](MISSING.md)) |
-| Tesla Fleet API mode (`fleetapi`) | Reads implemented, existing config file only; writes have the same no-op caveat as cloud mode (see [MISSING.md](MISSING.md)) |
+| Tesla Cloud mode (`cloud`) | Reads implemented, with automatic OAuth2 access-token refresh persisted back to the token file; writes are accepted and report success but are not forwarded to Tesla (see [MISSING.md](MISSING.md)) |
+| Tesla Fleet API mode (`fleetapi`) | Reads implemented, same automatic token refresh as cloud mode; writes have the same no-op caveat as cloud mode (see [MISSING.md](MISSING.md)) |
 | HTTP proxy server | Implemented — routes, caching, health, control endpoints |
 | CLI: `get`, `set`, `scan`, `proxy` | Fully functional |
 | CLI: `setup`, `authtoken`, `register`, `cloudcheck`, `tedapi` | Print guidance text only; no OAuth flow or live diagnostics yet (see [MISSING.md](MISSING.md)) |
@@ -42,7 +42,7 @@ forced with a flag:
 | **local** | `--local` | Gateway's own HTTPS REST API (self-signed cert) | `--host`, `--password` (last 5 characters of the gateway password) |
 | **tedapi** | `--tedapi` | Protobuf over the gateway's `/tedapi` endpoint, normally reached over the gateway's own WiFi AP (`192.168.91.1`) | `--gw_pwd` (full gateway WiFi password), optionally `--host` |
 | **v1r** | `--v1r` | RSA-signed TEDAPI variant used by Powerwall 3 over the wired LAN/vendor subnet | `--host`, `--gw_pwd`, and an RSA private key (`--rsa_key_path`, default `./tedapi_rsa_private.pem`) |
-| **cloud** | `--cloud` | Tesla Owner API (unofficial) | A `.pypowerwall.auth` token file produced by prior `setup`/`authtoken` (see [MISSING.md](MISSING.md) — token acquisition is not yet automated) |
+| **cloud** | `--cloud` | Tesla Owner API (unofficial) | A `.pypowerwall.auth` token file (see [MISSING.md](MISSING.md) — `gopowerwall authtoken` does not yet generate one itself; use [tesla_auth](https://github.com/adriankumpf/tesla_auth) and `TESLA_REFRESH_TOKEN`, see below) |
 | **fleetapi** | `--fleetapi` | Official Tesla Fleet API | A `.pypowerwall.fleetapi` config file produced by prior `setup --fleetapi` (same caveat) |
 
 When no mode flag is given, gopowerwall auto-selects: if a host is set it uses `local`;
@@ -82,7 +82,9 @@ make build      # builds bin/gopowerwall and bin/proxy
 
 ### Docker
 
-See [docs/docker.md](docs/docker.md) for running the proxy as a container.
+See [docs/docker.md](docs/docker.md) for running the proxy as a container, and
+[examples/metrics-stack](examples/metrics-stack) for a full Telegraf/InfluxDB/Grafana
+stack wired up against it.
 
 ## CLI usage
 
@@ -125,7 +127,38 @@ guidance text rather than performing the OAuth device flow, RSA key registration
 diagnostics, or connection test that their pypowerwall counterparts do — see
 [MISSING.md](MISSING.md) for the exact gap. In practice this means cloud/FleetAPI auth
 files (`.pypowerwall.auth`, `.pypowerwall.fleetapi`) must currently be produced by another
-tool (e.g. pypowerwall itself) and placed in `--authpath`/`$PW_AUTH_PATH`.
+tool and placed in `--authpath`/`$PW_AUTH_PATH` — see the next section for the recommended
+way to do that with [tesla_auth](https://github.com/adriankumpf/tesla_auth).
+
+### Tesla Cloud mode setup (tesla_auth + `.env`)
+
+`gopowerwall` does not itself drive Tesla's interactive OAuth login (see above) — instead,
+use [tesla_auth](https://github.com/adriankumpf/tesla_auth), the community-standard tool
+for this, to obtain a **refresh token**:
+
+1. Download and run the `tesla_auth` executable. It opens a native browser window for your
+   Tesla account login (it supports MFA and captcha).
+2. On the final screen, copy the refresh token it displays (and, optionally, the access
+   token — gopowerwall will fetch one itself on first connect if you skip it).
+3. Set `PW_EMAIL` and `TESLA_REFRESH_TOKEN`, either as real environment variables or in a
+   `.env` file next to the binary (loaded automatically by both `gopowerwall` and the
+   standalone `proxy` binary — see [`.env.example`](.env.example) for every supported
+   variable; real environment variables always take precedence over `.env` values, and a
+   missing `.env` is not an error).
+4. Run `gopowerwall proxy --cloud` (or just start the container — see
+   [docs/docker.md](docs/docker.md)).
+
+On first connect, if no `.pypowerwall.auth` file exists yet under `--authpath`, gopowerwall
+bootstraps one from `TESLA_REFRESH_TOKEN`/`TESLA_ACCESS_TOKEN` and immediately exchanges
+the refresh token for a fresh access token. From then on, Tesla access tokens (which expire
+after a few hours) are refreshed automatically as needed and the new token is written back
+to `.pypowerwall.auth`, so a long-running proxy (e.g. in Docker) keeps working indefinitely
+without manual re-authentication, and a container restart does not need a freshly minted
+token from tesla_auth again. The same automatic refresh applies to `.pypowerwall.fleetapi`
+in `fleetapi` mode.
+
+For a complete Telegraf/InfluxDB/Grafana stack wired up this way, see
+[examples/metrics-stack](examples/metrics-stack).
 
 ## Running the proxy
 
@@ -151,6 +184,8 @@ All configuration is via environment variables (`PW_*`), matching pypowerwall:
 | `PW_HOST` | (empty) | Powerwall gateway IP/hostname |
 | `PW_PASSWORD` | (empty) | Customer password |
 | `PW_EMAIL` | `email@example.com` | Tesla account email (cloud mode) |
+| `TESLA_REFRESH_TOKEN` | (empty) | Refresh token from [tesla_auth](https://github.com/adriankumpf/tesla_auth); bootstraps `.pypowerwall.auth` when it does not exist yet (cloud mode) |
+| `TESLA_ACCESS_TOKEN` | (empty) | Optional access token from tesla_auth to seed the bootstrap; omit it and gopowerwall fetches one itself on first connect |
 | `PW_GW_PWD` | (empty) | Gateway WiFi password (TEDAPI/v1r) |
 | `PW_RSA_KEY_PATH` | (empty) | RSA private key path (v1r) |
 | `PW_TIMEZONE` | `America/Los_Angeles` | Local timezone for time-based fields |
