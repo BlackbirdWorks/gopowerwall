@@ -21,6 +21,7 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
+	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
 
 // Lookup safely traverses nested maps and slices using variadic path keys.
@@ -677,7 +678,7 @@ func (p *Powerwall) Version(ctx context.Context, intValue ...bool) any {
 	}
 	strVal := fmt.Sprintf("%v", s)
 	if len(intValue) > 0 && intValue[0] {
-		return ParseVersion(strVal)
+		return version.ParseVersion(strVal)
 	}
 
 	return strVal

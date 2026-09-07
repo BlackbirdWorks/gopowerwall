@@ -2,19 +2,22 @@ package gopowerwall
 
 import (
 	"context"
-	"os"
+	"io"
 
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/scan"
 )
 
-// ScanOptions re-exports models.ScanOptions.
+// ScanOptions configures a network scan for Powerwall gateways.
 type ScanOptions = models.ScanOptions
 
-// DiscoveredDevice re-exports models.DiscoveredDevice.
+// DiscoveredDevice describes a gateway found by [Scan].
 type DiscoveredDevice = models.DiscoveredDevice
 
-// Scan re-exports scan.Scan.
-func Scan(opts ScanOptions) ([]DiscoveredDevice, error) {
-	return scan.Scan(context.Background(), opts, os.Stdout)
+// Scan searches the network described by opts for Powerwall gateways,
+// reporting progress to w. The caller controls cancellation through ctx and
+// where progress is written, so the scan is usable from a server as well as a
+// terminal; pass io.Discard to suppress progress entirely.
+func Scan(ctx context.Context, opts ScanOptions, w io.Writer) ([]DiscoveredDevice, error) {
+	return scan.Scan(ctx, opts, w)
 }

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/blackbirdworks/gopowerwall/pkgs/validation"
 )
 
 const (
@@ -184,7 +186,7 @@ func validateHost(host string) error {
 		}
 		hostPart = parts[0]
 	}
-	if !IsValidHost(hostPart) {
+	if !validation.IsValidHost(hostPart) {
 		return &InvalidConfigError{
 			Param:   "host",
 			Message: fmt.Sprintf("invalid powerwall host '%s': must be IP address or valid hostname", host),
@@ -203,7 +205,7 @@ func ValidateConfig(c *Config) error {
 
 	switch {
 	case c.CloudMode && !c.FleetAPI:
-		if c.Email == "" || !IsValidEmail(c.Email) {
+		if c.Email == "" || !validation.IsValidEmail(c.Email) {
 			return &InvalidConfigError{
 				Param:   "email",
 				Message: fmt.Sprintf("valid email required for cloud mode: '%s'", c.Email),
