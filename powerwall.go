@@ -1,38 +1,27 @@
 package gopowerwall
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/cloud"
 	"github.com/blackbirdworks/gopowerwall/backend/fleetapi"
 	"github.com/blackbirdworks/gopowerwall/backend/local"
 	"github.com/blackbirdworks/gopowerwall/backend/tedapi"
 	"github.com/blackbirdworks/gopowerwall/models"
+	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
-
-// LogDebug logs debug messages.
-func LogDebug(format string, v ...any) {
-	logger.LogDebug(format, v...)
-}
-
-// LogWarn logs warning messages.
-func LogWarn(format string, v ...any) {
-	logger.LogWarn(format, v...)
-}
-
-// LogError logs error messages.
-func LogError(format string, v ...any) {
-	logger.LogError(format, v...)
-}
 
 // Lookup safely traverses nested maps and slices using variadic path keys.
 func Lookup(data any, keys ...string) any {
@@ -44,7 +33,6 @@ const (
 	connectRetryWait   = 30 * time.Second
 	defaultBackupDur   = 3600
 	reserveThreshold80 = 80.0
-	percentage100      = 100.0
 )
 
 // Powerwall represents a Tesla Energy Gateway Powerwall device facade.
@@ -63,7 +51,7 @@ type Powerwall struct {
 }
 
 // New creates and connects a new Powerwall instance.
-func New(opts ...Option) (*Powerwall, error) {
+func New(ctx context.Context, opts ...Option) (*Powerwall, error) {
 	cfg := DefaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
@@ -91,38 +79,39 @@ func New(opts ...Option) (*Powerwall, error) {
 	}
 
 	if cfg.AutoSelect {
-		pw.autoSelectMode(cfg)
+		pw.autoSelectMode(ctx, cfg)
 	}
 
 	if err := ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	if !pw.Connect(cfg.RetryModes) {
-		LogError("Unable to connect to Powerwall. Verify host, credentials, and network connectivity.")
+	if !pw.Connect(ctx, cfg.RetryModes) {
+		logger.Load(ctx).
+			ErrorContext(ctx, "unable to connect to Powerwall, verify host, credentials and network connectivity")
 	}
 
 	return pw, nil
 }
 
-func (p *Powerwall) autoSelectMode(cfg *Config) {
+func (p *Powerwall) autoSelectMode(ctx context.Context, cfg *Config) {
 	if cfg.Host != "" && !cfg.CloudMode && !cfg.FleetAPI {
-		LogDebug("Auto selecting local mode")
+		logger.Load(ctx).DebugContext(ctx, "auto selecting local mode")
 		p.mode = ModeLocal
 		p.cloudmode = false
 		p.fleetapiFlag = false
 	} else if _, statErr := os.Stat(filepath.Join(cfg.AuthPath, fleetapi.ConfigFile)); statErr == nil {
-		LogDebug("Auto selecting FleetAPI mode")
+		logger.Load(ctx).DebugContext(ctx, "auto selecting FleetAPI mode")
 		p.mode = ModeFleetAPI
 		p.cloudmode = true
 		p.fleetapiFlag = true
-	} else if _, statErr := os.Stat(filepath.Join(cfg.AuthPath, cloud.AuthFile)); statErr == nil {
+	} else if _, cloudStatErr := os.Stat(filepath.Join(cfg.AuthPath, cloud.AuthFile)); cloudStatErr == nil {
 		p.mode = ModeCloud
 		p.cloudmode = true
 		p.fleetapiFlag = false
-		LogDebug("Auto selecting Cloud mode")
+		logger.Load(ctx).DebugContext(ctx, "auto selecting cloud mode")
 	} else {
-		LogDebug("Auto select failed: unable to use local, cloud or fleetapi mode")
+		logger.Load(ctx).DebugContext(ctx, "auto select failed, no usable local, cloud or fleetapi mode")
 	}
 }
 
@@ -142,7 +131,7 @@ func (p *Powerwall) TEDAPIMode() TEDAPIMode {
 	return p.tedapiMode
 }
 
-func (p *Powerwall) connectLocal() bool {
+func (p *Powerwall) connectLocal(ctx context.Context) bool {
 	cfg := p.config
 
 	if cfg.RSAKeyPath != "" {
@@ -213,7 +202,7 @@ func (p *Powerwall) connectLocal() bool {
 			cfg.TEDAPIApiVersion,
 			cfg.TEDAPIAuthMode,
 		)
-		if tedClient.Connect() {
+		if tedClient.Connect(ctx) {
 			tedBackend := tedapi.NewBackend(tedClient, nil)
 			localBackend.SetTEDAPIClient(tedBackend, false)
 			p.tedapiMode = TEDAPIHybrid
@@ -221,7 +210,7 @@ func (p *Powerwall) connectLocal() bool {
 		}
 	}
 
-	if err := localBackend.Authenticate(); err == nil {
+	if err := localBackend.Authenticate(ctx); err == nil {
 		p.local = localBackend
 		p.cloudmode = false
 		p.fleetapiFlag = false
@@ -232,9 +221,9 @@ func (p *Powerwall) connectLocal() bool {
 	return false
 }
 
-func (p *Powerwall) connectFleetAPI() bool {
+func (p *Powerwall) connectFleetAPI(ctx context.Context) bool {
 	fb := fleetapi.New(p.config.Email, p.config.PWCacheExpire, p.config.Timeout, p.config.SiteID, p.config.AuthPath)
-	if err := fb.Authenticate(); err == nil {
+	if err := fb.Authenticate(ctx); err == nil {
 		p.fleetapi = fb
 		p.cloudmode = true
 		p.fleetapiFlag = true
@@ -247,9 +236,9 @@ func (p *Powerwall) connectFleetAPI() bool {
 	return false
 }
 
-func (p *Powerwall) connectCloud() bool {
+func (p *Powerwall) connectCloud(ctx context.Context) bool {
 	cb := cloud.New(p.config.Email, p.config.PWCacheExpire, p.config.Timeout, p.config.SiteID, p.config.AuthPath)
-	if err := cb.Authenticate(); err == nil {
+	if err := cb.Authenticate(ctx); err == nil {
 		p.cloud = cb
 		p.cloudmode = true
 		p.fleetapiFlag = false
@@ -263,46 +252,49 @@ func (p *Powerwall) connectCloud() bool {
 }
 
 // Connect attempts connection with circular fallback (Local -> FleetAPI -> Cloud -> Local).
-func (p *Powerwall) Connect(retry bool) bool {
+func (p *Powerwall) Connect(ctx context.Context, retry bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.mode == ModeUnknown {
-		LogError("Unable to determine mode to connect")
+		logger.Load(ctx).ErrorContext(ctx, "unable to determine mode to connect")
 
 		return false
 	}
 
-	for attempt := 0; attempt < maxConnectRetries; attempt++ {
+	for attempt := range maxConnectRetries {
 		if retry && attempt == maxConnectRetries-1 {
-			LogWarn("Failed to connect with all modes. Waiting 30s to retry.")
+			logger.Load(ctx).
+				WarnContext(ctx, "failed to connect with all modes, waiting to retry", "wait", connectRetryWait)
 			time.Sleep(connectRetryWait)
 		}
 
 		switch p.mode {
 		case ModeLocal:
-			LogDebug("Trying Local mode")
-			if p.connectLocal() {
+			logger.Load(ctx).DebugContext(ctx, "trying local mode")
+			if p.connectLocal(ctx) {
 				return true
 			}
-			LogWarn("Failed Local mode - trying fleetapi mode.")
+			logger.Load(ctx).WarnContext(ctx, "local mode failed, trying fleetapi mode")
 			p.mode = ModeFleetAPI
 
 		case ModeFleetAPI:
-			LogDebug("Trying FleetAPI mode")
-			if p.connectFleetAPI() {
+			logger.Load(ctx).DebugContext(ctx, "trying FleetAPI mode")
+			if p.connectFleetAPI(ctx) {
 				return true
 			}
-			LogWarn("Failed FleetAPI mode - trying cloud mode.")
+			logger.Load(ctx).WarnContext(ctx, "FleetAPI mode failed, trying cloud mode")
 			p.mode = ModeCloud
 
 		case ModeCloud:
-			LogDebug("Trying Cloud mode")
-			if p.connectCloud() {
+			logger.Load(ctx).DebugContext(ctx, "trying cloud mode")
+			if p.connectCloud(ctx) {
 				return true
 			}
-			LogWarn("Failed Cloud mode - trying local mode.")
+			logger.Load(ctx).WarnContext(ctx, "cloud mode failed, trying local mode")
 			p.mode = ModeLocal
+		default:
+			// Remaining modes do not support this operation.
 		}
 	}
 
@@ -350,16 +342,16 @@ func (p *Powerwall) IsTEDAPI() bool {
 }
 
 // Close disconnects and releases active backend resources.
-func (p *Powerwall) Close() error {
+func (p *Powerwall) Close(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.local != nil {
-		_ = p.local.Close()
+		_ = p.local.Close(ctx)
 		p.local = nil
 	}
 	if p.tedapi != nil {
-		_ = p.tedapi.Close()
+		_ = p.tedapi.Close(ctx)
 		p.tedapi = nil
 	}
 	if p.cloud != nil {
@@ -391,40 +383,42 @@ func WithRaw(raw bool) PollOption {
 	return func(c *pollConfig) { c.raw = raw }
 }
 
-func (p *Powerwall) pollInternal(api string, force, recursive, raw bool) (any, error) {
+func (p *Powerwall) pollInternal(ctx context.Context, api string, force, recursive, raw bool) (any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	switch p.mode {
 	case ModeLocal:
 		if p.local != nil {
-			return p.local.Poll(api, force, recursive, raw)
+			return p.local.Poll(ctx, api, force, recursive, raw)
 		}
 	case ModeTEDAPI, ModeV1r:
 		if p.tedapi != nil {
-			return p.tedapi.Poll(api, force, recursive, raw)
+			return p.tedapi.Poll(ctx, api, force, recursive, raw)
 		}
 	case ModeCloud:
 		if p.cloud != nil {
-			return p.cloud.Poll(api, force, recursive, raw)
+			return p.cloud.Poll(ctx, api, force, recursive, raw)
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			return p.fleetapi.Poll(api, force, recursive, raw)
+			return p.fleetapi.Poll(ctx, api, force, recursive, raw)
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	return nil, ErrNoClient
 }
 
 // Poll queries the Powerwall Gateway API endpoint.
-func (p *Powerwall) Poll(api string, opts ...PollOption) any {
+func (p *Powerwall) Poll(ctx context.Context, api string, opts ...PollOption) any {
 	cfg := &pollConfig{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
-	val, err := p.pollInternal(api, cfg.force, cfg.recursive, cfg.raw)
+	val, err := p.pollInternal(ctx, api, cfg.force, cfg.recursive, cfg.raw)
 	if err != nil {
 		return nil
 	}
@@ -433,14 +427,14 @@ func (p *Powerwall) Poll(api string, opts ...PollOption) any {
 }
 
 // PollRaw queries the endpoint and returns raw bytes.
-func (p *Powerwall) PollRaw(api string, opts ...PollOption) []byte {
+func (p *Powerwall) PollRaw(ctx context.Context, api string, opts ...PollOption) []byte {
 	cfg := &pollConfig{raw: true}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 	cfg.raw = true
 
-	val, err := p.pollInternal(api, cfg.force, cfg.recursive, true)
+	val, err := p.pollInternal(ctx, api, cfg.force, cfg.recursive, true)
 	if err != nil {
 		return nil
 	}
@@ -452,8 +446,8 @@ func (p *Powerwall) PollRaw(api string, opts ...PollOption) []byte {
 }
 
 // PollJSON queries the endpoint and returns a JSON string.
-func (p *Powerwall) PollJSON(api string, opts ...PollOption) string {
-	res := p.Poll(api, opts...)
+func (p *Powerwall) PollJSON(ctx context.Context, api string, opts ...PollOption) string {
+	res := p.Poll(ctx, api, opts...)
 	if res == nil {
 		return ""
 	}
@@ -472,7 +466,7 @@ func (p *Powerwall) PollJSON(api string, opts ...PollOption) string {
 }
 
 // Post sends a command payload to the Powerwall API endpoint.
-func (p *Powerwall) Post(api string, payload any, din ...string) any {
+func (p *Powerwall) Post(ctx context.Context, api string, payload any, din ...string) any {
 	dinStr := ""
 	if len(din) > 0 {
 		dinStr = din[0]
@@ -489,20 +483,22 @@ func (p *Powerwall) Post(api string, payload any, din ...string) any {
 	switch p.mode {
 	case ModeLocal:
 		if p.local != nil {
-			res, err = p.local.Post(api, payload, dinStr, false, false)
+			res, err = p.local.Post(ctx, api, payload, dinStr, false, false)
 		}
 	case ModeTEDAPI, ModeV1r:
 		if p.tedapi != nil {
-			res, err = p.tedapi.Post(api, payload, dinStr, false, false)
+			res, err = p.tedapi.Post(ctx, api, payload, dinStr, false, false)
 		}
 	case ModeCloud:
 		if p.cloud != nil {
-			res, err = p.cloud.Post(api, payload, dinStr, false, false)
+			res, err = p.cloud.Post(ctx, api, payload, dinStr, false, false)
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			res, err = p.fleetapi.Post(api, payload, dinStr, false, false)
+			res, err = p.fleetapi.Post(ctx, api, payload, dinStr, false, false)
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	if err != nil {
@@ -513,13 +509,13 @@ func (p *Powerwall) Post(api string, payload any, din ...string) any {
 }
 
 // Level returns battery state of charge percentage.
-func (p *Powerwall) Level(scale ...bool) *float64 {
+func (p *Powerwall) Level(ctx context.Context, scale ...bool) *float64 {
 	doScale := false
 	if len(scale) > 0 {
 		doScale = scale[0]
 	}
 
-	data := p.Poll("/api/system_status/soe")
+	data := p.Poll(ctx, "/api/system_status/soe")
 	if data == nil {
 		return nil
 	}
@@ -538,14 +534,14 @@ func (p *Powerwall) Level(scale ...bool) *float64 {
 	}
 
 	if doScale {
-		val = val * 100.0 / percentage100
+		val = calc.ScaleBatteryLevel(val)
 	}
 
 	return &val
 }
 
 // Power returns instant power metrics across all sensors in a strongly-typed PowerSummary.
-func (p *Powerwall) Power() models.PowerSummary {
+func (p *Powerwall) Power(ctx context.Context) models.PowerSummary {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -557,20 +553,22 @@ func (p *Powerwall) Power() models.PowerSummary {
 	switch p.mode {
 	case ModeLocal:
 		if p.local != nil {
-			res, err = p.local.Power()
+			res, err = p.local.Power(ctx)
 		}
 	case ModeTEDAPI, ModeV1r:
 		if p.tedapi != nil {
-			res, err = p.tedapi.Power()
+			res, err = p.tedapi.Power(ctx)
 		}
 	case ModeCloud:
 		if p.cloud != nil {
-			res, err = p.cloud.Power()
+			res, err = p.cloud.Power(ctx)
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			res, err = p.fleetapi.Power()
+			res, err = p.fleetapi.Power(ctx)
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	if err != nil || res == nil {
@@ -588,31 +586,39 @@ func (p *Powerwall) Power() models.PowerSummary {
 }
 
 // Site returns site power in Watts or meter reading.
-func (p *Powerwall) Site(verbose ...bool) any { return p.fetchSensor("site", verbose...) }
+func (p *Powerwall) Site(ctx context.Context, verbose ...bool) any {
+	return p.fetchSensor(ctx, "site", verbose...)
+}
 
 // Solar returns solar power in Watts or meter reading.
-func (p *Powerwall) Solar(verbose ...bool) any { return p.fetchSensor("solar", verbose...) }
+func (p *Powerwall) Solar(ctx context.Context, verbose ...bool) any {
+	return p.fetchSensor(ctx, "solar", verbose...)
+}
 
 // Battery returns battery power in Watts or meter reading.
-func (p *Powerwall) Battery(verbose ...bool) any { return p.fetchSensor("battery", verbose...) }
+func (p *Powerwall) Battery(ctx context.Context, verbose ...bool) any {
+	return p.fetchSensor(ctx, "battery", verbose...)
+}
 
 // Load returns load power in Watts or meter reading.
-func (p *Powerwall) Load(verbose ...bool) any { return p.fetchSensor("load", verbose...) }
+func (p *Powerwall) Load(ctx context.Context, verbose ...bool) any {
+	return p.fetchSensor(ctx, "load", verbose...)
+}
 
 // Grid returns grid power in Watts.
-func (p *Powerwall) Grid(verbose ...bool) any { return p.Site(verbose...) }
+func (p *Powerwall) Grid(ctx context.Context, verbose ...bool) any { return p.Site(ctx, verbose...) }
 
 // Home returns home load power in Watts.
-func (p *Powerwall) Home(verbose ...bool) any { return p.Load(verbose...) }
+func (p *Powerwall) Home(ctx context.Context, verbose ...bool) any { return p.Load(ctx, verbose...) }
 
-func (p *Powerwall) fetchSensor(sensor string, verbose ...bool) any {
+func (p *Powerwall) fetchSensor(ctx context.Context, sensor string, verbose ...bool) any {
 	isVerbose := false
 	if len(verbose) > 0 {
 		isVerbose = verbose[0]
 	}
 
 	if isVerbose {
-		data := p.Poll("/api/meters/aggregates")
+		data := p.Poll(ctx, "/api/meters/aggregates")
 		if data != nil {
 			return Lookup(data, sensor)
 		}
@@ -620,7 +626,7 @@ func (p *Powerwall) fetchSensor(sensor string, verbose ...bool) any {
 		return nil
 	}
 
-	summary := p.Power()
+	summary := p.Power(ctx)
 	switch sensor {
 	case "site", "grid":
 		return summary.Site
@@ -636,8 +642,8 @@ func (p *Powerwall) fetchSensor(sensor string, verbose ...bool) any {
 }
 
 // SiteName returns the site name.
-func (p *Powerwall) SiteName() *string {
-	data := p.Poll("/api/site_info/site_name")
+func (p *Powerwall) SiteName(ctx context.Context) *string {
+	data := p.Poll(ctx, "/api/site_info/site_name")
 	if data == nil {
 		return nil
 	}
@@ -651,8 +657,8 @@ func (p *Powerwall) SiteName() *string {
 }
 
 // Status returns gateway status.
-func (p *Powerwall) Status(param ...string) any {
-	data := p.Poll("/api/status")
+func (p *Powerwall) Status(ctx context.Context, param ...string) any {
+	data := p.Poll(ctx, "/api/status")
 	if data == nil {
 		return nil
 	}
@@ -664,8 +670,8 @@ func (p *Powerwall) Status(param ...string) any {
 }
 
 // Version returns firmware version.
-func (p *Powerwall) Version(intValue ...bool) any {
-	s := p.Status("version")
+func (p *Powerwall) Version(ctx context.Context, intValue ...bool) any {
+	s := p.Status(ctx, "version")
 	if s == nil {
 		return nil
 	}
@@ -678,8 +684,8 @@ func (p *Powerwall) Version(intValue ...bool) any {
 }
 
 // Uptime returns gateway uptime string.
-func (p *Powerwall) Uptime() *string {
-	s := p.Status("up_time_seconds")
+func (p *Powerwall) Uptime(ctx context.Context) *string {
+	s := p.Status(ctx, "up_time_seconds")
 	if s == nil {
 		return nil
 	}
@@ -689,8 +695,8 @@ func (p *Powerwall) Uptime() *string {
 }
 
 // Din returns gateway DIN.
-func (p *Powerwall) Din() *string {
-	s := p.Status("din")
+func (p *Powerwall) Din(ctx context.Context) *string {
+	s := p.Status(ctx, "din")
 	if s == nil {
 		return nil
 	}
@@ -700,7 +706,7 @@ func (p *Powerwall) Din() *string {
 }
 
 // Vitals returns full device vitals.
-func (p *Powerwall) Vitals() (models.VitalsData, error) {
+func (p *Powerwall) Vitals(ctx context.Context) (models.VitalsData, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -712,12 +718,14 @@ func (p *Powerwall) Vitals() (models.VitalsData, error) {
 	switch p.mode {
 	case ModeLocal:
 		if p.local != nil {
-			res, err = p.local.Vitals()
+			res, err = p.local.Vitals(ctx)
 		}
 	case ModeTEDAPI, ModeV1r:
 		if p.tedapi != nil {
-			res, err = p.tedapi.Vitals()
+			res, err = p.tedapi.Vitals(ctx)
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	if err != nil {
@@ -735,9 +743,9 @@ func (p *Powerwall) Vitals() (models.VitalsData, error) {
 }
 
 // Temps returns temperatures of Powerwalls from vitals TETHC devices.
-func (p *Powerwall) Temps() models.PowerwallTemps {
+func (p *Powerwall) Temps(ctx context.Context) models.PowerwallTemps {
 	temps := make(map[string]float64)
-	vitals, err := p.Vitals()
+	vitals, err := p.Vitals(ctx)
 	if err != nil || len(vitals.Devices) == 0 {
 		return models.PowerwallTemps{Temps: temps}
 	}
@@ -754,10 +762,10 @@ func (p *Powerwall) Temps() models.PowerwallTemps {
 }
 
 // Alerts returns active system and device alerts.
-func (p *Powerwall) Alerts(alertsOnly ...bool) models.AlertsList {
+func (p *Powerwall) Alerts(ctx context.Context, _ ...bool) models.AlertsList {
 	alertSet := make(map[string]struct{})
 
-	vitals, _ := p.Vitals()
+	vitals, _ := p.Vitals(ctx)
 	for _, data := range vitals.Devices {
 		if rawAlerts, ok := data["alerts"].([]any); ok {
 			for _, a := range rawAlerts {
@@ -766,7 +774,7 @@ func (p *Powerwall) Alerts(alertsOnly ...bool) models.AlertsList {
 		}
 	}
 
-	gridStatus := p.Poll("/api/system_status/grid_status")
+	gridStatus := p.Poll(ctx, "/api/system_status/grid_status")
 	if gridStatus != nil {
 		if Lookup(gridStatus, "grid_services_active") == true {
 			alertSet["GridServicesActive"] = struct{}{}
@@ -775,7 +783,7 @@ func (p *Powerwall) Alerts(alertsOnly ...bool) models.AlertsList {
 		}
 	}
 
-	var list []string
+	list := make([]string, 0, len(alertSet))
 	for a := range alertSet {
 		norm := strings.ReplaceAll(a, "SystemGridConnected", "SystemConnectedToGrid")
 		list = append(list, norm)
@@ -786,14 +794,14 @@ func (p *Powerwall) Alerts(alertsOnly ...bool) models.AlertsList {
 }
 
 // Strings returns solar string measurements.
-func (p *Powerwall) Strings(verbose ...bool) models.SolarStrings {
+func (p *Powerwall) Strings(ctx context.Context, _ ...bool) models.SolarStrings {
 	strMap := make(map[string]models.StringMetric)
-	vitals, _ := p.Vitals()
+	vitals, _ := p.Vitals(ctx)
 
 	for dev, data := range vitals.Devices {
 		if strings.HasPrefix(dev, "PVAC") {
 			for stringID := range []string{"A", "B", "C", "D"} {
-				key := fmt.Sprintf("%d", stringID)
+				key := strconv.Itoa(stringID)
 				strMap[key] = models.StringMetric{
 					Connected: true,
 					Voltage:   LookupFloat(data, "PVAC_Vsolar"+key),
@@ -808,9 +816,9 @@ func (p *Powerwall) Strings(verbose ...bool) models.SolarStrings {
 }
 
 // BatteryBlocks returns battery module data.
-func (p *Powerwall) BatteryBlocks() map[string]models.BatteryBlock {
+func (p *Powerwall) BatteryBlocks(ctx context.Context) map[string]models.BatteryBlock {
 	res := make(map[string]models.BatteryBlock)
-	sys := p.Poll("/api/system_status")
+	sys := p.Poll(ctx, "/api/system_status")
 	if sys == nil {
 		return res
 	}
@@ -826,7 +834,7 @@ func (p *Powerwall) BatteryBlocks() map[string]models.BatteryBlock {
 			continue
 		}
 		var block models.BatteryBlock
-		if err := json.Unmarshal(raw, &block); err == nil && block.PackageSerialNumber != "" {
+		if unmarshalErr := json.Unmarshal(raw, &block); unmarshalErr == nil && block.PackageSerialNumber != "" {
 			res[block.PackageSerialNumber] = block
 		}
 	}
@@ -835,8 +843,8 @@ func (p *Powerwall) BatteryBlocks() map[string]models.BatteryBlock {
 }
 
 // SystemStatus returns full system status.
-func (p *Powerwall) SystemStatus() (models.SystemStatus, error) {
-	raw := p.PollRaw("/api/system_status")
+func (p *Powerwall) SystemStatus(ctx context.Context) (models.SystemStatus, error) {
+	raw := p.PollRaw(ctx, "/api/system_status")
 	if len(raw) == 0 {
 		return models.SystemStatus{}, ErrNotFound
 	}
@@ -849,8 +857,8 @@ func (p *Powerwall) SystemStatus() (models.SystemStatus, error) {
 }
 
 // SOE returns state of energy percentage.
-func (p *Powerwall) SOE() (models.SOE, error) {
-	raw := p.PollRaw("/api/system_status/soe")
+func (p *Powerwall) SOE(ctx context.Context) (models.SOE, error) {
+	raw := p.PollRaw(ctx, "/api/system_status/soe")
 	if len(raw) == 0 {
 		return models.SOE{}, ErrNotFound
 	}
@@ -863,13 +871,13 @@ func (p *Powerwall) SOE() (models.SOE, error) {
 }
 
 // GridStatus returns grid status formatted according to outputType.
-func (p *Powerwall) GridStatus(outputType ...GridStatusOutput) any {
+func (p *Powerwall) GridStatus(ctx context.Context, outputType ...GridStatusOutput) any {
 	t := GridStatusString
 	if len(outputType) > 0 {
 		t = outputType[0]
 	}
 
-	resp, err := p.GridStatusResponse()
+	resp, err := p.GridStatusResponse(ctx)
 	if err != nil {
 		if t == GridStatusJSON {
 			return "{}"
@@ -899,8 +907,8 @@ func (p *Powerwall) GridStatus(outputType ...GridStatusOutput) any {
 }
 
 // GridStatusResponse returns strongly-typed grid status.
-func (p *Powerwall) GridStatusResponse() (models.GridStatusResponse, error) {
-	raw := p.PollRaw("/api/system_status/grid_status")
+func (p *Powerwall) GridStatusResponse(ctx context.Context) (models.GridStatusResponse, error) {
+	raw := p.PollRaw(ctx, "/api/system_status/grid_status")
 	if len(raw) == 0 {
 		return models.GridStatusResponse{}, ErrNotFound
 	}
@@ -913,8 +921,8 @@ func (p *Powerwall) GridStatusResponse() (models.GridStatusResponse, error) {
 }
 
 // Operation returns active mode and backup reserve percentage.
-func (p *Powerwall) Operation() (models.Operation, error) {
-	raw := p.PollRaw("/api/operation")
+func (p *Powerwall) Operation(ctx context.Context) (models.Operation, error) {
+	raw := p.PollRaw(ctx, "/api/operation")
 	if len(raw) == 0 {
 		return models.Operation{}, ErrNotFound
 	}
@@ -927,8 +935,8 @@ func (p *Powerwall) Operation() (models.Operation, error) {
 }
 
 // SiteInfo returns site configuration parameters.
-func (p *Powerwall) SiteInfo() (models.SiteInfo, error) {
-	raw := p.PollRaw("/api/site_info")
+func (p *Powerwall) SiteInfo(ctx context.Context) (models.SiteInfo, error) {
+	raw := p.PollRaw(ctx, "/api/site_info")
 	if len(raw) == 0 {
 		return models.SiteInfo{}, ErrNotFound
 	}
@@ -941,22 +949,22 @@ func (p *Powerwall) SiteInfo() (models.SiteInfo, error) {
 }
 
 // GetReserve returns current backup reserve percentage.
-func (p *Powerwall) GetReserve(scale ...bool) *float64 {
-	op, err := p.Operation()
+func (p *Powerwall) GetReserve(ctx context.Context, scale ...bool) *float64 {
+	op, err := p.Operation(ctx)
 	if err != nil {
 		return nil
 	}
 	val := op.BackupReservePercent
 	if len(scale) > 0 && scale[0] {
-		val = val * 100.0 / percentage100
+		val = calc.ScaleBatteryLevel(val)
 	}
 
 	return &val
 }
 
 // GetMode returns current real mode.
-func (p *Powerwall) GetMode() *string {
-	op, err := p.Operation()
+func (p *Powerwall) GetMode(ctx context.Context) *string {
+	op, err := p.Operation(ctx)
 	if err != nil || op.RealMode == "" {
 		return nil
 	}
@@ -965,19 +973,19 @@ func (p *Powerwall) GetMode() *string {
 }
 
 // SetReserve sets the battery reserve level (0-100).
-func (p *Powerwall) SetReserve(level float64) (models.Operation, error) {
-	return p.SetOperation(&level, nil)
+func (p *Powerwall) SetReserve(ctx context.Context, level float64) (models.Operation, error) {
+	return p.SetOperation(ctx, &level, nil)
 }
 
 // SetMode sets the battery operation mode.
-func (p *Powerwall) SetMode(mode string) (models.Operation, error) {
-	return p.SetOperation(nil, &mode)
+func (p *Powerwall) SetMode(ctx context.Context, mode string) (models.Operation, error) {
+	return p.SetOperation(ctx, nil, &mode)
 }
 
 // SetOperation sets battery reserve percentage and/or operation mode.
-func (p *Powerwall) SetOperation(level *float64, mode *string) (models.Operation, error) {
+func (p *Powerwall) SetOperation(ctx context.Context, level *float64, mode *string) (models.Operation, error) {
 	if level != nil && (*level < 0 || *level > 100) {
-		return models.Operation{}, fmt.Errorf("level must be between 0 and 100")
+		return models.Operation{}, backend.ErrReserveOutOfRange
 	}
 
 	payload := make(map[string]any)
@@ -989,13 +997,13 @@ func (p *Powerwall) SetOperation(level *float64, mode *string) (models.Operation
 	}
 
 	dinStr := ""
-	if d := p.Din(); d != nil {
+	if d := p.Din(ctx); d != nil {
 		dinStr = *d
 	}
 
-	res := p.Post("/api/operation", payload, dinStr)
+	res := p.Post(ctx, "/api/operation", payload, dinStr)
 	if res == nil {
-		return models.Operation{}, fmt.Errorf("failed to set operation")
+		return models.Operation{}, backend.ErrSetOperationFailed
 	}
 
 	result := models.Operation{}
@@ -1010,82 +1018,100 @@ func (p *Powerwall) SetOperation(level *float64, mode *string) (models.Operation
 }
 
 // GetTimeRemaining returns backup time remaining in hours.
-func (p *Powerwall) GetTimeRemaining() *float64 {
+func (p *Powerwall) GetTimeRemaining(ctx context.Context) *float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	switch p.mode {
 	case ModeLocal:
 		if p.local != nil {
-			t, _ := p.local.GetTimeRemaining()
+			t, _ := p.local.GetTimeRemaining(ctx)
+
 			return t
 		}
 	case ModeTEDAPI, ModeV1r:
 		if p.tedapi != nil {
-			t, _ := p.tedapi.GetTimeRemaining()
+			t, _ := p.tedapi.GetTimeRemaining(ctx)
+
 			return t
 		}
 	case ModeCloud:
 		if p.cloud != nil {
-			t, _ := p.cloud.GetTimeRemaining()
+			t, _ := p.cloud.GetTimeRemaining(ctx)
+
 			return t
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			t, _ := p.fleetapi.GetTimeRemaining()
+			t, _ := p.fleetapi.GetTimeRemaining(ctx)
+
 			return t
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	return nil
 }
 
 // SetGridCharging enables or disables grid charging.
-func (p *Powerwall) SetGridCharging(mode bool) (models.Operation, error) {
+func (p *Powerwall) SetGridCharging(ctx context.Context, mode bool) (models.Operation, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	switch p.mode {
 	case ModeCloud:
 		if p.cloud != nil {
-			_, err := p.cloud.SetGridCharging(mode)
+			_, err := p.cloud.SetGridCharging(ctx, mode)
+
 			return models.Operation{GridCharging: mode}, err
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			_, err := p.fleetapi.SetGridCharging(mode)
+			_, err := p.fleetapi.SetGridCharging(ctx, mode)
+
 			return models.Operation{GridCharging: mode}, err
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	return models.Operation{}, ErrUnsupported
 }
 
 // GetGridCharging returns the current grid charging setting.
-func (p *Powerwall) GetGridCharging() *bool {
+func (p *Powerwall) GetGridCharging(ctx context.Context) *bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	switch p.mode {
 	case ModeCloud:
 		if p.cloud != nil {
-			b, _ := p.cloud.GetGridCharging()
+			b, _ := p.cloud.GetGridCharging(ctx)
+
 			return b
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			b, _ := p.fleetapi.GetGridCharging()
+			b, _ := p.fleetapi.GetGridCharging(ctx)
+
 			return b
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	return nil
 }
 
 // SetGridExport sets grid export mode.
-func (p *Powerwall) SetGridExport(mode string) (models.Operation, error) {
+func (p *Powerwall) SetGridExport(ctx context.Context, mode string) (models.Operation, error) {
 	if mode != "battery_ok" && mode != "pv_only" && mode != "never" {
-		return models.Operation{}, fmt.Errorf("invalid mode: %s (must be battery_ok, pv_only, or never)", mode)
+		return models.Operation{}, fmt.Errorf(
+			"%w: %s (must be battery_ok, pv_only, or never)",
+			backend.ErrInvalidGridExportMode,
+			mode,
+		)
 	}
 
 	p.mu.RLock()
@@ -1094,42 +1120,50 @@ func (p *Powerwall) SetGridExport(mode string) (models.Operation, error) {
 	switch p.mode {
 	case ModeCloud:
 		if p.cloud != nil {
-			_, err := p.cloud.SetGridExport(mode)
+			_, err := p.cloud.SetGridExport(ctx, mode)
+
 			return models.Operation{GridExport: mode}, err
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			_, err := p.fleetapi.SetGridExport(mode)
+			_, err := p.fleetapi.SetGridExport(ctx, mode)
+
 			return models.Operation{GridExport: mode}, err
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	return models.Operation{}, ErrUnsupported
 }
 
 // GetGridExport returns current grid export mode.
-func (p *Powerwall) GetGridExport() *string {
+func (p *Powerwall) GetGridExport(ctx context.Context) *string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	switch p.mode {
 	case ModeCloud:
 		if p.cloud != nil {
-			s, _ := p.cloud.GetGridExport()
+			s, _ := p.cloud.GetGridExport(ctx)
+
 			return s
 		}
 	case ModeFleetAPI:
 		if p.fleetapi != nil {
-			s, _ := p.fleetapi.GetGridExport()
+			s, _ := p.fleetapi.GetGridExport(ctx)
+
 			return s
 		}
+	default:
+		// Remaining modes do not support this operation.
 	}
 
 	return nil
 }
 
 // ScheduleMaxBackup schedules a maximum backup event.
-func (p *Powerwall) ScheduleMaxBackup(durationSeconds ...int) (models.Operation, error) {
+func (p *Powerwall) ScheduleMaxBackup(ctx context.Context, durationSeconds ...int) (models.Operation, error) {
 	dur := defaultBackupDur
 	if len(durationSeconds) > 0 {
 		dur = durationSeconds[0]
@@ -1139,7 +1173,8 @@ func (p *Powerwall) ScheduleMaxBackup(durationSeconds ...int) (models.Operation,
 	defer p.mu.RUnlock()
 
 	if p.tedapi != nil {
-		_, err := p.tedapi.ScheduleMaxBackup(dur)
+		_, err := p.tedapi.ScheduleMaxBackup(ctx, dur)
+
 		return models.Operation{}, err
 	}
 
@@ -1147,12 +1182,13 @@ func (p *Powerwall) ScheduleMaxBackup(durationSeconds ...int) (models.Operation,
 }
 
 // CancelMaxBackup cancels a scheduled maximum backup event.
-func (p *Powerwall) CancelMaxBackup() (models.Operation, error) {
+func (p *Powerwall) CancelMaxBackup(ctx context.Context) (models.Operation, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if p.tedapi != nil {
-		_, err := p.tedapi.CancelMaxBackup()
+		_, err := p.tedapi.CancelMaxBackup(ctx)
+
 		return models.Operation{}, err
 	}
 
@@ -1160,19 +1196,19 @@ func (p *Powerwall) CancelMaxBackup() (models.Operation, error) {
 }
 
 // GetBackupEvents queries backup event history.
-func (p *Powerwall) GetBackupEvents() (map[string]any, error) {
+func (p *Powerwall) GetBackupEvents(ctx context.Context) (map[string]any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if p.tedapi != nil {
-		return p.tedapi.GetBackupEvents()
+		return p.tedapi.GetBackupEvents(ctx)
 	}
 
 	return nil, ErrUnsupported
 }
 
 // GoOffGrid disconnects system from the grid.
-func (p *Powerwall) GoOffGrid(confirm bool) (models.Operation, error) {
+func (p *Powerwall) GoOffGrid(ctx context.Context, confirm bool) (models.Operation, error) {
 	if !confirm {
 		return models.Operation{}, ErrOffGridConfirm
 	}
@@ -1181,7 +1217,8 @@ func (p *Powerwall) GoOffGrid(confirm bool) (models.Operation, error) {
 	defer p.mu.RUnlock()
 
 	if p.tedapi != nil {
-		_, err := p.tedapi.GoOffGrid()
+		_, err := p.tedapi.GoOffGrid(ctx)
+
 		return models.Operation{}, err
 	}
 
@@ -1189,12 +1226,13 @@ func (p *Powerwall) GoOffGrid(confirm bool) (models.Operation, error) {
 }
 
 // ReconnectGrid reconnects system to the grid.
-func (p *Powerwall) ReconnectGrid() (models.Operation, error) {
+func (p *Powerwall) ReconnectGrid(ctx context.Context) (models.Operation, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if p.tedapi != nil {
-		_, err := p.tedapi.ReconnectGrid()
+		_, err := p.tedapi.ReconnectGrid(ctx)
+
 		return models.Operation{}, err
 	}
 
@@ -1202,12 +1240,12 @@ func (p *Powerwall) ReconnectGrid() (models.Operation, error) {
 }
 
 // GetFileStoreConfig returns TEDAPI configuration if active.
-func (p *Powerwall) GetFileStoreConfig() (map[string]any, error) {
+func (p *Powerwall) GetFileStoreConfig(ctx context.Context) (map[string]any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if p.tedapi != nil {
-		return p.tedapi.GetConfig(), nil
+		return p.tedapi.GetConfig(ctx), nil
 	}
 
 	return nil, ErrUnsupported

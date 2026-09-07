@@ -41,8 +41,8 @@ type PyPowerwallCloud struct {
 	cache       *cache.ResponseCache
 	client      *http.Client
 	tokenData   map[string]any
-	pollAPIMap  map[string]func(force, recursive, raw bool) (any, error)
-	postAPIMap  map[string]func(payload any, din string, recursive, raw bool) (any, error)
+	pollAPIMap  map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap  map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
 	email       string
 	siteID      string
 	authPath    string
@@ -69,86 +69,95 @@ func New(email string, cacheTTL, timeout time.Duration, siteID, authPath string)
 }
 
 func (c *PyPowerwallCloud) initAPIMaps() {
-	c.pollAPIMap = map[string]func(force, recursive, raw bool) (any, error){
-		"/api/devices/vitals": func(_, _, _ bool) (any, error) {
+	c.pollAPIMap = map[string]func(ctx context.Context, force, recursive, raw bool) (any, error){
+		"/api/devices/vitals": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{}, nil
 		},
-		"/vitals": func(_, _, _ bool) (any, error) {
+		"/vitals": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{}, nil
 		},
-		"/api/meters/aggregates": func(force, _, _ bool) (any, error) {
-			return c.getAPIMetersAggregates(force)
+		"/api/meters/aggregates": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPIMetersAggregates(ctx, force)
 		},
-		"/api/operation": func(force, _, _ bool) (any, error) {
-			return c.getAPIOperation(force)
+		"/api/operation": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPIOperation(ctx, force)
 		},
-		"/api/site_info": func(force, _, _ bool) (any, error) {
-			return c.getAPISiteInfo(force)
+		"/api/site_info": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPISiteInfo(ctx, force)
 		},
-		"/api/site_info/site_name": func(force, _, _ bool) (any, error) {
-			return c.getAPISiteInfoSiteName(force)
+		"/api/site_info/site_name": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPISiteInfoSiteName(ctx, force)
 		},
-		"/api/status": func(force, _, _ bool) (any, error) {
-			return c.getAPIStatus(force)
+		"/api/status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPIStatus(ctx, force)
 		},
-		"/api/system_status": func(force, _, _ bool) (any, error) {
-			return c.getAPISystemStatus(force)
+		"/api/system_status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPISystemStatus(ctx, force)
 		},
-		"/api/system_status/grid_status": func(force, _, _ bool) (any, error) {
-			return c.getAPISystemStatusGridStatus(force)
+		"/api/system_status/grid_status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPISystemStatusGridStatus(ctx, force)
 		},
-		"/api/system_status/soe": func(force, _, _ bool) (any, error) {
-			return c.getAPISystemStatusSOE(force)
+		"/api/system_status/soe": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPISystemStatusSOE(ctx, force)
 		},
-		"/api/login/Basic": func(_, _, _ bool) (any, error) {
+		"/api/login/Basic": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{"token": "cloud_token"}, nil
 		},
-		"/api/logout": func(_, _, _ bool) (any, error) {
+		"/api/logout": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{"message": "logged out"}, nil
 		},
-		"/api/powerwalls": func(_, _, _ bool) (any, error) {
+		"/api/powerwalls": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockPowerwalls), nil
 		},
-		"/api/meters/site": func(_, _, _ bool) (any, error) {
+		"/api/meters/site": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockMetersSite), nil
 		},
-		"/api/meters": func(_, _, _ bool) (any, error) {
+		"/api/meters": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockMeters), nil
 		},
-		"/api/sitemaster": func(_, _, _ bool) (any, error) {
+		"/api/sitemaster": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSitemaster), nil
 		},
-		"/api/customer": func(_, _, _ bool) (any, error) {
+		"/api/customer": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockCustomer), nil
 		},
-		"/api/installer": func(_, _, _ bool) (any, error) {
+		"/api/installer": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockInstaller), nil
 		},
-		"/api/networks": func(_, _, _ bool) (any, error) {
+		"/api/networks": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockNetworks), nil
 		},
-		"/api/auth/toggle/supported": func(_, _, _ bool) (any, error) {
+		"/api/auth/toggle/supported": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockAuthToggle), nil
 		},
-		"/api/system/update/status": func(_, _, _ bool) (any, error) {
+		"/api/system/update/status": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockUpdate), nil
 		},
-		"/api/solars": func(_, _, _ bool) (any, error) {
+		"/api/solars": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSolars), nil
 		},
 	}
 
-	c.postAPIMap = map[string]func(payload any, din string, recursive, raw bool) (any, error){
+	c.postAPIMap = map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error){
 		"/api/operation": c.postAPIOperation,
 	}
 }
 
 // Authenticate connects to the Tesla Owner API using cached credentials.
-func (c *PyPowerwallCloud) Authenticate() error {
+// anyKey returns an arbitrary key from m, or the empty string when m is empty.
+func anyKey(m map[string]any) string {
+	for k := range m {
+		return k
+	}
+
+	return ""
+}
+
+func (c *PyPowerwallCloud) Authenticate(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	logger.LogDebug("Tesla cloud mode enabled")
+	logger.Load(ctx).DebugContext(ctx, "cloud mode enabled")
 	authFilePath := filepath.Join(c.authPath, AuthFile)
 	b, err := os.ReadFile(authFilePath)
 	if err != nil {
@@ -162,10 +171,8 @@ func (c *PyPowerwallCloud) Authenticate() error {
 
 	// Email key resolution
 	if c.email == "" || c.email == "nobody@nowhere.com" {
-		for k := range authData {
+		if k := anyKey(authData); k != "" {
 			c.email = k
-
-			break
 		}
 	}
 
@@ -185,7 +192,7 @@ func (c *PyPowerwallCloud) Authenticate() error {
 			c.siteID = strings.TrimSpace(string(sb))
 		} else {
 			// Query products
-			siteID, siteErr := c.findEnergySite()
+			siteID, siteErr := c.findEnergySite(ctx)
 			if siteErr != nil {
 				return siteErr
 			}
@@ -194,13 +201,13 @@ func (c *PyPowerwallCloud) Authenticate() error {
 		}
 	}
 
-	logger.LogDebug("Cloud mode connected (email: %s, site: %s)", c.email, c.siteID)
+	logger.Load(ctx).DebugContext(ctx, "cloud mode connected", "email", c.email, "site", c.siteID)
 
 	return nil
 }
 
-func (c *PyPowerwallCloud) findEnergySite() (string, error) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, TeslaOwnerURL+"/api/1/products", nil)
+func (c *PyPowerwallCloud) findEnergySite(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, TeslaOwnerURL+"/api/1/products", nil)
 	if err != nil {
 		return "", err
 	}
@@ -232,35 +239,35 @@ func (c *PyPowerwallCloud) findEnergySite() (string, error) {
 }
 
 // Close closes any open sessions.
-func (c *PyPowerwallCloud) Close() error {
+func (c *PyPowerwallCloud) Close(_ context.Context) error {
 	return nil
 }
 
 // Poll fetches an endpoint through dispatch or returns an unknown API error.
-func (c *PyPowerwallCloud) Poll(api string, force, recursive, raw bool) (any, error) {
+func (c *PyPowerwallCloud) Poll(ctx context.Context, api string, force, recursive, raw bool) (any, error) {
 	handler, ok := c.pollAPIMap[api]
 	if !ok {
-		logger.LogError(" -- cloud: Unknown API: %s", api)
+		logger.Load(ctx).ErrorContext(ctx, "unknown cloud poll endpoint", "api", api)
 
 		return map[string]string{"ERROR": "Unknown API: " + api}, nil
 	}
 
-	return handler(force, recursive, raw)
+	return handler(ctx, force, recursive, raw)
 }
 
 // Post sends a command to the cloud API.
-func (c *PyPowerwallCloud) Post(api string, payload any, _ string, _, _ bool) (any, error) {
+func (c *PyPowerwallCloud) Post(ctx context.Context, api string, payload any, _ string, _, _ bool) (any, error) {
 	handler, ok := c.postAPIMap[api]
 	if !ok {
-		logger.LogError(" -- cloud: Unknown POST API: %s", api)
+		logger.Load(ctx).ErrorContext(ctx, "unknown cloud post endpoint", "api", api)
 
 		return map[string]string{"ERROR": "Unknown API: " + api}, nil
 	}
 
-	return handler(payload, "", false, false)
+	return handler(ctx, payload, "", false, false)
 }
 
-func (c *PyPowerwallCloud) getSiteData(force bool) (map[string]any, error) {
+func (c *PyPowerwallCloud) getSiteData(ctx context.Context, force bool) (map[string]any, error) {
 	if !force {
 		if val, found, _ := c.cache.Get("SITE_DATA"); found {
 			if m, ok := val.(map[string]any); ok {
@@ -270,7 +277,7 @@ func (c *PyPowerwallCloud) getSiteData(force bool) (map[string]any, error) {
 	}
 
 	url := fmt.Sprintf("%s/api/1/energy_sites/%s/live_status", TeslaOwnerURL, c.siteID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +299,7 @@ func (c *PyPowerwallCloud) getSiteData(force bool) (map[string]any, error) {
 	return data, nil
 }
 
-func (c *PyPowerwallCloud) getSiteConfig(force bool) (map[string]any, error) {
+func (c *PyPowerwallCloud) getSiteConfig(ctx context.Context, force bool) (map[string]any, error) {
 	if !force {
 		if val, found, _ := c.cache.Get("SITE_CONFIG", siteConfigTTL); found {
 			if m, ok := val.(map[string]any); ok {
@@ -302,7 +309,7 @@ func (c *PyPowerwallCloud) getSiteConfig(force bool) (map[string]any, error) {
 	}
 
 	url := fmt.Sprintf("%s/api/1/energy_sites/%s/site_info", TeslaOwnerURL, c.siteID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -333,9 +340,9 @@ func updateInstantPower(stub map[string]any, key string, power any) {
 	}
 }
 
-func (c *PyPowerwallCloud) getAPIMetersAggregates(force bool) (any, error) {
+func (c *PyPowerwallCloud) getAPIMetersAggregates(ctx context.Context, force bool) (any, error) {
 	stub := stubs.MetersAggregatesStub()
-	data, _ := c.getSiteData(force)
+	data, _ := c.getSiteData(ctx, force)
 	if data == nil {
 		return stub, nil
 	}
@@ -353,8 +360,8 @@ func (c *PyPowerwallCloud) getAPIMetersAggregates(force bool) (any, error) {
 	return stub, nil
 }
 
-func (c *PyPowerwallCloud) getAPIOperation(force bool) (any, error) {
-	cfg, _ := c.getSiteConfig(force)
+func (c *PyPowerwallCloud) getAPIOperation(ctx context.Context, force bool) (any, error) {
+	cfg, _ := c.getSiteConfig(ctx, force)
 	mode := "self_consumption"
 	reserve := 20.0
 
@@ -375,15 +382,15 @@ func (c *PyPowerwallCloud) getAPIOperation(force bool) (any, error) {
 	}, nil
 }
 
-func (c *PyPowerwallCloud) postAPIOperation(payload any, _ string, _, _ bool) (any, error) {
-	logger.LogDebug("Cloud post operation: %v", payload)
+func (c *PyPowerwallCloud) postAPIOperation(ctx context.Context, payload any, _ string, _, _ bool) (any, error) {
+	logger.Load(ctx).DebugContext(ctx, "cloud post operation", "payload", payload)
 	c.cache.Invalidate("/api/operation")
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
-func (c *PyPowerwallCloud) getAPISiteInfo(force bool) (any, error) {
-	cfg, _ := c.getSiteConfig(force)
+func (c *PyPowerwallCloud) getAPISiteInfo(ctx context.Context, force bool) (any, error) {
+	cfg, _ := c.getSiteConfig(ctx, force)
 	siteName := "Powerwall"
 	tz := "America/Los_Angeles"
 	if cfg != nil {
@@ -401,12 +408,12 @@ func (c *PyPowerwallCloud) getAPISiteInfo(force bool) (any, error) {
 	}, nil
 }
 
-func (c *PyPowerwallCloud) getAPISiteInfoSiteName(force bool) (any, error) {
-	return c.getAPISiteInfo(force)
+func (c *PyPowerwallCloud) getAPISiteInfoSiteName(ctx context.Context, force bool) (any, error) {
+	return c.getAPISiteInfo(ctx, force)
 }
 
-func (c *PyPowerwallCloud) getAPIStatus(force bool) (any, error) {
-	cfg, _ := c.getSiteConfig(force)
+func (c *PyPowerwallCloud) getAPIStatus(ctx context.Context, force bool) (any, error) {
+	cfg, _ := c.getSiteConfig(ctx, force)
 	din := c.siteID
 	var version any = "23.28.2 27626f98"
 	if cfg != nil {
@@ -435,15 +442,15 @@ func (c *PyPowerwallCloud) getAPIStatus(force bool) (any, error) {
 	}, nil
 }
 
-func (c *PyPowerwallCloud) getAPISystemStatus(_ bool) (any, error) {
+func (c *PyPowerwallCloud) getAPISystemStatus(_ context.Context, _ bool) (any, error) {
 	stub := stubs.SystemStatusStub()
 	stub["battery_blocks"] = []any{}
 
 	return stub, nil
 }
 
-func (c *PyPowerwallCloud) getAPISystemStatusGridStatus(force bool) (any, error) {
-	data, _ := c.getSiteData(force)
+func (c *PyPowerwallCloud) getAPISystemStatusGridStatus(ctx context.Context, force bool) (any, error) {
+	data, _ := c.getSiteData(ctx, force)
 	statusStr := "SystemGridConnected"
 	if data != nil {
 		gridStatus := lookup.Lookup(data, "response", "grid_status")
@@ -459,8 +466,8 @@ func (c *PyPowerwallCloud) getAPISystemStatusGridStatus(force bool) (any, error)
 	}, nil
 }
 
-func (c *PyPowerwallCloud) getAPISystemStatusSOE(force bool) (any, error) {
-	data, _ := c.getSiteData(force)
+func (c *PyPowerwallCloud) getAPISystemStatusSOE(ctx context.Context, force bool) (any, error) {
+	data, _ := c.getSiteData(ctx, force)
 	pct := 100.0
 	if data != nil {
 		if p := lookup.Lookup(data, "response", "percentage_charged"); p != nil {
@@ -476,22 +483,22 @@ func (c *PyPowerwallCloud) getAPISystemStatusSOE(force bool) (any, error) {
 }
 
 // Vitals returns vitals data for the Powerwall system.
-func (c *PyPowerwallCloud) Vitals() (map[string]any, error) {
+func (c *PyPowerwallCloud) Vitals(_ context.Context) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
 // GetTimeRemaining returns the time remaining until Powerwall is depleted.
 // Invariant: get_time_remaining() when unknown returns 0.0 in cloud/fleetapi (DESIGN.md).
-func (c *PyPowerwallCloud) GetTimeRemaining() (*float64, error) {
+func (c *PyPowerwallCloud) GetTimeRemaining(_ context.Context) (*float64, error) {
 	zero := 0.0
 
 	return &zero, nil
 }
 
 // Power returns current aggregate power values across site, solar, battery, and load.
-func (c *PyPowerwallCloud) Power() (map[string]float64, error) {
+func (c *PyPowerwallCloud) Power(ctx context.Context) (map[string]float64, error) {
 	site, solar, battery, load := 0.0, 0.0, 0.0, 0.0
-	payload, err := c.Poll("/api/meters/aggregates", false, false, false)
+	payload, err := c.Poll(ctx, "/api/meters/aggregates", false, false, false)
 	if err == nil && payload != nil {
 		site = getFloat(lookup.Lookup(payload, "site", "instant_power"))
 		solar = getFloat(lookup.Lookup(payload, "solar", "instant_power"))
@@ -508,9 +515,9 @@ func (c *PyPowerwallCloud) Power() (map[string]float64, error) {
 }
 
 // FetchPower returns instant power or detailed sensor reading.
-func (c *PyPowerwallCloud) FetchPower(sensor string, verbose bool) (any, error) {
+func (c *PyPowerwallCloud) FetchPower(ctx context.Context, sensor string, verbose bool) (any, error) {
 	if verbose {
-		payload, err := c.Poll("/api/meters/aggregates", false, false, false)
+		payload, err := c.Poll(ctx, "/api/meters/aggregates", false, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -520,7 +527,7 @@ func (c *PyPowerwallCloud) FetchPower(sensor string, verbose bool) (any, error) 
 
 		return nil, backend.ErrNotFound
 	}
-	p, err := c.Power()
+	p, err := c.Power(ctx)
 	if err != nil {
 		return 0.0, err
 	}
@@ -529,15 +536,15 @@ func (c *PyPowerwallCloud) FetchPower(sensor string, verbose bool) (any, error) 
 }
 
 // SetGridCharging controls grid charging in cloud mode.
-func (c *PyPowerwallCloud) SetGridCharging(mode bool) (map[string]any, error) {
-	logger.LogDebug("SetGridCharging(%v)", mode)
+func (c *PyPowerwallCloud) SetGridCharging(ctx context.Context, mode bool) (map[string]any, error) {
+	logger.Load(ctx).DebugContext(ctx, "set grid charging", "mode", mode)
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
 // GetGridCharging returns current grid charging mode.
-func (c *PyPowerwallCloud) GetGridCharging() (*bool, error) {
-	cfg, err := c.getSiteConfig(false)
+func (c *PyPowerwallCloud) GetGridCharging(ctx context.Context) (*bool, error) {
+	cfg, err := c.getSiteConfig(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -553,15 +560,15 @@ func (c *PyPowerwallCloud) GetGridCharging() (*bool, error) {
 }
 
 // SetGridExport controls grid export setting.
-func (c *PyPowerwallCloud) SetGridExport(mode string) (map[string]any, error) {
-	logger.LogDebug("SetGridExport(%s)", mode)
+func (c *PyPowerwallCloud) SetGridExport(ctx context.Context, mode string) (map[string]any, error) {
+	logger.Load(ctx).DebugContext(ctx, "set grid export", "mode", mode)
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
 // GetGridExport returns current grid export mode.
-func (c *PyPowerwallCloud) GetGridExport() (*string, error) {
-	cfg, err := c.getSiteConfig(false)
+func (c *PyPowerwallCloud) GetGridExport(ctx context.Context) (*string, error) {
+	cfg, err := c.getSiteConfig(ctx, false)
 	if err != nil {
 		return nil, err
 	}

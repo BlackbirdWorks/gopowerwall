@@ -1,11 +1,13 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 
 	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 )
 
 var (
@@ -48,8 +50,14 @@ func (c *ConnectionFlags) resolveRSAKey() string {
 	return ""
 }
 
+// WithLogger returns a context carrying a logger configured from the command's
+// debug flag, so that every layer below logs at the requested verbosity.
+func (c *ConnectionFlags) WithLogger(ctx context.Context) context.Context {
+	return logger.Into(ctx, logger.New(os.Stderr, logger.LevelFor(c.Debug)))
+}
+
 // BuildPowerwall constructs a Powerwall client based on flags.
-func (c *ConnectionFlags) BuildPowerwall() (*gopowerwall.Powerwall, error) {
+func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*gopowerwall.Powerwall, error) {
 	var opts []gopowerwall.Option
 
 	if c.AuthPath != "" {
@@ -74,7 +82,7 @@ func (c *ConnectionFlags) BuildPowerwall() (*gopowerwall.Powerwall, error) {
 	}
 	opts = append(opts, modeOpts...)
 
-	return gopowerwall.New(opts...)
+	return gopowerwall.New(ctx, opts...)
 }
 
 func (c *ConnectionFlags) resolveModeOptions() ([]gopowerwall.Option, error) {

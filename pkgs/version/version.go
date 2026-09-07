@@ -18,10 +18,12 @@ const (
 	VersionPatch = 0
 )
 
-var (
-	VersionTuple = [3]int{VersionMajor, VersionMinor, VersionPatch}
-	versionRegex = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)*`)
-)
+var versionRegex = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)*`)
+
+// Tuple returns the library semantic version as a (major, minor, patch) tuple.
+func Tuple() [3]int {
+	return [3]int{VersionMajor, VersionMinor, VersionPatch}
+}
 
 // ParseVersion extracts semver digits from a firmware or gateway string and returns an integer.
 // Matches Python parse_version("1.2.3") -> 10203 (3 + 2*100 + 1*10000).

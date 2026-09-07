@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/blackbirdworks/gopowerwall"
-	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
 
@@ -24,12 +24,9 @@ type GetCmd struct {
 }
 
 // Run executes the get command.
-func (c *GetCmd) Run() error {
-	if c.Debug {
-		logger.SetDebug(true)
-	}
-
-	pw, err := c.BuildPowerwall()
+func (c *GetCmd) Run(cmdCtx *Context) error {
+	ctx := c.WithLogger(cmdCtx.Context)
+	pw, err := c.BuildPowerwall(ctx)
 	if err != nil {
 		return err
 	}
@@ -47,7 +44,7 @@ func (c *GetCmd) Run() error {
 		)
 	}
 
-	out := collectMetrics(pw)
+	out := collectMetrics(ctx, pw)
 
 	switch c.Format {
 	case "json":
@@ -59,23 +56,23 @@ func (c *GetCmd) Run() error {
 	}
 }
 
-func collectMetrics(pw *gopowerwall.Powerwall) map[string]any {
+func collectMetrics(ctx context.Context, pw *gopowerwall.Powerwall) map[string]any {
 	return map[string]any{
-		"site":             pw.SiteName(),
-		"site_id":          pw.SiteName(),
-		"din":              pw.Din(),
-		"firmware":         pw.Version(),
-		"mode":             pw.GetMode(),
-		"reserve":          pw.GetReserve(false),
-		"soc":              pw.Level(true),
-		"grid_status":      pw.GridStatus(gopowerwall.GridStatusString),
-		"grid":             pw.Grid(),
-		"home":             pw.Home(),
-		"battery":          pw.Battery(),
-		"solar":            pw.Solar(),
-		"grid_charging":    pw.GetGridCharging(),
-		"grid_export_mode": pw.GetGridExport(),
-		"time_remaining":   pw.GetTimeRemaining(),
+		"site":             pw.SiteName(ctx),
+		"site_id":          pw.SiteName(ctx),
+		"din":              pw.Din(ctx),
+		"firmware":         pw.Version(ctx),
+		"mode":             pw.GetMode(ctx),
+		"reserve":          pw.GetReserve(ctx, false),
+		"soc":              pw.Level(ctx, true),
+		"grid_status":      pw.GridStatus(ctx, gopowerwall.GridStatusString),
+		"grid":             pw.Grid(ctx),
+		"home":             pw.Home(ctx),
+		"battery":          pw.Battery(ctx),
+		"solar":            pw.Solar(ctx),
+		"grid_charging":    pw.GetGridCharging(ctx),
+		"grid_export_mode": pw.GetGridExport(ctx),
+		"time_remaining":   pw.GetTimeRemaining(ctx),
 	}
 }
 

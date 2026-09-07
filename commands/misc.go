@@ -11,7 +11,7 @@ import (
 type VersionCmd struct{}
 
 // Run executes the version command.
-func (c *VersionCmd) Run() error {
+func (c *VersionCmd) Run(_ *Context) error {
 	fmt.Fprintf(os.Stdout, "gopowerwall [%s]\n", version.Version)
 
 	return nil
@@ -28,7 +28,7 @@ type SetupCmd struct {
 }
 
 // Run executes the setup command.
-func (c *SetupCmd) Run() error {
+func (c *SetupCmd) Run(_ *Context) error {
 	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Setup Mode\n\n", version.Version)
 	fmt.Fprintln(os.Stdout, "To configure Cloud or FleetAPI credentials:")
 	fmt.Fprintln(os.Stdout, "  1. Run 'gopowerwall authtoken' to generate your Tesla OAuth tokens.")
@@ -44,7 +44,7 @@ type AuthTokenCmd struct {
 }
 
 // Run executes the authtoken command.
-func (c *AuthTokenCmd) Run() error {
+func (c *AuthTokenCmd) Run(_ *Context) error {
 	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Auth Token Helper\n\n", version.Version)
 	fmt.Fprintln(os.Stdout, "Authenticate via Tesla OAuth portal:")
 	fmt.Fprintln(os.Stdout, "Visit: https://auth.tesla.com/oauth2/v3/authorize")
@@ -59,7 +59,7 @@ type CloudCheckCmd struct {
 }
 
 // Run executes the cloudcheck command.
-func (c *CloudCheckCmd) Run() error {
+func (c *CloudCheckCmd) Run(_ *Context) error {
 	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Cloud Diagnostics\n\n", version.Version)
 	fmt.Fprintln(os.Stdout, "Checking network reachability to Tesla Auth and Owner APIs...")
 
@@ -75,7 +75,7 @@ type TedapiCmd struct {
 }
 
 // Run executes the tedapi command.
-func (c *TedapiCmd) Run() error {
+func (c *TedapiCmd) Run(_ *Context) error {
 	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - TEDAPI Test\n\n", version.Version)
 	fmt.Fprintf(os.Stdout, "Connecting to gateway %s...\n", c.Host)
 
@@ -86,7 +86,7 @@ func (c *TedapiCmd) Run() error {
 type RegisterCmd struct{}
 
 // Run executes the register command.
-func (c *RegisterCmd) Run() error {
+func (c *RegisterCmd) Run(_ *Context) error {
 	fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Fleet API Key Registration\n\n", version.Version)
 	fmt.Fprintln(os.Stdout, "Registering public RSA key for v1r LAN TEDAPI access...")
 

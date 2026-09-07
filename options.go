@@ -19,7 +19,7 @@ const (
 
 // Config holds all configuration parameters for a Powerwall instance.
 type Config struct {
-	Host             string
+	TEDAPIAuthMode   AuthMode
 	Password         string
 	Email            string
 	Timezone         string
@@ -27,14 +27,14 @@ type Config struct {
 	AuthPath         string
 	CacheFile        string
 	GwPwd            string
-	RSAKeyPath       string
 	WiFiHost         string
+	RSAKeyPath       string
+	Host             string
+	TEDAPIApiVersion TEDAPIApiVersion
+	AuthMode         AuthMode
 	PWCacheExpire    time.Duration
 	Timeout          time.Duration
 	PoolMaxSize      int
-	AuthMode         AuthMode
-	TEDAPIApiVersion TEDAPIApiVersion
-	TEDAPIAuthMode   AuthMode
 	CloudMode        bool
 	FleetAPI         bool
 	AutoSelect       bool
@@ -237,10 +237,10 @@ func ValidateConfig(c *Config) error {
 func checkDirWritable(dirpath, name string) error {
 	info, err := os.Stat(dirpath)
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dirpath, dirPerms); err != nil {
+		if mkdirErr := os.MkdirAll(dirpath, dirPerms); mkdirErr != nil {
 			return &InvalidConfigError{
 				Param:   name,
-				Message: fmt.Sprintf("unable to create %s directory '%s': %v", name, dirpath, err),
+				Message: fmt.Sprintf("unable to create %s directory '%s': %v", name, dirpath, mkdirErr),
 			}
 		}
 

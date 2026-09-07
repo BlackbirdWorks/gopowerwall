@@ -108,21 +108,21 @@ func (l *PyPowerwallLocal) SetTEDAPIClient(c *tedapi.PyPowerwallTEDAPI, isPW3 bo
 }
 
 // Authenticate attempts to load cached credentials or log in to the gateway.
-func (l *PyPowerwallLocal) Authenticate() error {
+func (l *PyPowerwallLocal) Authenticate(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	logger.LogDebug("Tesla local mode enabled")
+	logger.Load(ctx).DebugContext(ctx, "local mode enabled")
 
 	// Try loading cached auth session
 	if l.loadAuthCache() {
-		logger.LogDebug("loaded auth from cache file %s (%s authmode)", l.cachefile, l.authmode)
+		logger.Load(ctx).DebugContext(ctx, "loaded auth from cache", "file", l.cachefile, "authmode", l.authmode)
 
 		return nil
 	}
 
 	// Login and create a new session
-	return l.loginLocked()
+	return l.loginLocked(ctx)
 }
 
 func (l *PyPowerwallLocal) loadTokenCache(data map[string]string) bool {
@@ -177,7 +177,7 @@ func (l *PyPowerwallLocal) loadAuthCache() bool {
 	return l.loadCookieCache(data)
 }
 
-func (l *PyPowerwallLocal) loginLocked() error {
+func (l *PyPowerwallLocal) loginLocked(ctx context.Context) error {
 	url := fmt.Sprintf("https://%s/api/login/Basic", l.host)
 	payload := map[string]any{
 		"username": "customer",
@@ -189,7 +189,7 @@ func (l *PyPowerwallLocal) loginLocked() error {
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -197,13 +197,13 @@ func (l *PyPowerwallLocal) loginLocked() error {
 
 	resp, err := l.client.Do(req)
 	if err != nil {
-		logger.LogError("Unable to connect to Powerwall at https://%s: %v", l.host, err)
+		logger.Load(ctx).ErrorContext(ctx, "unable to connect to Powerwall", "host", l.host, "error", err)
 
 		return err
 	}
 	defer resp.Body.Close()
 
-	logger.LogDebug("login - HTTP %d", resp.StatusCode)
+	logger.Load(ctx).DebugContext(ctx, "login response", "status", resp.StatusCode)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("%w: invalid password for %s", backend.ErrLogin, l.host)
 	}
@@ -222,7 +222,7 @@ func (l *PyPowerwallLocal) loginLocked() error {
 		}
 		if unmarshalErr := json.Unmarshal(respBody, &res); unmarshalErr == nil && res.Token != "" {
 			l.authToken = res.Token
-			l.saveAuthCache(map[string]string{
+			l.saveAuthCache(ctx, map[string]string{
 				headerAuth: headerBearer + res.Token,
 			})
 
@@ -245,7 +245,7 @@ func (l *PyPowerwallLocal) loginLocked() error {
 			{Name: cookieAuth, Value: authCookie, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode},
 			{Name: cookieUser, Value: userRecord, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode},
 		}
-		l.saveAuthCache(map[string]string{
+		l.saveAuthCache(ctx, map[string]string{
 			cookieAuth: authCookie,
 			cookieUser: userRecord,
 		})
@@ -256,13 +256,13 @@ func (l *PyPowerwallLocal) loginLocked() error {
 	return fmt.Errorf("%w: missing auth tokens/cookies in login response", backend.ErrLogin)
 }
 
-func (l *PyPowerwallLocal) saveAuthCache(data map[string]string) {
+func (l *PyPowerwallLocal) saveAuthCache(ctx context.Context, data map[string]string) {
 	if l.cachefile == "" {
 		return
 	}
 	f, err := os.OpenFile(l.cachefile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, filePerm)
 	if err != nil {
-		logger.LogDebug("unable to cache auth session: %v", err)
+		logger.Load(ctx).DebugContext(ctx, "unable to cache auth session", "error", err)
 
 		return
 	}
@@ -271,12 +271,12 @@ func (l *PyPowerwallLocal) saveAuthCache(data map[string]string) {
 }
 
 // Close logs out and releases connections.
-func (l *PyPowerwallLocal) Close() error {
+func (l *PyPowerwallLocal) Close(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	url := fmt.Sprintf("https://%s/api/logout", l.host)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err == nil {
 		l.applyAuth(req)
 		resp, doErr := l.client.Do(req)
@@ -288,7 +288,7 @@ func (l *PyPowerwallLocal) Close() error {
 	l.authCookies = nil
 	l.authToken = ""
 	if l.tedapiClient != nil {
-		_ = l.tedapiClient.Close()
+		_ = l.tedapiClient.Close(ctx)
 	}
 
 	return nil
@@ -305,13 +305,14 @@ func (l *PyPowerwallLocal) applyAuth(req *http.Request) {
 }
 
 func (l *PyPowerwallLocal) handleHTTPStatus(
+	ctx context.Context,
 	statusCode int,
 	api, url string,
 	force, recursive, raw bool,
 ) (any, bool, error) {
 	switch {
 	case statusCode == http.StatusNotFound:
-		logger.LogError("404 Powerwall API not found at %s", url)
+		logger.Load(ctx).ErrorContext(ctx, "Powerwall API not found", "url", url, "status", statusCode)
 		if api == "/api/devices/vitals" {
 			l.vitalsAPI = false
 		}
@@ -319,24 +320,26 @@ func (l *PyPowerwallLocal) handleHTTPStatus(
 
 		return nil, true, backend.ErrNotFound
 	case statusCode == http.StatusTooManyRequests:
-		logger.LogError("429 Rate limited by Powerwall API at %s - Activating 5 minute cooldown", url)
+		logger.Load(ctx).ErrorContext(ctx, "rate limited by Powerwall API, activating cooldown",
+			"url", url, "status", statusCode, "cooldown", cooldownTTL)
 		l.cache.SetCooldown(cooldownTTL)
 
 		return nil, true, backend.ErrRateLimited
 	case statusCode == http.StatusServiceUnavailable:
-		logger.LogError("503 Service Unavailable at %s - Activating 5 minute API cooldown", url)
+		logger.Load(ctx).ErrorContext(ctx, "Powerwall API unavailable, activating cooldown",
+			"url", url, "status", statusCode, "cooldown", cooldownTTL)
 		l.cache.SetCooldown(cooldownTTL)
 		l.cache.SetNegative(api, cooldownTTL)
 
 		return nil, true, backend.ErrRateLimited
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		if !recursive {
-			logger.LogDebug("Session Expired - Trying to get a new one")
+			logger.Load(ctx).DebugContext(ctx, "session expired, requesting a new one")
 			l.mu.Lock()
-			loginErr := l.loginLocked()
+			loginErr := l.loginLocked(ctx)
 			l.mu.Unlock()
 			if loginErr == nil {
-				res, pollErr := l.Poll(api, force, true, raw)
+				res, pollErr := l.Poll(ctx, api, force, true, raw)
 
 				return res, true, pollErr
 			}
@@ -345,7 +348,7 @@ func (l *PyPowerwallLocal) handleHTTPStatus(
 
 		return nil, true, backend.ErrLogin
 	case statusCode >= http.StatusBadRequest:
-		logger.LogError("HTTP response code %d at %s", statusCode, url)
+		logger.Load(ctx).ErrorContext(ctx, "unexpected HTTP response", "status", statusCode, "url", url)
 
 		return nil, true, fmt.Errorf("%w: HTTP %d", backend.ErrUnexpectedStatus, statusCode)
 	default:
@@ -354,23 +357,23 @@ func (l *PyPowerwallLocal) handleHTTPStatus(
 }
 
 // Poll queries the Powerwall Gateway API and caches the response.
-func (l *PyPowerwallLocal) Poll(api string, force, recursive, raw bool) (any, error) {
+func (l *PyPowerwallLocal) Poll(ctx context.Context, api string, force, recursive, raw bool) (any, error) {
 	if !force {
 		val, found, isNegative := l.cache.Get(api)
 		if found {
 			if isNegative {
-				logger.LogDebug(" -- local: Returning cached error (None) for %s", api)
+				logger.Load(ctx).DebugContext(ctx, "returning cached negative result", "api", api)
 
 				return nil, backend.ErrNotFound
 			}
-			logger.LogDebug(" -- local: Returning cached %s", api)
+			logger.Load(ctx).DebugContext(ctx, "returning cached result", "api", api)
 
 			return val, nil
 		}
 	}
 
 	if l.cache.InCooldown() {
-		logger.LogDebug("Rate limit cooldown period - Pausing API calls")
+		logger.Load(ctx).DebugContext(ctx, "rate limit cooldown active, pausing API calls")
 
 		return nil, backend.ErrRateLimited
 	}
@@ -383,9 +386,9 @@ func (l *PyPowerwallLocal) Poll(api string, force, recursive, raw bool) (any, er
 	}
 
 	url := fmt.Sprintf("https://%s%s", l.host, api)
-	logger.LogDebug(" -- local: Request Powerwall for %s", api)
+	logger.Load(ctx).DebugContext(ctx, "requesting Powerwall API", "api", api)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -393,13 +396,13 @@ func (l *PyPowerwallLocal) Poll(api string, force, recursive, raw bool) (any, er
 
 	resp, err := l.client.Do(req)
 	if err != nil {
-		logger.LogError("Error connecting to Powerwall at %s: %v", url, err)
+		logger.Load(ctx).ErrorContext(ctx, "error connecting to Powerwall", "url", url, "error", err)
 
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if res, handled, statusErr := l.handleHTTPStatus(resp.StatusCode, api, url, force, recursive, raw); handled {
+	if res, handled, statusErr := l.handleHTTPStatus(ctx, resp.StatusCode, api, url, force, recursive, raw); handled {
 		return res, statusErr
 	}
 
@@ -430,7 +433,13 @@ func (l *PyPowerwallLocal) Poll(api string, force, recursive, raw bool) (any, er
 }
 
 // Post sends a command to the Powerwall Gateway.
-func (l *PyPowerwallLocal) Post(api string, payload any, din string, recursive, raw bool) (any, error) {
+func (l *PyPowerwallLocal) Post(
+	ctx context.Context,
+	api string,
+	payload any,
+	din string,
+	recursive, raw bool,
+) (any, error) {
 	url := fmt.Sprintf("https://%s%s", l.host, api)
 
 	var reqBody io.Reader
@@ -442,7 +451,7 @@ func (l *PyPowerwallLocal) Post(api string, payload any, din string, recursive, 
 		reqBody = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, reqBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reqBody)
 	if err != nil {
 		return nil, err
 	}
@@ -451,7 +460,7 @@ func (l *PyPowerwallLocal) Post(api string, payload any, din string, recursive, 
 
 	resp, err := l.client.Do(req)
 	if err != nil {
-		logger.LogError("Error connecting to Powerwall at %s: %v", url, err)
+		logger.Load(ctx).ErrorContext(ctx, "error connecting to Powerwall", "url", url, "error", err)
 
 		return nil, err
 	}
@@ -459,10 +468,10 @@ func (l *PyPowerwallLocal) Post(api string, payload any, din string, recursive, 
 
 	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && !recursive {
 		l.mu.Lock()
-		loginErr := l.loginLocked()
+		loginErr := l.loginLocked(ctx)
 		l.mu.Unlock()
 		if loginErr == nil {
-			return l.Post(api, payload, din, true, raw)
+			return l.Post(ctx, api, payload, din, true, raw)
 		}
 	}
 
@@ -564,16 +573,16 @@ func extractDeviceVitals(devMap map[string]any, vitals []*teslapower.DeviceVital
 }
 
 // Vitals decodes device vitals via TEDAPI (hybrid) or protobuf /api/devices/vitals.
-func (l *PyPowerwallLocal) Vitals() (map[string]any, error) {
+func (l *PyPowerwallLocal) Vitals(ctx context.Context) (map[string]any, error) {
 	l.mu.Lock()
 	tedapi := l.tedapiClient
 	l.mu.Unlock()
 
 	if tedapi != nil {
-		return tedapi.Vitals()
+		return tedapi.Vitals(ctx)
 	}
 
-	raw, err := l.Poll("/api/devices/vitals", false, false, true)
+	raw, err := l.Poll(ctx, "/api/devices/vitals", false, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +597,7 @@ func (l *PyPowerwallLocal) Vitals() (map[string]any, error) {
 
 	var pb teslapower.DevicesWithVitals
 	if unmarshalErr := proto.Unmarshal(data, &pb); unmarshalErr != nil {
-		logger.LogError("Failed to decode DevicesWithVitals protobuf: %v", unmarshalErr)
+		logger.Load(ctx).ErrorContext(ctx, "failed to decode DevicesWithVitals protobuf", "error", unmarshalErr)
 
 		return nil, unmarshalErr
 	}
@@ -626,8 +635,8 @@ func (l *PyPowerwallLocal) Vitals() (map[string]any, error) {
 }
 
 // GetTimeRemaining calculates backup time remaining based on nominal energy and load.
-func (l *PyPowerwallLocal) GetTimeRemaining() (*float64, error) {
-	d, err := l.Poll("/api/system_status", false, false, false)
+func (l *PyPowerwallLocal) GetTimeRemaining(ctx context.Context) (*float64, error) {
+	d, err := l.Poll(ctx, "/api/system_status", false, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -653,7 +662,7 @@ func (l *PyPowerwallLocal) GetTimeRemaining() (*float64, error) {
 		}
 	}
 
-	loadObj, _ := l.FetchPower("load", false)
+	loadObj, _ := l.FetchPower(ctx, "load", false)
 	if loadFloat, ok := loadObj.(float64); ok && loadFloat > 0 {
 		hours := remVal / loadFloat
 
@@ -664,9 +673,9 @@ func (l *PyPowerwallLocal) GetTimeRemaining() (*float64, error) {
 }
 
 // Power returns the instant power for site, solar, battery, load.
-func (l *PyPowerwallLocal) Power() (map[string]float64, error) {
+func (l *PyPowerwallLocal) Power(ctx context.Context) (map[string]float64, error) {
 	site, solar, battery, load := 0.0, 0.0, 0.0, 0.0
-	payload, err := l.Poll("/api/meters/aggregates", false, false, false)
+	payload, err := l.Poll(ctx, "/api/meters/aggregates", false, false, false)
 	if err == nil && payload != nil {
 		site = getInstantPower(lookup.Lookup(payload, "site"))
 		solar = getInstantPower(lookup.Lookup(payload, "solar"))
@@ -683,16 +692,16 @@ func (l *PyPowerwallLocal) Power() (map[string]float64, error) {
 }
 
 // FetchPower returns single sensor power or aggregate structure if verbose is true.
-func (l *PyPowerwallLocal) FetchPower(sensor string, verbose bool) (any, error) {
+func (l *PyPowerwallLocal) FetchPower(ctx context.Context, sensor string, verbose bool) (any, error) {
 	if verbose {
-		payload, err := l.Poll("/api/meters/aggregates", false, false, false)
+		payload, err := l.Poll(ctx, "/api/meters/aggregates", false, false, false)
 		if err == nil && payload != nil {
 			return lookup.Lookup(payload, sensor), nil
 		}
 
 		return nil, err
 	}
-	p, err := l.Power()
+	p, err := l.Power(ctx)
 	if err != nil {
 		return 0.0, err
 	}

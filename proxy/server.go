@@ -20,48 +20,59 @@ const (
 	defaultServerTimeout = 5 * time.Second
 )
 
-//nolint:gochecknoglobals // exported allowlist map for proxy routing
-var Allowlist = map[string]bool{
-	"/api/status":                     true,
-	"/api/site_info/site_name":        true,
-	"/api/meters/site":                true,
-	"/api/meters/solar":               true,
-	"/api/sitemaster":                 true,
-	"/api/powerwalls":                 true,
-	"/api/customer/registration":      true,
-	"/api/system_status":              true,
-	"/api/system_status/grid_status":  true,
-	"/api/system/update/status":       true,
-	"/api/site_info":                  true,
-	"/api/system_status/grid_faults":  true,
-	"/api/operation":                  true,
-	"/api/site_info/grid_codes":       true,
-	"/api/solars":                     true,
-	"/api/solars/brands":              true,
-	"/api/customer":                   true,
-	"/api/meters":                     true,
-	"/api/installer":                  true,
-	"/api/networks":                   true,
-	"/api/system/networks/conn_tests": true,
-	"/api/auth/toggle/supported":      true,
-	"/api/solar_powerwall":            true,
-	"/api/troubleshooting/problems":   true,
-	"/api/diagnostics":                true,
-	"/api/generators":                 true,
-	"/api/generators/actions":         true,
-	"/api/syncon/vitals":              true,
-	"/api/syncon/actions":             true,
-	"/api/inverters":                  true,
-	"/api/inverters/status":           true,
-	"/api/meters/readings":            true,
-	"/api/meters/status":              true,
-	"/api/powerwalls/status":          true,
-	"/api/system_status/soe":          true,
+// isAllowlisted reports whether the proxy forwards reqPath to the gateway.
+// A switch keeps the route set constant and allocation-free per request.
+func isAllowlisted(reqPath string) bool {
+	switch reqPath {
+	case "/api/status",
+		"/api/site_info/site_name",
+		"/api/meters/site",
+		"/api/meters/solar",
+		"/api/sitemaster",
+		"/api/powerwalls",
+		"/api/customer/registration",
+		"/api/system_status",
+		"/api/system_status/grid_status",
+		"/api/system/update/status",
+		"/api/site_info",
+		"/api/system_status/grid_faults",
+		"/api/operation",
+		"/api/site_info/grid_codes",
+		"/api/solars",
+		"/api/solars/brands",
+		"/api/customer",
+		"/api/meters",
+		"/api/installer",
+		"/api/networks",
+		"/api/system/networks/conn_tests",
+		"/api/auth/toggle/supported",
+		"/api/solar_powerwall",
+		"/api/troubleshooting/problems",
+		"/api/diagnostics",
+		"/api/generators",
+		"/api/generators/actions",
+		"/api/syncon/vitals",
+		"/api/syncon/actions",
+		"/api/inverters",
+		"/api/inverters/status",
+		"/api/meters/readings",
+		"/api/meters/status",
+		"/api/powerwalls/status",
+		"/api/system_status/soe":
+		return true
+	default:
+		return false
+	}
 }
 
-//nolint:gochecknoglobals // exported disabled map for proxy routing
-var Disabled = map[string]bool{
-	"/api/customer/registration": true,
+// isDisabled reports whether the proxy refuses reqPath outright.
+func isDisabled(reqPath string) bool {
+	switch reqPath {
+	case "/api/customer/registration":
+		return true
+	default:
+		return false
+	}
 }
 
 // Server is the HTTP proxy server for Powerwall.
@@ -85,7 +96,7 @@ type Server struct {
 }
 
 // NewServer creates a new Server instance.
-func NewServer(cfg Config, pw *gopowerwall.Powerwall) *Server {
+func NewServer(ctx context.Context, cfg Config, pw *gopowerwall.Powerwall) *Server {
 	if pw == nil {
 		authMode := gopowerwall.AuthMode(cfg.AuthMode)
 		if authMode == "" {
@@ -93,6 +104,7 @@ func NewServer(cfg Config, pw *gopowerwall.Powerwall) *Server {
 		}
 		var err error
 		pw, err = gopowerwall.New(
+			ctx,
 			gopowerwall.WithHost(cfg.Host),
 			gopowerwall.WithPassword(cfg.Password),
 			gopowerwall.WithEmail(cfg.Email),
@@ -104,7 +116,7 @@ func NewServer(cfg Config, pw *gopowerwall.Powerwall) *Server {
 			gopowerwall.WithTimeout(cfg.TimeoutDuration()),
 		)
 		if err != nil {
-			logger.LogError("Failed to initialize Powerwall client: %v", err)
+			logger.Load(ctx).ErrorContext(ctx, "failed to initialize Powerwall client", "error", err)
 		}
 	}
 
@@ -124,7 +136,7 @@ func NewServer(cfg Config, pw *gopowerwall.Powerwall) *Server {
 	}
 }
 
-func (s *Server) recordStats(uri string, isErr, isTimeout bool) {
+func (s *Server) recordStats(_ context.Context, uri string, isErr, isTimeout bool) {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	if isTimeout {
@@ -143,7 +155,7 @@ func (s *Server) recordStats(uri string, isErr, isTimeout bool) {
 	}
 }
 
-func (s *Server) safePWCall(endpoint string, fn func() (any, error)) (any, bool) {
+func (s *Server) safePWCall(_ context.Context, endpoint string, fn func() (any, error)) (any, bool) {
 	if s.Config.FailFastMode && s.Health.IsDegraded {
 		if val, ok, _ := s.DegradedCache.Get(endpoint); ok {
 			return val, true
@@ -174,14 +186,18 @@ func (s *Server) safePWCall(endpoint string, fn func() (any, error)) (any, bool)
 	return nil, false
 }
 
-func (s *Server) cachedRouteHandler(endpoint string, generator func() (string, error)) (string, bool) {
+func (s *Server) cachedRouteHandler(
+	ctx context.Context,
+	endpoint string,
+	generator func(context.Context) (string, error),
+) (string, bool) {
 	if s.Config.CacheExpire > 0 {
 		if val, ok := s.PerfCache.Get(endpoint); ok {
 			return val, true
 		}
 	}
 
-	val, err := generator()
+	val, err := generator(ctx)
 	if err != nil || val == "" {
 		if s.Config.GracefulDegradation {
 			if degVal, ok, _ := s.DegradedCache.Get(endpoint); ok {
@@ -201,12 +217,13 @@ func (s *Server) cachedRouteHandler(endpoint string, generator func() (string, e
 
 // ServeHTTP dispatches incoming HTTP requests to handlers.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	reqPath := r.URL.Path
 
 	// Security: Block path traversal
 	if strings.Contains(reqPath, "..") {
 		http.Error(w, `{"error": "Invalid Path"}`, http.StatusBadRequest)
-		s.recordStats(reqPath, true, false)
+		s.recordStats(ctx, reqPath, true, false)
 
 		return
 	}

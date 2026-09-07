@@ -29,6 +29,15 @@ var (
 
 	// ErrUnexpectedStatus indicates an unexpected HTTP response status code.
 	ErrUnexpectedStatus = backend.ErrUnexpectedStatus
+
+	// ErrReserveOutOfRange indicates a backup reserve level outside 0-100.
+	ErrReserveOutOfRange = backend.ErrReserveOutOfRange
+
+	// ErrSetOperationFailed indicates the gateway rejected an operation change.
+	ErrSetOperationFailed = backend.ErrSetOperationFailed
+
+	// ErrInvalidGridExportMode indicates an unrecognised grid export mode.
+	ErrInvalidGridExportMode = backend.ErrInvalidGridExportMode
 )
 
 type InvalidConfigError = backend.InvalidConfigError

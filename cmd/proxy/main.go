@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -17,7 +19,8 @@ const defaultProxyTimeout = 15 * time.Second
 
 func main() {
 	cfg := proxy.DefaultConfig()
-	srv := proxy.NewServer(cfg, nil)
+	ctx := logger.Into(context.Background(), logger.New(os.Stderr, logger.LevelFor(cfg.DebugMode)))
+	srv := proxy.NewServer(ctx, cfg, nil)
 
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
 	protocol := "HTTP"
@@ -37,6 +40,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 		Handler:           srv,
 		ReadHeaderTimeout: defaultProxyTimeout,
 		ReadTimeout:       defaultProxyTimeout,
@@ -49,7 +53,7 @@ func main() {
 		}
 		if err := server.ListenAndServeTLS("localhost.crt", "localhost.key"); err != nil &&
 			!errors.Is(err, http.ErrServerClosed) {
-			logger.LogError("HTTPS Server error: %v", err)
+			logger.Load(ctx).ErrorContext(ctx, "HTTPS server error", "error", err)
 			os.Exit(1)
 		}
 
@@ -57,7 +61,7 @@ func main() {
 	}
 
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.LogError("Server error: %v", err)
+		logger.Load(ctx).ErrorContext(ctx, "server error", "error", err)
 		os.Exit(1)
 	}
 }

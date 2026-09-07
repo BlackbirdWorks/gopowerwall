@@ -10,6 +10,7 @@ import (
 func TestPowerwallDisconnectedDegradation(t *testing.T) {
 	// Create disconnected powerwall (invalid host)
 	pw, err := gopowerwall.New(
+		t.Context(),
 		gopowerwall.WithHost("127.0.0.1:9"), // non-routable port
 		gopowerwall.WithPassword("test"),
 		gopowerwall.WithCloudMode(false),
@@ -24,61 +25,61 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 	}
 
 	// Facade methods must never panic and gracefully return nil or stub defaults
-	if p := pw.Poll("/api/status"); p != nil {
+	if p := pw.Poll(t.Context(), "/api/status"); p != nil {
 		t.Errorf("Expected Poll() = nil, got %v", p)
 	}
-	if v := pw.Level(); v != nil {
+	if v := pw.Level(t.Context()); v != nil {
 		t.Errorf("Expected Level() = nil, got %v", v)
 	}
-	if p := pw.Power(); p.Site != 0 || p.Battery != 0 {
+	if p := pw.Power(t.Context()); p.Site != 0 || p.Battery != 0 {
 		t.Errorf("Expected zero Power(), got %v", p)
 	}
-	if s := pw.Site(true); s != nil {
+	if s := pw.Site(t.Context(), true); s != nil {
 		t.Errorf("Expected Site(true) = nil, got %v", s)
 	}
-	if sol := pw.Solar(true); sol != nil {
+	if sol := pw.Solar(t.Context(), true); sol != nil {
 		t.Errorf("Expected Solar(true) = nil, got %v", sol)
 	}
-	if b := pw.Battery(true); b != nil {
+	if b := pw.Battery(t.Context(), true); b != nil {
 		t.Errorf("Expected Battery(true) = nil, got %v", b)
 	}
-	if l := pw.Load(true); l != nil {
+	if l := pw.Load(t.Context(), true); l != nil {
 		t.Errorf("Expected Load(true) = nil, got %v", l)
 	}
-	if g := pw.Grid(true); g != nil {
+	if g := pw.Grid(t.Context(), true); g != nil {
 		t.Errorf("Expected Grid(true) = nil, got %v", g)
 	}
-	if h := pw.Home(true); h != nil {
+	if h := pw.Home(t.Context(), true); h != nil {
 		t.Errorf("Expected Home(true) = nil, got %v", h)
 	}
-	if vit, err := pw.Vitals(); err == nil && len(vit.Devices) > 0 {
+	if vit, err := pw.Vitals(t.Context()); err == nil && len(vit.Devices) > 0 {
 		t.Errorf("Expected empty Vitals(), got %v", vit)
 	}
-	if str := pw.Strings(); len(str.Strings) > 0 {
+	if str := pw.Strings(t.Context()); len(str.Strings) > 0 {
 		t.Errorf("Expected empty Strings(), got %v", str)
 	}
-	if d := pw.Din(); d != nil {
+	if d := pw.Din(t.Context()); d != nil {
 		t.Errorf("Expected Din() = nil, got %v", d)
 	}
-	if u := pw.Uptime(); u != nil {
+	if u := pw.Uptime(t.Context()); u != nil {
 		t.Errorf("Expected Uptime() = nil, got %v", u)
 	}
-	if sn := pw.SiteName(); sn != nil {
+	if sn := pw.SiteName(t.Context()); sn != nil {
 		t.Errorf("Expected SiteName() = nil, got %v", sn)
 	}
-	if tm := pw.GetTimeRemaining(); tm != nil {
+	if tm := pw.GetTimeRemaining(t.Context()); tm != nil {
 		t.Errorf("Expected GetTimeRemaining() = nil, got %v", tm)
 	}
-	if r := pw.GetReserve(); r != nil {
+	if r := pw.GetReserve(t.Context()); r != nil {
 		t.Errorf("Expected GetReserve() = nil, got %v", r)
 	}
-	if m := pw.GetMode(); m != nil {
+	if m := pw.GetMode(t.Context()); m != nil {
 		t.Errorf("Expected GetMode() = nil, got %v", m)
 	}
-	if gc := pw.GetGridCharging(); gc != nil {
+	if gc := pw.GetGridCharging(t.Context()); gc != nil {
 		t.Errorf("Expected GetGridCharging() = nil, got %v", gc)
 	}
-	if ge := pw.GetGridExport(); ge != nil {
+	if ge := pw.GetGridExport(t.Context()); ge != nil {
 		t.Errorf("Expected GetGridExport() = nil, got %v", ge)
 	}
 }

@@ -20,7 +20,8 @@ type ProxyCmd struct {
 }
 
 // Run executes the proxy command.
-func (c *ProxyCmd) Run() error {
+func (c *ProxyCmd) Run(cmdCtx *Context) error {
+	ctx := c.WithLogger(cmdCtx.Context)
 	cfg := proxy.DefaultConfig()
 	if c.BindAddress != "" {
 		cfg.BindAddress = c.BindAddress
@@ -44,7 +45,7 @@ func (c *ProxyCmd) Run() error {
 		cfg.AuthPath = c.AuthPath
 	}
 
-	srv := proxy.NewServer(cfg, nil)
+	srv := proxy.NewServer(ctx, cfg, nil)
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
 	fmt.Fprintf(
 		os.Stdout,

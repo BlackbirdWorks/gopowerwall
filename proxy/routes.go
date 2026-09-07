@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,9 +25,9 @@ var (
 	errNoResponse   = errors.New("no response")
 )
 
-func (s *Server) generateAggregates() (string, error) {
-	raw, ok := s.safePWCall("/aggregates", func() (any, error) {
-		res := s.PW.Poll("/api/meters/aggregates")
+func (s *Server) generateAggregates(ctx context.Context) (string, error) {
+	raw, ok := s.safePWCall(ctx, "/aggregates", func() (any, error) {
+		res := s.PW.Poll(ctx, "/api/meters/aggregates")
 		if res == nil {
 			return nil, errNoData
 		}
@@ -47,15 +48,15 @@ func (s *Server) generateAggregates() (string, error) {
 		return "", errInvalidJSON
 	}
 
-	s.applySiteZeroThreshold(agg)
-	s.applyNegativeSolarCorrection(agg)
+	s.applySiteZeroThreshold(ctx, agg)
+	s.applyNegativeSolarCorrection(ctx, agg)
 
 	b, err := json.Marshal(agg)
 
 	return string(b), err
 }
 
-func (s *Server) applySiteZeroThreshold(agg map[string]any) {
+func (s *Server) applySiteZeroThreshold(_ context.Context, agg map[string]any) {
 	if s.Config.SiteZeroThreshold <= 0 {
 		return
 	}
@@ -70,7 +71,7 @@ func (s *Server) applySiteZeroThreshold(agg map[string]any) {
 	}
 }
 
-func (s *Server) applyNegativeSolarCorrection(agg map[string]any) {
+func (s *Server) applyNegativeSolarCorrection(_ context.Context, agg map[string]any) {
 	if s.Config.NegSolar {
 		return
 	}
@@ -91,7 +92,7 @@ func (s *Server) applyNegativeSolarCorrection(agg map[string]any) {
 	solar["instant_power"] = 0.0
 }
 
-func (s *Server) extractCSVMeters(rawAgg any) (float64, float64, float64, float64) {
+func (s *Server) extractCSVMeters(_ context.Context, rawAgg any) (float64, float64, float64, float64) {
 	agg, ok := rawAgg.(map[string]any)
 	if !ok {
 		return 0, 0, 0, 0
@@ -113,17 +114,21 @@ func (s *Server) extractCSVMeters(rawAgg any) (float64, float64, float64, float6
 	return extractVal("site"), extractVal("solar"), extractVal("battery"), extractVal("load")
 }
 
-func (s *Server) formatV2CSVRow(includeHeaders bool, grid, home, solar, battery, batLevel float64) string {
+func (s *Server) formatV2CSVRow(
+	ctx context.Context,
+	includeHeaders bool,
+	grid, home, solar, battery, batLevel float64,
+) string {
 	var sb strings.Builder
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel,GridStatus,Reserve\n")
 	}
 	gridStatus := 0
-	if s.PW.GridStatus(gopowerwall.GridStatusString) == "UP" {
+	if s.PW.GridStatus(ctx, gopowerwall.GridStatusString) == "UP" {
 		gridStatus = 1
 	}
 	reserve := 0.0
-	if r := s.PW.GetReserve(false); r != nil {
+	if r := s.PW.GetReserve(ctx, false); r != nil {
 		reserve = *r
 	}
 	fmt.Fprintf(&sb, "%0.2f,%0.2f,%0.2f,%0.2f,%0.2f,%d,%d\n",
@@ -132,7 +137,11 @@ func (s *Server) formatV2CSVRow(includeHeaders bool, grid, home, solar, battery,
 	return sb.String()
 }
 
-func (s *Server) formatV1CSVRow(includeHeaders bool, grid, home, solar, battery, batLevel float64) string {
+func (s *Server) formatV1CSVRow(
+	_ context.Context,
+	includeHeaders bool,
+	grid, home, solar, battery, batLevel float64,
+) string {
 	var sb strings.Builder
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel\n")
@@ -143,9 +152,9 @@ func (s *Server) formatV1CSVRow(includeHeaders bool, grid, home, solar, battery,
 	return sb.String()
 }
 
-func (s *Server) generateCSV(isV2, includeHeaders bool) (string, error) {
-	rawAgg, _ := s.safePWCall("/aggregates", func() (any, error) {
-		res := s.PW.Poll("/api/meters/aggregates")
+func (s *Server) generateCSV(ctx context.Context, isV2, includeHeaders bool) (string, error) {
+	rawAgg, _ := s.safePWCall(ctx, "/aggregates", func() (any, error) {
+		res := s.PW.Poll(ctx, "/api/meters/aggregates")
 		if res == nil {
 			return nil, errNoData
 		}
@@ -153,7 +162,7 @@ func (s *Server) generateCSV(isV2, includeHeaders bool) (string, error) {
 		return res, nil
 	})
 
-	grid, solar, battery, home := s.extractCSVMeters(rawAgg)
+	grid, solar, battery, home := s.extractCSVMeters(ctx, rawAgg)
 
 	if !s.Config.NegSolar && solar < 0 {
 		home -= solar
@@ -165,20 +174,20 @@ func (s *Server) generateCSV(isV2, includeHeaders bool) (string, error) {
 	}
 
 	batLevel := 0.0
-	if lvl := s.PW.Level(false); lvl != nil {
+	if lvl := s.PW.Level(ctx, false); lvl != nil {
 		batLevel = *lvl
 	}
 
 	if isV2 {
-		return s.formatV2CSVRow(includeHeaders, grid, home, solar, battery, batLevel), nil
+		return s.formatV2CSVRow(ctx, includeHeaders, grid, home, solar, battery, batLevel), nil
 	}
 
-	return s.formatV1CSVRow(includeHeaders, grid, home, solar, battery, batLevel), nil
+	return s.formatV1CSVRow(ctx, includeHeaders, grid, home, solar, battery, batLevel), nil
 }
 
-func (s *Server) generateFreq() (string, error) {
+func (s *Server) generateFreq(ctx context.Context) (string, error) {
 	fcv := make(map[string]any)
-	rawSys, _ := s.PW.SystemStatus()
+	rawSys, _ := s.PW.SystemStatus(ctx)
 	for idx, block := range rawSys.BatteryBlocks {
 		pNum := idx + 1
 		fcv[fmt.Sprintf("PW%d_name", pNum)] = nil
@@ -194,7 +203,7 @@ func (s *Server) generateFreq() (string, error) {
 		fcv[fmt.Sprintf("PW%d_i_out", pNum)] = block.IOut
 	}
 
-	rawVitals, _ := s.PW.Vitals()
+	rawVitals, _ := s.PW.Vitals(ctx)
 	invIdx := 1
 	for device, d := range rawVitals.Devices {
 		if strings.HasPrefix(device, "TEPINV") {
@@ -212,15 +221,15 @@ func (s *Server) generateFreq() (string, error) {
 			}
 		}
 	}
-	fcv["grid_status"] = s.PW.GridStatus(gopowerwall.GridStatusNumeric)
+	fcv["grid_status"] = s.PW.GridStatus(ctx, gopowerwall.GridStatusNumeric)
 	b, err := json.Marshal(fcv)
 
 	return string(b), err
 }
 
-func (s *Server) generatePOD() (string, error) {
+func (s *Server) generatePOD(ctx context.Context) (string, error) {
 	pod := make(map[string]any)
-	rawSys, _ := s.PW.SystemStatus()
+	rawSys, _ := s.PW.SystemStatus(ctx)
 	for idx, block := range rawSys.BatteryBlocks {
 		prefix := fmt.Sprintf("PW%d_", idx+1)
 		pod[prefix+"name"] = nil
@@ -256,15 +265,15 @@ func (s *Server) generatePOD() (string, error) {
 	}
 	pod["nominal_full_pack_energy"] = rawSys.NominalFullPackEnergy
 	pod["nominal_energy_remaining"] = rawSys.NominalEnergyRemaining
-	pod["time_remaining_hours"] = s.PW.GetTimeRemaining()
-	pod["backup_reserve_percent"] = s.PW.GetReserve(false)
+	pod["time_remaining_hours"] = s.PW.GetTimeRemaining(ctx)
+	pod["backup_reserve_percent"] = s.PW.GetReserve(ctx, false)
 	b, err := json.Marshal(pod)
 
 	return string(b), err
 }
 
-func (s *Server) generateJSON() (string, error) {
-	pwr := s.PW.Power()
+func (s *Server) generateJSON(ctx context.Context) (string, error) {
+	pwr := s.PW.Power(ctx)
 	grid := pwr.Grid
 	solar := pwr.Solar
 	battery := pwr.Battery
@@ -280,26 +289,26 @@ func (s *Server) generateJSON() (string, error) {
 	}
 
 	batLevel := 0.0
-	if lvl := s.PW.Level(false); lvl != nil {
+	if lvl := s.PW.Level(ctx, false); lvl != nil {
 		batLevel = *lvl
 	}
 	gridStatus := 0
-	if s.PW.GridStatus(gopowerwall.GridStatusString) == "UP" {
+	if s.PW.GridStatus(ctx, gopowerwall.GridStatusString) == "UP" {
 		gridStatus = 1
 	}
 	reserve := 0.0
-	if r := s.PW.GetReserve(false); r != nil {
+	if r := s.PW.GetReserve(ctx, false); r != nil {
 		reserve = *r
 	}
 	timeRemaining := 0.0
-	if tr := s.PW.GetTimeRemaining(); tr != nil {
+	if tr := s.PW.GetTimeRemaining(ctx); tr != nil {
 		timeRemaining = *tr
 	}
 
-	rawSys, _ := s.PW.SystemStatus()
+	rawSys, _ := s.PW.SystemStatus(ctx)
 	fullEnergy := rawSys.NominalFullPackEnergy
 	energyRemaining := rawSys.NominalEnergyRemaining
-	rawStrings := s.PW.Strings(false)
+	rawStrings := s.PW.Strings(ctx, false)
 
 	out := map[string]any{
 		"grid":                 grid,
@@ -319,17 +328,17 @@ func (s *Server) generateJSON() (string, error) {
 	return string(b), err
 }
 
-func (s *Server) handleCoreAPIRoutes(w http.ResponseWriter, reqPath string) bool {
+func (s *Server) handleCoreAPIRoutes(ctx context.Context, w http.ResponseWriter, reqPath string) bool {
 	switch reqPath {
 	case "/aggregates", "/api/meters/aggregates":
-		msg, ok := s.cachedRouteHandler("/aggregates", s.generateAggregates)
-		s.respond(w, reqPath, "application/json", msg, ok)
+		msg, ok := s.cachedRouteHandler(ctx, "/aggregates", s.generateAggregates)
+		s.respond(ctx, w, reqPath, "application/json", msg, ok)
 
 		return true
 
 	case "/soe":
-		raw, ok := s.safePWCall("/soe", func() (any, error) {
-			str := s.PW.PollJSON("/api/system_status/soe")
+		raw, ok := s.safePWCall(ctx, "/soe", func() (any, error) {
+			str := s.PW.PollJSON(ctx, "/api/system_status/soe")
 			if str == "" {
 				return nil, errNoSOE
 			}
@@ -337,13 +346,13 @@ func (s *Server) handleCoreAPIRoutes(w http.ResponseWriter, reqPath string) bool
 			return str, nil
 		})
 		str, _ := raw.(string)
-		s.respond(w, reqPath, "application/json", str, ok && str != "")
+		s.respond(ctx, w, reqPath, "application/json", str, ok && str != "")
 
 		return true
 
 	case "/api/system_status/soe":
-		raw, ok := s.safePWCall("/api/system_status/soe", func() (any, error) {
-			lvl := s.PW.Level(true)
+		raw, ok := s.safePWCall(ctx, "/api/system_status/soe", func() (any, error) {
+			lvl := s.PW.Level(ctx, true)
 			if lvl == nil {
 				return nil, errNoLevel
 			}
@@ -351,13 +360,13 @@ func (s *Server) handleCoreAPIRoutes(w http.ResponseWriter, reqPath string) bool
 			return fmt.Sprintf(`{"percentage": %v}`, *lvl), nil
 		})
 		str, _ := raw.(string)
-		s.respond(w, reqPath, "application/json", str, ok && str != "")
+		s.respond(ctx, w, reqPath, "application/json", str, ok && str != "")
 
 		return true
 
 	case "/api/system_status/grid_status":
-		raw, ok := s.safePWCall("/api/system_status/grid_status", func() (any, error) {
-			str := s.PW.PollJSON("/api/system_status/grid_status")
+		raw, ok := s.safePWCall(ctx, "/api/system_status/grid_status", func() (any, error) {
+			str := s.PW.PollJSON(ctx, "/api/system_status/grid_status")
 			if str == "" {
 				return nil, errNoGridStatus
 			}
@@ -365,7 +374,7 @@ func (s *Server) handleCoreAPIRoutes(w http.ResponseWriter, reqPath string) bool
 			return str, nil
 		})
 		str, _ := raw.(string)
-		s.respond(w, reqPath, "application/json", str, ok && str != "")
+		s.respond(ctx, w, reqPath, "application/json", str, ok && str != "")
 
 		return true
 
@@ -374,23 +383,23 @@ func (s *Server) handleCoreAPIRoutes(w http.ResponseWriter, reqPath string) bool
 	}
 }
 
-func (s *Server) handleMetricsJSONRoutes(w http.ResponseWriter, reqPath string) bool {
+func (s *Server) handleMetricsJSONRoutes(ctx context.Context, w http.ResponseWriter, reqPath string) bool {
 	switch reqPath {
 	case "/freq":
-		msg, ok := s.cachedRouteHandler("/freq", s.generateFreq)
-		s.respond(w, reqPath, "application/json", msg, ok)
+		msg, ok := s.cachedRouteHandler(ctx, "/freq", s.generateFreq)
+		s.respond(ctx, w, reqPath, "application/json", msg, ok)
 
 		return true
 
 	case "/pod":
-		msg, ok := s.cachedRouteHandler("/pod", s.generatePOD)
-		s.respond(w, reqPath, "application/json", msg, ok)
+		msg, ok := s.cachedRouteHandler(ctx, "/pod", s.generatePOD)
+		s.respond(ctx, w, reqPath, "application/json", msg, ok)
 
 		return true
 
 	case "/json":
-		msg, ok := s.cachedRouteHandler("/json", s.generateJSON)
-		s.respond(w, reqPath, "application/json", msg, ok)
+		msg, ok := s.cachedRouteHandler(ctx, "/json", s.generateJSON)
+		s.respond(ctx, w, reqPath, "application/json", msg, ok)
 
 		return true
 
@@ -399,10 +408,10 @@ func (s *Server) handleMetricsJSONRoutes(w http.ResponseWriter, reqPath string) 
 	}
 }
 
-func (s *Server) handleVitals(w http.ResponseWriter, reqPath string) {
-	msg, ok := s.cachedRouteHandler("/vitals", func() (string, error) {
-		raw, _ := s.safePWCall("/vitals", func() (any, error) {
-			v, err := s.PW.Vitals()
+func (s *Server) handleVitals(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	msg, ok := s.cachedRouteHandler(ctx, "/vitals", func(ctx context.Context) (string, error) {
+		raw, _ := s.safePWCall(ctx, "/vitals", func() (any, error) {
+			v, err := s.PW.Vitals(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -419,13 +428,13 @@ func (s *Server) handleVitals(w http.ResponseWriter, reqPath string) {
 
 		return "", errNoVitals
 	})
-	s.respond(w, reqPath, "application/json", msg, ok)
+	s.respond(ctx, w, reqPath, "application/json", msg, ok)
 }
 
-func (s *Server) handleStrings(w http.ResponseWriter, reqPath string) {
-	msg, ok := s.cachedRouteHandler("/strings", func() (string, error) {
-		raw, _ := s.safePWCall("/strings", func() (any, error) {
-			v := s.PW.Strings(true)
+func (s *Server) handleStrings(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	msg, ok := s.cachedRouteHandler(ctx, "/strings", func(ctx context.Context) (string, error) {
+		raw, _ := s.safePWCall(ctx, "/strings", func() (any, error) {
+			v := s.PW.Strings(ctx, true)
 			b, err := json.Marshal(v)
 			if err != nil {
 				return nil, err
@@ -439,44 +448,44 @@ func (s *Server) handleStrings(w http.ResponseWriter, reqPath string) {
 
 		return "", errNoStrings
 	})
-	s.respond(w, reqPath, "application/json", msg, ok)
+	s.respond(ctx, w, reqPath, "application/json", msg, ok)
 }
 
-func (s *Server) handleMetricsStatusRoutes(w http.ResponseWriter, reqPath string) bool {
+func (s *Server) handleMetricsStatusRoutes(ctx context.Context, w http.ResponseWriter, reqPath string) bool {
 	switch reqPath {
 	case "/vitals":
-		s.handleVitals(w, reqPath)
+		s.handleVitals(ctx, w, reqPath)
 
 		return true
 
 	case "/strings":
-		s.handleStrings(w, reqPath)
+		s.handleStrings(ctx, w, reqPath)
 
 		return true
 
 	case "/temps":
-		raw := s.PW.Temps()
+		raw := s.PW.Temps(ctx)
 		b, _ := json.Marshal(raw)
-		s.respond(w, reqPath, "application/json", string(b), true)
+		s.respond(ctx, w, reqPath, "application/json", string(b), true)
 
 		return true
 
 	case "/temps/pw":
-		msg, ok := s.cachedRouteHandler("/temps/pw", s.generatePWTemps)
-		s.respond(w, reqPath, "application/json", msg, ok)
+		msg, ok := s.cachedRouteHandler(ctx, "/temps/pw", s.generatePWTemps)
+		s.respond(ctx, w, reqPath, "application/json", msg, ok)
 
 		return true
 
 	case "/alerts":
-		raw := s.PW.Alerts()
+		raw := s.PW.Alerts(ctx)
 		b, _ := json.Marshal(raw)
-		s.respond(w, reqPath, "application/json", string(b), true)
+		s.respond(ctx, w, reqPath, "application/json", string(b), true)
 
 		return true
 
 	case "/alerts/pw":
-		msg, ok := s.cachedRouteHandler("/alerts/pw", s.generatePWAlerts)
-		s.respond(w, reqPath, "application/json", msg, ok)
+		msg, ok := s.cachedRouteHandler(ctx, "/alerts/pw", s.generatePWAlerts)
+		s.respond(ctx, w, reqPath, "application/json", msg, ok)
 
 		return true
 
@@ -485,10 +494,10 @@ func (s *Server) handleMetricsStatusRoutes(w http.ResponseWriter, reqPath string
 	}
 }
 
-func (s *Server) handleSystemManagementRoutes(w http.ResponseWriter, reqPath string) bool {
+func (s *Server) handleSystemManagementRoutes(ctx context.Context, w http.ResponseWriter, reqPath string) bool {
 	switch reqPath {
 	case "/stats":
-		s.handleStats(w)
+		s.handleStats(ctx, w)
 
 		return true
 
@@ -499,12 +508,12 @@ func (s *Server) handleSystemManagementRoutes(w http.ResponseWriter, reqPath str
 		s.statsURI = make(map[string]int)
 		s.ClearTime = time.Now()
 		s.statsMu.Unlock()
-		s.handleStats(w)
+		s.handleStats(ctx, w)
 
 		return true
 
 	case "/health":
-		s.handleHealth(w)
+		s.handleHealth(ctx, w)
 
 		return true
 
@@ -523,17 +532,17 @@ func (s *Server) handleSystemManagementRoutes(w http.ResponseWriter, reqPath str
 		return true
 
 	case "/version":
-		s.handleVersionRoute(w)
+		s.handleVersionRoute(ctx, w)
 
 		return true
 
 	case "/help":
-		s.handleHelp(w)
+		s.handleHelp(ctx, w)
 
 		return true
 
 	case "/api/troubleshooting/problems":
-		s.respond(w, reqPath, "application/json", `{"problems": []}`, true)
+		s.respond(ctx, w, reqPath, "application/json", `{"problems": []}`, true)
 
 		return true
 
@@ -543,12 +552,13 @@ func (s *Server) handleSystemManagementRoutes(w http.ResponseWriter, reqPath str
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, reqPath string) {
+	ctx := r.Context()
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	if s.handleCoreAPIRoutes(w, reqPath) ||
-		s.handleMetricsStatusRoutes(w, reqPath) ||
-		s.handleMetricsJSONRoutes(w, reqPath) ||
-		s.handleSystemManagementRoutes(w, reqPath) {
+	if s.handleCoreAPIRoutes(ctx, w, reqPath) ||
+		s.handleMetricsStatusRoutes(ctx, w, reqPath) ||
+		s.handleMetricsJSONRoutes(ctx, w, reqPath) ||
+		s.handleSystemManagementRoutes(ctx, w, reqPath) {
 		return
 	}
 
@@ -556,23 +566,24 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, reqPath strin
 	case strings.HasPrefix(reqPath, "/csv"):
 		s.handleCSVRoute(w, r, reqPath)
 	case strings.HasPrefix(reqPath, "/tedapi"):
-		s.handleTedapiRoute(w, reqPath)
+		s.handleTedapiRoute(ctx, w, reqPath)
 	case strings.HasPrefix(reqPath, "/control/"):
-		s.handleControlGetRoute(w, reqPath)
+		s.handleControlGetRoute(ctx, w, reqPath)
 	case strings.HasPrefix(reqPath, "/pw/"):
-		s.handlePWFacing(w, reqPath)
-	case Disabled[reqPath]:
+		s.handlePWFacing(ctx, w, reqPath)
+	case isDisabled(reqPath):
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyStatus: "404 Response - API Disabled"})
-		s.recordStats(reqPath, false, false)
-	case Allowlist[reqPath]:
-		s.handleAllowlistRoute(w, reqPath)
+		s.recordStats(ctx, reqPath, false, false)
+	case isAllowlisted(reqPath):
+		s.handleAllowlistRoute(ctx, w, reqPath)
 	default:
 		s.handleWeb(w, r, reqPath)
 	}
 }
 
 func (s *Server) handleCSVRoute(w http.ResponseWriter, r *http.Request, reqPath string) {
+	ctx := r.Context()
 	isV2 := strings.HasPrefix(reqPath, "/csv/v2")
 	includeHeaders := strings.Contains(r.URL.RawQuery, "headers") || strings.Contains(reqPath, "headers")
 	cacheKey := "/csv"
@@ -583,14 +594,14 @@ func (s *Server) handleCSVRoute(w http.ResponseWriter, r *http.Request, reqPath 
 		cacheKey += "_headers"
 	}
 
-	msg, ok := s.cachedRouteHandler(cacheKey, func() (string, error) {
-		return s.generateCSV(isV2, includeHeaders)
+	msg, ok := s.cachedRouteHandler(ctx, cacheKey, func(ctx context.Context) (string, error) {
+		return s.generateCSV(ctx, isV2, includeHeaders)
 	})
-	s.respond(w, reqPath, "text/plain; charset=utf-8", msg, ok)
+	s.respond(ctx, w, reqPath, "text/plain; charset=utf-8", msg, ok)
 }
 
-func (s *Server) generatePWTemps() (string, error) {
-	raw := s.PW.Temps()
+func (s *Server) generatePWTemps(ctx context.Context) (string, error) {
+	raw := s.PW.Temps(ctx)
 	pwtemp := make(map[string]any)
 	idx := 1
 	keys := make([]string, 0, len(raw.Temps))
@@ -607,8 +618,8 @@ func (s *Server) generatePWTemps() (string, error) {
 	return string(b), err
 }
 
-func (s *Server) generatePWAlerts() (string, error) {
-	raw := s.PW.Alerts()
+func (s *Server) generatePWAlerts(ctx context.Context) (string, error) {
+	raw := s.PW.Alerts(ctx)
 	pwalerts := make(map[string]int)
 	for _, a := range raw.Alerts {
 		pwalerts[a] = 1
@@ -618,8 +629,8 @@ func (s *Server) generatePWAlerts() (string, error) {
 	return string(b), err
 }
 
-func (s *Server) handleVersionRoute(w http.ResponseWriter) {
-	ver := s.PW.Version()
+func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) {
+	ver := s.PW.Version(ctx)
 	if ver == nil || ver == "" {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			keyVersion: "SolarOnly",
@@ -635,7 +646,7 @@ func (s *Server) handleVersionRoute(w http.ResponseWriter) {
 	})
 }
 
-func (s *Server) handleTedapiRoute(w http.ResponseWriter, reqPath string) {
+func (s *Server) handleTedapiRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
 	if !s.PW.IsTEDAPI() {
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "TEDAPI not enabled"})
 
@@ -643,7 +654,7 @@ func (s *Server) handleTedapiRoute(w http.ResponseWriter, reqPath string) {
 	}
 	switch reqPath {
 	case "/tedapi/config":
-		cfg, _ := s.PW.GetFileStoreConfig()
+		cfg, _ := s.PW.GetFileStoreConfig(ctx)
 		_ = json.NewEncoder(w).Encode(cfg)
 	default:
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -652,19 +663,19 @@ func (s *Server) handleTedapiRoute(w http.ResponseWriter, reqPath string) {
 	}
 }
 
-func (s *Server) handleControlGetRoute(w http.ResponseWriter, reqPath string) {
+func (s *Server) handleControlGetRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
 	switch {
 	case strings.HasPrefix(reqPath, "/control/reserve"):
-		res := s.PW.GetReserve(false)
+		res := s.PW.GetReserve(ctx, false)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyReserve: res})
 	case strings.HasPrefix(reqPath, "/control/mode"):
-		res := s.PW.GetMode()
+		res := s.PW.GetMode(ctx)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyMode: res})
 	case strings.HasPrefix(reqPath, "/control/grid_charging"):
-		res := s.PW.GetGridCharging()
+		res := s.PW.GetGridCharging(ctx)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyGridCharging: res})
 	case strings.HasPrefix(reqPath, "/control/grid_export"):
-		res := s.PW.GetGridExport()
+		res := s.PW.GetGridExport(ctx)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyGridExport: res})
 	case strings.HasPrefix(reqPath, "/control/max_backup"):
 		if !s.PW.IsTEDAPI() {
@@ -672,7 +683,7 @@ func (s *Server) handleControlGetRoute(w http.ResponseWriter, reqPath string) {
 
 			return
 		}
-		events, err := s.PW.GetBackupEvents()
+		events, err := s.PW.GetBackupEvents(ctx)
 		if err != nil {
 			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to get backup events"})
 
@@ -682,9 +693,9 @@ func (s *Server) handleControlGetRoute(w http.ResponseWriter, reqPath string) {
 	}
 }
 
-func (s *Server) handleAllowlistRoute(w http.ResponseWriter, reqPath string) {
-	raw, ok := s.safePWCall(reqPath, func() (any, error) {
-		str := s.PW.PollJSON(reqPath)
+func (s *Server) handleAllowlistRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	raw, ok := s.safePWCall(ctx, reqPath, func() (any, error) {
+		str := s.PW.PollJSON(ctx, reqPath)
 		if str == "" {
 			return nil, errNoResponse
 		}
@@ -692,5 +703,5 @@ func (s *Server) handleAllowlistRoute(w http.ResponseWriter, reqPath string) {
 		return str, nil
 	})
 	str, _ := raw.(string)
-	s.respond(w, reqPath, "application/json", str, ok && str != "")
+	s.respond(ctx, w, reqPath, "application/json", str, ok && str != "")
 }

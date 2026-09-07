@@ -35,3 +35,15 @@ func ComputeLLVoltage(v1n, v2n, v3n float64) float64 {
 
 	return (v12 + v23 + v31) / numPhaseValues
 }
+
+const (
+	scaleUsableFraction = 0.95
+	scaleReservedFloor  = 5.0
+)
+
+// ScaleBatteryLevel converts a raw gateway battery percentage into the
+// user-facing percentage, mapping the gateway's usable 5-100 range onto 0-100.
+// Matches pypowerwall's (level / 0.95) - (5 / 0.95).
+func ScaleBatteryLevel(level float64) float64 {
+	return (level / scaleUsableFraction) - (scaleReservedFloor / scaleUsableFraction)
+}

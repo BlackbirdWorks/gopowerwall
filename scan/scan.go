@@ -153,7 +153,7 @@ func incIP(ip net.IP) {
 	for j := len(ip) - 1; j >= 0; j-- {
 		ip[j]++
 		if ip[j] > 0 {
-			break
+			return
 		}
 	}
 }
@@ -304,11 +304,6 @@ func IP(
 	return checkPW3(ctx, addr, sCtx, httpClient)
 }
 
-// ScanIP is an alias for IP.
-//
-//nolint:gochecknoglobals // backwards compatibility alias
-var ScanIP = IP
-
 func resolveCIDR(ctx context.Context, sCtx *Context, opts *models.ScanOptions) string {
 	cidr := opts.CIDR
 	if cidr == "" && opts.IP != "" {
@@ -435,7 +430,7 @@ func Scan(ctx context.Context, opts models.ScanOptions, out io.Writer) ([]models
 				fmt.Fprintf(sCtx.Output, "%s\r\t  Host: %s%s ...%s", sCtx.Dim(), sCtx.SubBold(), addr, sCtx.Normal())
 			}
 
-			dev, msg := ScanIP(ctx, addr, sCtx, httpClient)
+			dev, msg := IP(ctx, addr, sCtx, httpClient)
 			if dev != nil {
 				mu.Lock()
 				results = append(results, *dev)

@@ -86,6 +86,7 @@ func createTestServer(t *testing.T, controlSecret string) *httptest.Server {
 
 	pwHost := strings.TrimPrefix(mockPWServer.URL, "https://")
 	pw, err := gopowerwall.New(
+		t.Context(),
 		gopowerwall.WithHost(pwHost),
 		gopowerwall.WithPassword("testpw"),
 		gopowerwall.WithCloudMode(false),
@@ -101,7 +102,7 @@ func createTestServer(t *testing.T, controlSecret string) *httptest.Server {
 	cfg.CacheExpire = 1
 	cfg.CacheTTL = 5
 
-	srv := proxy.NewServer(cfg, pw)
+	srv := proxy.NewServer(t.Context(), cfg, pw)
 	httpServer := httptest.NewServer(srv)
 	t.Cleanup(httpServer.Close)
 
@@ -347,7 +348,7 @@ func TestProxyServerLifecycle(t *testing.T) {
 	cfg.Port = 19876
 	cfg.BindAddress = "127.0.0.1"
 
-	srv := proxy.NewServer(cfg, nil)
+	srv := proxy.NewServer(t.Context(), cfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)

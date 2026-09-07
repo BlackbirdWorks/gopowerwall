@@ -19,7 +19,7 @@ func TestCommandsTable(t *testing.T) {
 			run: func() error {
 				cmd := commands.VersionCmd{}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: false,
 		},
@@ -28,7 +28,7 @@ func TestCommandsTable(t *testing.T) {
 			run: func() error {
 				cmd := commands.SetupCmd{}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: false,
 		},
@@ -37,7 +37,7 @@ func TestCommandsTable(t *testing.T) {
 			run: func() error {
 				cmd := commands.AuthTokenCmd{}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: false,
 		},
@@ -46,7 +46,7 @@ func TestCommandsTable(t *testing.T) {
 			run: func() error {
 				cmd := commands.CloudCheckCmd{}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: false,
 		},
@@ -55,7 +55,7 @@ func TestCommandsTable(t *testing.T) {
 			run: func() error {
 				cmd := commands.TedapiCmd{Host: "127.0.0.1"}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: false,
 		},
@@ -64,7 +64,7 @@ func TestCommandsTable(t *testing.T) {
 			run: func() error {
 				cmd := commands.RegisterCmd{}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: false,
 		},
@@ -73,7 +73,7 @@ func TestCommandsTable(t *testing.T) {
 			run: func() error {
 				cmd := commands.SetCmd{Reserve: -1}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: true,
 		},
@@ -88,7 +88,7 @@ func TestCommandsTable(t *testing.T) {
 					},
 				}
 
-				return cmd.Run()
+				return cmd.Run(&commands.Context{Context: t.Context()})
 			},
 			wantError: true,
 		},

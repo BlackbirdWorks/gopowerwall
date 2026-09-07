@@ -9,8 +9,10 @@ const (
 	Version      = version.Version
 )
 
-// VersionTuple is the library semantic version as a (major, minor, patch) tuple.
-var VersionTuple = version.VersionTuple //nolint:gochecknoglobals // Re-export of a constant version tuple.
+// VersionTuple returns the library semantic version as a (major, minor, patch) tuple.
+func VersionTuple() [3]int {
+	return version.Tuple()
+}
 
 // ParseVersion extracts the semantic version digits from a firmware or gateway
 // version string and packs them into a single comparable integer, so that

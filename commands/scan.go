@@ -22,7 +22,7 @@ type ScanCmd struct {
 }
 
 // Run executes the scan command.
-func (c *ScanCmd) Run() error {
+func (c *ScanCmd) Run(_ *Context) error {
 	if !c.JSON {
 		fmt.Fprintf(os.Stdout, "gopowerwall [%s] - Scanner\n\n", version.Version)
 	}

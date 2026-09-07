@@ -26,12 +26,12 @@ func TestScanHosts(t *testing.T) {
 	}
 }
 
-func TestScanMockPowerwall(t *testing.T) {
+func TestScanMockPowerwall(_ *testing.T) {
 	// Mock Powerwall Gateway HTTP server
 	mockGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/status":
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"din":             "1538000-45-C--TEST123456",
 				"version":         "24.36.2",
 				"up_time_seconds": "24h00m00s",
@@ -50,6 +50,6 @@ func TestScanMockPowerwall(t *testing.T) {
 	client := mockGateway.Client()
 
 	addr := strings.TrimPrefix(mockGateway.URL, "http://")
-	dev, _ := scan.ScanIP(context.Background(), addr, ctx, client)
+	dev, _ := scan.IP(context.Background(), addr, ctx, client)
 	_ = dev
 }

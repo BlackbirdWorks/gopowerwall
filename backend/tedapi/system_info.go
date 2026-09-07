@@ -2,6 +2,7 @@ package tedapi
 
 import (
 	"encoding/hex"
+	"strings"
 	"unicode"
 )
 
@@ -47,15 +48,7 @@ func DecodeGitHash(b []byte) string {
 		return ""
 	}
 	s := string(b)
-	isPrintable := true
-	for _, r := range s {
-		if !unicode.IsPrint(r) {
-			isPrintable = false
-
-			break
-		}
-	}
-	if isPrintable {
+	if !strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsPrint(r) }) {
 		return s
 	}
 

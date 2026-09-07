@@ -16,6 +16,7 @@ import (
 func TestProxyServerRoutes(t *testing.T) {
 	// Create disconnected powerwall for testing stubs & graceful degradation
 	pw, _ := gopowerwall.New(
+		t.Context(),
 		gopowerwall.WithHost("127.0.0.1:9"),
 		gopowerwall.WithCloudMode(false),
 	)
@@ -29,7 +30,7 @@ func TestProxyServerRoutes(t *testing.T) {
 		NegSolar:            true,
 		Style:               "clear.js",
 	}
-	server := proxy.NewServer(cfg, pw)
+	server := proxy.NewServer(t.Context(), cfg, pw)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -44,7 +45,7 @@ func TestProxyServerRoutes(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /stats status = %d, want 200", resp.StatusCode)
 	}
-	var stats map[string]interface{}
+	var stats map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
 		t.Errorf("Failed to decode /stats: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestProxyServerRoutes(t *testing.T) {
 		t.Fatalf("GET /version error: %v", err)
 	}
 	defer respV.Body.Close()
-	var ver map[string]interface{}
+	var ver map[string]any
 	_ = json.NewDecoder(respV.Body).Decode(&ver)
 	if ver["version"] == nil {
 		t.Errorf("Expected version in response")
@@ -108,13 +109,14 @@ func TestProxyServerRoutes(t *testing.T) {
 
 func TestProxyControlSecurity(t *testing.T) {
 	pw, _ := gopowerwall.New(
+		t.Context(),
 		gopowerwall.WithHost("127.0.0.1:9"),
 		gopowerwall.WithCloudMode(false),
 	)
 	cfg := proxy.Config{
 		ControlSecret: "correct-token-123",
 	}
-	server := proxy.NewServer(cfg, pw)
+	server := proxy.NewServer(t.Context(), cfg, pw)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

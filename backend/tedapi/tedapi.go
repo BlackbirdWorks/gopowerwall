@@ -109,20 +109,20 @@ func (c *Client) SetV1rTransport(v1r *TEDAPIv1r) {
 }
 
 // Connect checks connectivity to TEDAPI and initializes session.
-func (c *Client) Connect() bool {
+func (c *Client) Connect(ctx context.Context) bool {
 	c.mu.Lock()
 	v1r := c.v1r
 	c.mu.Unlock()
 
 	if v1r != nil {
-		if err := v1r.Login(); err != nil {
-			logger.LogDebug("TEDAPI v1r login failed: %v", err)
+		if err := v1r.Login(ctx); err != nil {
+			logger.Load(ctx).DebugContext(ctx, "TEDAPI v1r login failed", "error", err)
 
 			return false
 		}
-		din, err := v1r.GetDin()
+		din, err := v1r.GetDin(ctx)
 		if err != nil || din == "" {
-			logger.LogDebug("TEDAPI v1r get_din failed: %v", err)
+			logger.Load(ctx).DebugContext(ctx, "TEDAPI v1r get_din failed", "error", err)
 
 			return false
 		}
@@ -134,15 +134,15 @@ func (c *Client) Connect() bool {
 	}
 
 	// Direct TEDAPI HTTP check
-	cfg := c.GetConfig(false)
+	cfg := c.GetConfig(ctx, false)
 
 	return cfg != nil
 }
 
 // PostTEDAPI sends a protobuf message to /tedapi/v1.
-func (c *Client) PostTEDAPI(pbBytes []byte) ([]byte, error) {
+func (c *Client) PostTEDAPI(ctx context.Context, pbBytes []byte) ([]byte, error) {
 	url := fmt.Sprintf("https://%s/tedapi/v1", c.host)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(pbBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(pbBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +179,7 @@ func (c *Client) PostTEDAPI(pbBytes []byte) ([]byte, error) {
 	return body, nil
 }
 
-func (c *Client) readV1rConfig(din string) map[string]any {
+func (c *Client) readV1rConfig(ctx context.Context, din string) map[string]any {
 	msg := &combined.Message{
 		Message: &combined.MessageEnvelope{
 			DeliveryChannel: combined.DeliveryChannel_DELIVERY_CHANNEL_HERMES_COMMAND,
@@ -206,7 +206,7 @@ func (c *Client) readV1rConfig(din string) map[string]any {
 		},
 	}
 	wireBytes, _ := proto.Marshal(msg.GetMessage())
-	respBytes, err := c.v1r.PostV1r(wireBytes, din)
+	respBytes, err := c.v1r.PostV1r(ctx, wireBytes, din)
 	if err != nil || len(respBytes) == 0 {
 		return nil
 	}
@@ -234,7 +234,7 @@ func (c *Client) readV1rConfig(din string) map[string]any {
 	return nil
 }
 
-func (c *Client) readLegacyWiFiConfig() map[string]any {
+func (c *Client) readLegacyWiFiConfig(ctx context.Context) map[string]any {
 	readReq := &tedapi.Message{
 		Message: &tedapi.MessageEnvelope{
 			DeliveryChannel: 1, // LOCAL_HTTPS
@@ -264,7 +264,7 @@ func (c *Client) readLegacyWiFiConfig() map[string]any {
 		return nil
 	}
 
-	respBytes, err := c.PostTEDAPI(wireBytes)
+	respBytes, err := c.PostTEDAPI(ctx, wireBytes)
 	if err != nil {
 		return nil
 	}
@@ -292,7 +292,7 @@ func (c *Client) readLegacyWiFiConfig() map[string]any {
 }
 
 // GetConfig reads config.json via TEDAPI FileStore messages.
-func (c *Client) GetConfig(force bool) map[string]any {
+func (c *Client) GetConfig(ctx context.Context, force bool) map[string]any {
 	c.mu.Lock()
 	if !force && c.configCache != nil && time.Since(c.configTime) < c.configTTL {
 		cfg := c.configCache
@@ -306,20 +306,20 @@ func (c *Client) GetConfig(force bool) map[string]any {
 
 	if v1r != nil {
 		if din == "" {
-			din, _ = v1r.GetDin()
+			din, _ = v1r.GetDin(ctx)
 		}
 		if din != "" {
-			if cfg := c.readV1rConfig(din); cfg != nil {
+			if cfg := c.readV1rConfig(ctx, din); cfg != nil {
 				return cfg
 			}
 		}
 	}
 
-	return c.readLegacyWiFiConfig()
+	return c.readLegacyWiFiConfig(ctx)
 }
 
 // GetStatus executes the GraphQL status query.
-func (c *Client) GetStatus(force bool) map[string]any {
+func (c *Client) GetStatus(ctx context.Context, force bool) map[string]any {
 	if !force {
 		if val, found, _ := c.cache.Get("status"); found {
 			if m, ok := val.(map[string]any); ok {
@@ -333,7 +333,7 @@ func (c *Client) GetStatus(force bool) map[string]any {
 		return nil
 	}
 
-	res := c.execGraphQL(query)
+	res := c.execGraphQL(ctx, query)
 	if res != nil {
 		c.cache.Set("status", res)
 	}
@@ -341,14 +341,14 @@ func (c *Client) GetStatus(force bool) map[string]any {
 	return res
 }
 
-func (c *Client) execGraphQL(query *Query) map[string]any {
+func (c *Client) execGraphQL(ctx context.Context, query *Query) map[string]any {
 	c.mu.Lock()
 	v1r := c.v1r
 	din := c.din
 	c.mu.Unlock()
 
 	if v1r != nil && din != "" {
-		res, err := v1r.APIGet("/api/system_status")
+		res, err := v1r.APIGet(ctx, "/api/system_status")
 		if err == nil {
 			if m, ok := res.(map[string]any); ok {
 				return m
@@ -388,7 +388,7 @@ func (c *Client) execGraphQL(query *Query) map[string]any {
 		return nil
 	}
 
-	respBytes, err := c.PostTEDAPI(wireBytes)
+	respBytes, err := c.PostTEDAPI(ctx, wireBytes)
 	if err != nil {
 		return nil
 	}
@@ -411,8 +411,8 @@ func (c *Client) execGraphQL(query *Query) map[string]any {
 }
 
 // GetFirmwareVersion returns firmware version string or detailed map.
-func (c *Client) GetFirmwareVersion(force bool) string {
-	cfg := c.GetConfig(force)
+func (c *Client) GetFirmwareVersion(ctx context.Context, force bool) string {
+	cfg := c.GetConfig(ctx, force)
 	if cfg != nil {
 		if v, ok := cfg["version"].(string); ok && v != "" {
 			return v
@@ -428,8 +428,8 @@ func (c *Client) GetFirmwareVersion(force bool) string {
 type PyPowerwallTEDAPI struct {
 	client     *Client
 	v1r        *TEDAPIv1r
-	pollAPIMap map[string]func(force, recursive, raw bool) (any, error)
-	postAPIMap map[string]func(payload any, din string, recursive, raw bool) (any, error)
+	pollAPIMap map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
 }
 
 // NewBackend creates a new PyPowerwallTEDAPI backend.
@@ -444,93 +444,93 @@ func NewBackend(client *Client, v1r *TEDAPIv1r) *PyPowerwallTEDAPI {
 }
 
 // GetConfig returns config.json via FileStore.
-func (p *PyPowerwallTEDAPI) GetConfig(force ...bool) map[string]any {
+func (p *PyPowerwallTEDAPI) GetConfig(ctx context.Context, force ...bool) map[string]any {
 	f := false
 	if len(force) > 0 {
 		f = force[0]
 	}
 
-	return p.client.GetConfig(f)
+	return p.client.GetConfig(ctx, f)
 }
 
 func (p *PyPowerwallTEDAPI) initAPIMaps() {
-	p.pollAPIMap = map[string]func(force, recursive, raw bool) (any, error){
-		"/api/devices/vitals": func(_, _, _ bool) (any, error) {
-			return p.Vitals()
+	p.pollAPIMap = map[string]func(ctx context.Context, force, recursive, raw bool) (any, error){
+		"/api/devices/vitals": func(ctx context.Context, _, _, _ bool) (any, error) {
+			return p.Vitals(ctx)
 		},
-		"/vitals": func(_, _, _ bool) (any, error) {
-			return p.Vitals()
+		"/vitals": func(ctx context.Context, _, _, _ bool) (any, error) {
+			return p.Vitals(ctx)
 		},
-		"/api/meters/aggregates": func(force, _, _ bool) (any, error) {
-			return p.getAPIMetersAggregates(force)
+		"/api/meters/aggregates": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPIMetersAggregates(ctx, force)
 		},
-		"/api/operation": func(force, _, _ bool) (any, error) {
-			return p.getAPIOperation(force)
+		"/api/operation": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPIOperation(ctx, force)
 		},
-		"/api/site_info": func(force, _, _ bool) (any, error) {
-			return p.getAPISiteInfo(force)
+		"/api/site_info": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPISiteInfo(ctx, force)
 		},
-		"/api/site_info/site_name": func(force, _, _ bool) (any, error) {
-			return p.getAPISiteInfoSiteName(force)
+		"/api/site_info/site_name": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPISiteInfoSiteName(ctx, force)
 		},
-		"/api/status": func(force, _, _ bool) (any, error) {
-			return p.getAPIStatus(force)
+		"/api/status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPIStatus(ctx, force)
 		},
-		"/api/system_status": func(force, _, _ bool) (any, error) {
-			return p.getAPISystemStatus(force)
+		"/api/system_status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPISystemStatus(ctx, force)
 		},
-		"/api/system_status/grid_status": func(force, _, _ bool) (any, error) {
-			return p.getAPIGridStatus(force)
+		"/api/system_status/grid_status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPIGridStatus(ctx, force)
 		},
-		"/api/system_status/soe": func(force, _, _ bool) (any, error) {
-			return p.getAPISystemStatusSOE(force)
+		"/api/system_status/soe": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPISystemStatusSOE(ctx, force)
 		},
-		"/api/login/Basic": func(_, _, _ bool) (any, error) {
+		"/api/login/Basic": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{"token": "tedapi_bearer"}, nil
 		},
-		"/api/logout": func(_, _, _ bool) (any, error) {
+		"/api/logout": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{"message": "logged out"}, nil
 		},
-		"/api/powerwalls": func(_, _, _ bool) (any, error) {
+		"/api/powerwalls": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockPowerwalls), nil
 		},
-		"/api/meters/site": func(_, _, _ bool) (any, error) {
+		"/api/meters/site": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockMetersSite), nil
 		},
-		"/api/meters": func(_, _, _ bool) (any, error) {
+		"/api/meters": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockMeters), nil
 		},
-		"/api/sitemaster": func(force, _, _ bool) (any, error) {
-			return p.getAPISiteMaster(force)
+		"/api/sitemaster": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return p.getAPISiteMaster(ctx, force)
 		},
-		"/api/customer": func(_, _, _ bool) (any, error) {
+		"/api/customer": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockCustomer), nil
 		},
-		"/api/installer": func(_, _, _ bool) (any, error) {
+		"/api/installer": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockInstaller), nil
 		},
-		"/api/networks": func(_, _, _ bool) (any, error) {
+		"/api/networks": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockNetworks), nil
 		},
-		"/api/auth/toggle/supported": func(_, _, _ bool) (any, error) {
+		"/api/auth/toggle/supported": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockAuthToggle), nil
 		},
-		"/api/system/update/status": func(_, _, _ bool) (any, error) {
+		"/api/system/update/status": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockUpdate), nil
 		},
-		"/api/solars": func(_, _, _ bool) (any, error) {
+		"/api/solars": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSolars), nil
 		},
 	}
 
-	p.postAPIMap = map[string]func(payload any, din string, recursive, raw bool) (any, error){
+	p.postAPIMap = map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error){
 		"/api/operation": p.postAPIOperation,
 	}
 }
 
 // Authenticate connects to the TEDAPI backend.
-func (p *PyPowerwallTEDAPI) Authenticate() error {
-	if !p.client.Connect() {
+func (p *PyPowerwallTEDAPI) Authenticate(ctx context.Context) error {
+	if !p.client.Connect(ctx) {
 		return fmt.Errorf("%w: unable to connect to TEDAPI", backend.ErrLogin)
 	}
 
@@ -538,32 +538,32 @@ func (p *PyPowerwallTEDAPI) Authenticate() error {
 }
 
 // Close closes connections.
-func (p *PyPowerwallTEDAPI) Close() error {
+func (p *PyPowerwallTEDAPI) Close(_ context.Context) error {
 	return nil
 }
 
 // Poll fetches an endpoint through dispatch or returns an unknown API error.
-func (p *PyPowerwallTEDAPI) Poll(api string, force, recursive, raw bool) (any, error) {
+func (p *PyPowerwallTEDAPI) Poll(ctx context.Context, api string, force, recursive, raw bool) (any, error) {
 	handler, ok := p.pollAPIMap[api]
 	if !ok {
-		logger.LogError(" -- tedapi: Unknown API: %s", api)
+		logger.Load(ctx).ErrorContext(ctx, "unknown TEDAPI poll endpoint", "api", api)
 
 		return map[string]string{"ERROR": "Unknown API: " + api}, nil
 	}
 
-	return handler(force, recursive, raw)
+	return handler(ctx, force, recursive, raw)
 }
 
 // Post sends a command to TEDAPI.
-func (p *PyPowerwallTEDAPI) Post(api string, payload any, _ string, _, _ bool) (any, error) {
+func (p *PyPowerwallTEDAPI) Post(ctx context.Context, api string, payload any, _ string, _, _ bool) (any, error) {
 	handler, ok := p.postAPIMap[api]
 	if !ok {
-		logger.LogError(" -- tedapi: Unknown POST API: %s", api)
+		logger.Load(ctx).ErrorContext(ctx, "unknown TEDAPI post endpoint", "api", api)
 
 		return map[string]string{"ERROR": "Unknown API: " + api}, nil
 	}
 
-	return handler(payload, "", false, false)
+	return handler(ctx, payload, "", false, false)
 }
 
 func setInstantPower(stub map[string]any, key string, power any) {
@@ -575,19 +575,19 @@ func setInstantPower(stub map[string]any, key string, power any) {
 	}
 }
 
-func (p *PyPowerwallTEDAPI) getAPIMetersAggregates(force bool) (any, error) {
+func (p *PyPowerwallTEDAPI) getAPIMetersAggregates(ctx context.Context, force bool) (any, error) {
 	stub := stubs.MetersAggregatesStub()
 
 	// If v1r is active, attempt native call
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet("/api/meters/aggregates")
+		res, err := p.v1r.APIGet(ctx, "/api/meters/aggregates")
 		if err == nil && res != nil {
 			return res, nil
 		}
 	}
 
 	// Calculate from status
-	status := p.client.GetStatus(force)
+	status := p.client.GetStatus(ctx, force)
 	if status != nil {
 		setInstantPower(stub, "site", lookup.Lookup(status, "meters", "site", "instant_power"))
 		setInstantPower(stub, "solar", lookup.Lookup(status, "meters", "solar", "instant_power"))
@@ -618,8 +618,8 @@ func parseRealMode(cfg map[string]any) string {
 	return "self_consumption"
 }
 
-func (p *PyPowerwallTEDAPI) getAPIOperation(force bool) (any, error) {
-	cfg := p.client.GetConfig(force)
+func (p *PyPowerwallTEDAPI) getAPIOperation(ctx context.Context, force bool) (any, error) {
+	cfg := p.client.GetConfig(ctx, force)
 	reserve := defaultReserve
 	mode := "self_consumption"
 	if cfg != nil {
@@ -633,15 +633,15 @@ func (p *PyPowerwallTEDAPI) getAPIOperation(force bool) (any, error) {
 	}, nil
 }
 
-func (p *PyPowerwallTEDAPI) postAPIOperation(payload any, _ string, _, _ bool) (any, error) {
-	logger.LogDebug("TEDAPI post operation: %v", payload)
+func (p *PyPowerwallTEDAPI) postAPIOperation(ctx context.Context, payload any, _ string, _, _ bool) (any, error) {
+	logger.Load(ctx).DebugContext(ctx, "TEDAPI post operation", "payload", payload)
 	p.client.cache.Invalidate("/api/operation")
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
-func (p *PyPowerwallTEDAPI) getAPISiteInfo(force bool) (any, error) {
-	cfg := p.client.GetConfig(force)
+func (p *PyPowerwallTEDAPI) getAPISiteInfo(ctx context.Context, force bool) (any, error) {
+	cfg := p.client.GetConfig(ctx, force)
 	if cfg != nil {
 		if siteInfo, ok := cfg["site_info"].(map[string]any); ok {
 			return siteInfo, nil
@@ -654,15 +654,15 @@ func (p *PyPowerwallTEDAPI) getAPISiteInfo(force bool) (any, error) {
 	}, nil
 }
 
-func (p *PyPowerwallTEDAPI) getAPISiteMaster(force bool) (any, error) {
+func (p *PyPowerwallTEDAPI) getAPISiteMaster(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet("/api/sitemaster")
+		res, err := p.v1r.APIGet(ctx, "/api/sitemaster")
 		if err == nil && res != nil {
 			return res, nil
 		}
 	}
 
-	status := p.client.GetStatus(force)
+	status := p.client.GetStatus(ctx, force)
 	if status != nil {
 		if running, ok := status["running"].(bool); ok {
 			return map[string]any{
@@ -677,8 +677,8 @@ func (p *PyPowerwallTEDAPI) getAPISiteMaster(force bool) (any, error) {
 	return stubs.ParseJSON(stubs.MockSitemaster), nil
 }
 
-func (p *PyPowerwallTEDAPI) getAPISiteInfoSiteName(force bool) (any, error) {
-	cfg := p.client.GetConfig(force)
+func (p *PyPowerwallTEDAPI) getAPISiteInfoSiteName(ctx context.Context, force bool) (any, error) {
+	cfg := p.client.GetConfig(ctx, force)
 	if cfg != nil {
 		if siteName, ok := cfg[siteNameKey].(string); ok && siteName != "" {
 			return map[string]any{siteNameKey: siteName}, nil
@@ -688,9 +688,9 @@ func (p *PyPowerwallTEDAPI) getAPISiteInfoSiteName(force bool) (any, error) {
 	return map[string]any{siteNameKey: defaultSiteName}, nil
 }
 
-func (p *PyPowerwallTEDAPI) getAPIStatus(force bool) (any, error) {
-	cfg := p.client.GetConfig(force)
-	version := p.client.GetFirmwareVersion(force)
+func (p *PyPowerwallTEDAPI) getAPIStatus(ctx context.Context, force bool) (any, error) {
+	cfg := p.client.GetConfig(ctx, force)
+	version := p.client.GetFirmwareVersion(ctx, force)
 	din := p.client.din
 	if din == "" && cfg != nil {
 		if v, ok := cfg["vin"].(string); ok {
@@ -714,15 +714,15 @@ func (p *PyPowerwallTEDAPI) getAPIStatus(force bool) (any, error) {
 	}, nil
 }
 
-func (p *PyPowerwallTEDAPI) getAPISystemStatus(force bool) (any, error) {
+func (p *PyPowerwallTEDAPI) getAPISystemStatus(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet("/api/system_status")
+		res, err := p.v1r.APIGet(ctx, "/api/system_status")
 		if err == nil && res != nil {
 			return res, nil
 		}
 	}
 	stub := stubs.SystemStatusStub()
-	cfg := p.client.GetConfig(force)
+	cfg := p.client.GetConfig(ctx, force)
 	if cfg != nil {
 		if vin, ok := cfg["vin"].(string); ok {
 			stub["battery_blocks"] = []any{
@@ -749,15 +749,15 @@ func checkConnectedAlert(alerts []any) bool {
 	return false
 }
 
-func (p *PyPowerwallTEDAPI) getAPIGridStatus(force bool) (any, error) {
+func (p *PyPowerwallTEDAPI) getAPIGridStatus(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet("/api/system_status/grid_status")
+		res, err := p.v1r.APIGet(ctx, "/api/system_status/grid_status")
 		if err == nil && res != nil {
 			return res, nil
 		}
 	}
 
-	status := p.client.GetStatus(force)
+	status := p.client.GetStatus(ctx, force)
 	gridStatus := "SystemGridConnected"
 	if status != nil {
 		alerts, _ := lookup.Lookup(status, "control", "alerts", "active").([]any)
@@ -782,16 +782,16 @@ func (p *PyPowerwallTEDAPI) getAPIGridStatus(force bool) (any, error) {
 	}, nil
 }
 
-func (p *PyPowerwallTEDAPI) getAPISystemStatusSOE(force bool) (any, error) {
+func (p *PyPowerwallTEDAPI) getAPISystemStatusSOE(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet("/api/system_status/soe")
+		res, err := p.v1r.APIGet(ctx, "/api/system_status/soe")
 		if err == nil && res != nil {
 			return res, nil
 		}
 	}
 
 	percentage := 100.0
-	status := p.client.GetStatus(force)
+	status := p.client.GetStatus(ctx, force)
 	if status != nil {
 		if soe := lookup.Lookup(status, "control", "soe"); soe != nil {
 			if f, ok := soe.(float64); ok {
@@ -806,7 +806,7 @@ func (p *PyPowerwallTEDAPI) getAPISystemStatusSOE(force bool) (any, error) {
 }
 
 // Vitals returns Powerwall vitals in TEDAPI format.
-func (p *PyPowerwallTEDAPI) Vitals() (map[string]any, error) {
+func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) {
 	out := make(map[string]any)
 
 	// Critical invariant (from DESIGN.md):
@@ -814,7 +814,7 @@ func (p *PyPowerwallTEDAPI) Vitals() (map[string]any, error) {
 	// TESLA--None componentParentDin (STSTSM--<din>) is where gateway DIN appears in TEDAPI vitals.
 	din := p.client.din
 	if din == "" {
-		cfg := p.client.GetConfig(false)
+		cfg := p.client.GetConfig(ctx, false)
 		if v, ok := cfg["vin"].(string); ok {
 			din = v
 		}
@@ -829,7 +829,7 @@ func (p *PyPowerwallTEDAPI) Vitals() (map[string]any, error) {
 }
 
 // GetTimeRemaining is unsupported in TEDAPI mode without local gateway system status.
-func (p *PyPowerwallTEDAPI) GetTimeRemaining() (*float64, error) {
+func (p *PyPowerwallTEDAPI) GetTimeRemaining(_ context.Context) (*float64, error) {
 	return nil, backend.ErrUnsupported
 }
 
@@ -844,9 +844,9 @@ func getMeterPower(s map[string]any, key string) float64 {
 }
 
 // Power returns current aggregate power values across site, solar, battery, and load.
-func (p *PyPowerwallTEDAPI) Power() (map[string]float64, error) {
+func (p *PyPowerwallTEDAPI) Power(ctx context.Context) (map[string]float64, error) {
 	site, solar, battery, load := 0.0, 0.0, 0.0, 0.0
-	payload, err := p.Poll("/api/meters/aggregates", false, false, false)
+	payload, err := p.Poll(ctx, "/api/meters/aggregates", false, false, false)
 	if err == nil && payload != nil {
 		if s, ok := payload.(map[string]any); ok {
 			site = getMeterPower(s, "site")
@@ -865,9 +865,9 @@ func (p *PyPowerwallTEDAPI) Power() (map[string]float64, error) {
 }
 
 // FetchPower returns single sensor power or aggregate structure if verbose is true.
-func (p *PyPowerwallTEDAPI) FetchPower(sensor string, verbose bool) (any, error) {
+func (p *PyPowerwallTEDAPI) FetchPower(ctx context.Context, sensor string, verbose bool) (any, error) {
 	if verbose {
-		payload, err := p.Poll("/api/meters/aggregates", false, false, false)
+		payload, err := p.Poll(ctx, "/api/meters/aggregates", false, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -877,7 +877,7 @@ func (p *PyPowerwallTEDAPI) FetchPower(sensor string, verbose bool) (any, error)
 
 		return nil, backend.ErrNotFound
 	}
-	power, err := p.Power()
+	power, err := p.Power(ctx)
 	if err != nil {
 		return 0.0, err
 	}
@@ -886,11 +886,11 @@ func (p *PyPowerwallTEDAPI) FetchPower(sensor string, verbose bool) (any, error)
 }
 
 // ScheduleMaxBackup delegates to v1r if available.
-func (p *PyPowerwallTEDAPI) ScheduleMaxBackup(durationSeconds int) (map[string]any, error) {
+func (p *PyPowerwallTEDAPI) ScheduleMaxBackup(ctx context.Context, durationSeconds int) (map[string]any, error) {
 	if p.v1r == nil {
 		return nil, backend.ErrUnsupported
 	}
-	ok, err := p.v1r.ScheduleMaxBackup(durationSeconds)
+	ok, err := p.v1r.ScheduleMaxBackup(ctx, durationSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -899,11 +899,11 @@ func (p *PyPowerwallTEDAPI) ScheduleMaxBackup(durationSeconds int) (map[string]a
 }
 
 // CancelMaxBackup delegates to v1r if available.
-func (p *PyPowerwallTEDAPI) CancelMaxBackup() (map[string]any, error) {
+func (p *PyPowerwallTEDAPI) CancelMaxBackup(ctx context.Context) (map[string]any, error) {
 	if p.v1r == nil {
 		return nil, backend.ErrUnsupported
 	}
-	ok, err := p.v1r.CancelMaxBackup()
+	ok, err := p.v1r.CancelMaxBackup(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -912,20 +912,20 @@ func (p *PyPowerwallTEDAPI) CancelMaxBackup() (map[string]any, error) {
 }
 
 // GetBackupEvents delegates to v1r if available.
-func (p *PyPowerwallTEDAPI) GetBackupEvents() (map[string]any, error) {
+func (p *PyPowerwallTEDAPI) GetBackupEvents(ctx context.Context) (map[string]any, error) {
 	if p.v1r == nil {
 		return nil, backend.ErrUnsupported
 	}
 
-	return p.v1r.GetBackupEvents()
+	return p.v1r.GetBackupEvents(ctx)
 }
 
 // GoOffGrid is unsupported by TEDAPI.
-func (p *PyPowerwallTEDAPI) GoOffGrid() (models.Operation, error) {
+func (p *PyPowerwallTEDAPI) GoOffGrid(_ context.Context) (models.Operation, error) {
 	return models.Operation{}, backend.ErrUnsupported
 }
 
 // ReconnectGrid is unsupported by TEDAPI.
-func (p *PyPowerwallTEDAPI) ReconnectGrid() (models.Operation, error) {
+func (p *PyPowerwallTEDAPI) ReconnectGrid(_ context.Context) (models.Operation, error) {
 	return models.Operation{}, backend.ErrUnsupported
 }

@@ -125,7 +125,7 @@ func TestScanIPAndEndpoints(t *testing.T) {
 	sCtx := scan.NewContext(500*time.Millisecond, false, true, buf)
 
 	// Scan normal powerwall status
-	dev, msg := scan.ScanIP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
+	dev, msg := scan.IP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
 	if dev == nil || dev.DIN != "123-DIN" || dev.Version != "24.36.2" {
 		t.Fatalf("unexpected discovered device: %+v, msg=%s", dev, msg)
 	}
@@ -169,7 +169,7 @@ func TestScanPW3Detection(t *testing.T) {
 	buf := &bytes.Buffer{}
 	sCtx := scan.NewContext(500*time.Millisecond, false, true, buf)
 
-	dev, msg := scan.ScanIP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
+	dev, msg := scan.IP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
 	if dev == nil || dev.DIN != "Powerwall-3" {
 		t.Fatalf("expected PW3 detection, got %+v (msg: %s)", dev, msg)
 	}
@@ -188,7 +188,7 @@ func TestScanStatusEdgeCases(t *testing.T) {
 	buf := &bytes.Buffer{}
 	sCtx := scan.NewContext(500*time.Millisecond, false, true, buf)
 
-	dev, _ := scan.ScanIP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
+	dev, _ := scan.IP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
 	if dev != nil {
 		t.Fatalf("expected nil for empty din/version, got %+v", dev)
 	}

@@ -23,9 +23,9 @@ const (
 	kiloByte       = 1024
 )
 
-func (s *Server) respond(w http.ResponseWriter, reqPath, contentType, body string, ok bool) {
+func (s *Server) respond(ctx context.Context, w http.ResponseWriter, reqPath, contentType, body string, ok bool) {
 	if !ok || body == "" {
-		s.recordStats(reqPath, false, true)
+		s.recordStats(ctx, reqPath, false, true)
 		w.Header().Set("Content-Type", contentType)
 		isAPI := strings.HasPrefix(reqPath, "/api/") || reqPath == "/aggregates" ||
 			reqPath == "/soe" || reqPath == "/vitals" || reqPath == "/strings"
@@ -40,7 +40,7 @@ func (s *Server) respond(w http.ResponseWriter, reqPath, contentType, body strin
 		return
 	}
 
-	s.recordStats(reqPath, false, false)
+	s.recordStats(ctx, reqPath, false, false)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
@@ -48,90 +48,90 @@ func (s *Server) respond(w http.ResponseWriter, reqPath, contentType, body strin
 	_, _ = w.Write([]byte(body))
 }
 
-func (s *Server) lookupPWFacingSensor(sub string) (any, bool) {
+func (s *Server) lookupPWFacingSensor(ctx context.Context, sub string) (any, bool) {
 	switch sub {
 	case "level":
-		return map[string]any{"level": s.PW.Level(false)}, true
+		return map[string]any{"level": s.PW.Level(ctx, false)}, true
 	case "power":
-		return s.PW.Power(), true
+		return s.PW.Power(ctx), true
 	case "site":
-		return s.PW.Site(true), true
+		return s.PW.Site(ctx, true), true
 	case "solar":
-		return s.PW.Solar(true), true
+		return s.PW.Solar(ctx, true), true
 	case "battery":
-		return s.PW.Battery(true), true
+		return s.PW.Battery(ctx, true), true
 	case "battery_blocks":
-		return s.PW.BatteryBlocks(), true
+		return s.PW.BatteryBlocks(ctx), true
 	case "load":
-		return s.PW.Load(true), true
+		return s.PW.Load(ctx, true), true
 	case "grid":
-		return s.PW.Grid(true), true
+		return s.PW.Grid(ctx, true), true
 	case "home":
-		return s.PW.Home(true), true
+		return s.PW.Home(ctx, true), true
 	case "aggregates":
-		return s.PW.Poll("/api/meters/aggregates"), true
+		return s.PW.Poll(ctx, "/api/meters/aggregates"), true
 	default:
 		return nil, false
 	}
 }
 
-func (s *Server) lookupPWFacingSystem(sub string) (any, bool) {
+func (s *Server) lookupPWFacingSystem(ctx context.Context, sub string) (any, bool) {
 	switch sub {
 	case "vitals":
-		res, _ := s.PW.Vitals()
+		res, _ := s.PW.Vitals(ctx)
 
 		return res, true
 	case "temps":
-		return s.PW.Temps(), true
+		return s.PW.Temps(ctx), true
 	case "strings":
-		return s.PW.Strings(false), true
+		return s.PW.Strings(ctx, false), true
 	case "din":
-		return map[string]any{"din": s.PW.Din()}, true
+		return map[string]any{"din": s.PW.Din(ctx)}, true
 	case keyUptime:
-		return map[string]any{keyUptime: s.PW.Uptime()}, true
+		return map[string]any{keyUptime: s.PW.Uptime(ctx)}, true
 	case keyVersion:
-		return map[string]any{keyVersion: s.PW.Version()}, true
+		return map[string]any{keyVersion: s.PW.Version(ctx)}, true
 	case keyStatus:
-		return s.PW.Status(), true
+		return s.PW.Status(ctx), true
 	case "system_status":
-		res, _ := s.PW.SystemStatus()
+		res, _ := s.PW.SystemStatus(ctx)
 
 		return res, true
 	case "grid_status":
-		return s.PW.GridStatus(gopowerwall.GridStatusString), true
+		return s.PW.GridStatus(ctx, gopowerwall.GridStatusString), true
 	default:
 		return nil, false
 	}
 }
 
-func (s *Server) lookupPWFacingControl(sub string) (any, bool) {
+func (s *Server) lookupPWFacingControl(ctx context.Context, sub string) (any, bool) {
 	switch sub {
 	case keySiteName:
-		return map[string]any{keySiteName: s.PW.SiteName()}, true
+		return map[string]any{keySiteName: s.PW.SiteName(ctx)}, true
 	case "alerts":
-		return map[string]any{"alerts": s.PW.Alerts(false)}, true
+		return map[string]any{"alerts": s.PW.Alerts(ctx, false)}, true
 	case "is_connected":
 		return map[string]any{"is_connected": s.PW.IsConnected()}, true
 	case "get_reserve":
-		return map[string]any{keyReserve: s.PW.GetReserve(false)}, true
+		return map[string]any{keyReserve: s.PW.GetReserve(ctx, false)}, true
 	case "get_mode":
-		return map[string]any{keyMode: s.PW.GetMode()}, true
+		return map[string]any{keyMode: s.PW.GetMode(ctx)}, true
 	case "get_time_remaining":
-		return map[string]any{"time_remaining": s.PW.GetTimeRemaining()}, true
+		return map[string]any{"time_remaining": s.PW.GetTimeRemaining(ctx)}, true
 	default:
 		return nil, false
 	}
 }
 
-func (s *Server) handlePWFacing(w http.ResponseWriter, reqPath string) {
+func (s *Server) handlePWFacing(ctx context.Context, w http.ResponseWriter, reqPath string) {
 	sub := strings.TrimPrefix(reqPath, "/pw/")
 
-	res, found := s.lookupPWFacingSensor(sub)
+	res, found := s.lookupPWFacingSensor(ctx, sub)
 	if !found {
-		res, found = s.lookupPWFacingSystem(sub)
+		res, found = s.lookupPWFacingSystem(ctx, sub)
 	}
 	if !found {
-		res, found = s.lookupPWFacingControl(sub)
+		res, found = s.lookupPWFacingControl(ctx, sub)
 	}
 	if !found {
 		res = map[string]string{keyError: "Invalid Request"}
@@ -139,12 +139,12 @@ func (s *Server) handlePWFacing(w http.ResponseWriter, reqPath string) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(res)
-	s.recordStats(reqPath, false, false)
+	s.recordStats(ctx, reqPath, false, false)
 }
 
-func (s *Server) renderIndexHTML(content []byte) []byte {
+func (s *Server) renderIndexHTML(ctx context.Context, content []byte) []byte {
 	htmlStr := string(content)
-	status := s.PW.Status()
+	status := s.PW.Status(ctx)
 	ver := ""
 	hash := ""
 	if statusMap, okStatus := status.(map[string]any); okStatus && statusMap != nil {
@@ -193,12 +193,13 @@ func (s *Server) proxyLocalGateway(ctx context.Context, w http.ResponseWriter, r
 	maps.Copy(w.Header(), gwResp.Header)
 	w.WriteHeader(gwResp.StatusCode)
 	_, _ = io.Copy(w, gwResp.Body)
-	s.recordStats(reqPath, false, false)
+	s.recordStats(ctx, reqPath, false, false)
 
 	return true
 }
 
 func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request, reqPath string) {
+	ctx := r.Context()
 	cookieSuffix := "path=/;"
 	if s.Config.HTTPSMode == "yes" || s.Config.HTTPSMode == "http" {
 		cookieSuffix = "path=/;SameSite=None;Secure;"
@@ -214,7 +215,7 @@ func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request, reqPath strin
 	content, mime, err := GetStatic(s.WebRoot, targetFile)
 	if err == nil && content != nil {
 		if targetFile == "/index.html" {
-			content = s.renderIndexHTML(content)
+			content = s.renderIndexHTML(ctx, content)
 		}
 
 		if s.Config.BrowserCache > 0 &&
@@ -228,20 +229,20 @@ func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request, reqPath strin
 		w.WriteHeader(http.StatusOK)
 		//nolint:gosec // Static file contents served directly
 		_, _ = w.Write(content)
-		s.recordStats(reqPath, false, false)
+		s.recordStats(ctx, reqPath, false, false)
 
 		return
 	}
 
-	if s.proxyLocalGateway(r.Context(), w, reqPath) {
+	if s.proxyLocalGateway(ctx, w, reqPath) {
 		return
 	}
 
 	http.NotFound(w, r)
-	s.recordStats(reqPath, true, false)
+	s.recordStats(ctx, reqPath, true, false)
 }
 
-func (s *Server) handleStats(w http.ResponseWriter) {
+func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 	s.statsMu.RLock()
 	now := time.Now()
 	delta := int(now.Sub(s.StartTime).Seconds())
@@ -277,7 +278,7 @@ func (s *Server) handleStats(w http.ResponseWriter) {
 		"clear":       clearTS,
 		"uptime":      uptime,
 		"mem":         m.Alloc / kiloByte,
-		keySiteName:   s.PW.SiteName(),
+		keySiteName:   s.PW.SiteName(ctx),
 		"cloudmode":   s.PW.IsCloud(),
 		"fleetapi":    s.PW.IsFleetAPI(),
 		"tedapi":      s.PW.IsTEDAPI(),
@@ -303,7 +304,7 @@ func (s *Server) handleStats(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(stats)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter) {
+func (s *Server) handleHealth(_ context.Context, w http.ResponseWriter) {
 	s.statsMu.RLock()
 	gets := s.statsGets
 	posts := s.statsPost
@@ -347,7 +348,7 @@ func (s *Server) handleHealth(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(health)
 }
 
-func (s *Server) handleHelp(w http.ResponseWriter) {
+func (s *Server) handleHelp(_ context.Context, w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<html><head><title>pyPowerwall Proxy</title></head><body>
 <h1>pyPowerwall [%s] Proxy [%s]</h1>

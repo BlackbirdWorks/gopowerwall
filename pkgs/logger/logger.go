@@ -1,71 +1,62 @@
+// Package logger provides structured logging built on log/slog, carried on the
+// context so that callers control verbosity and destination rather than the
+// library holding global state.
 package logger
 
 import (
-	"fmt"
-	"os"
-	"sync"
+	"context"
+	"io"
+	"log/slog"
 )
 
-// Global state for logger matching pypowerwall's module-level debug toggle.
-//
-//nolint:gochecknoglobals // Global logging flags required for module-wide parity with pypowerwall.
-var (
-	mu        sync.RWMutex
-	debugMode bool
-	colorLogs = true
-)
+// ctxKey is the private context key under which a logger is stored.
+type ctxKey struct{}
 
-// SetDebug enables or disables verbose debug logging.
-func SetDebug(toggle bool, color ...bool) {
-	mu.Lock()
-	defer mu.Unlock()
-	debugMode = toggle
-	if len(color) > 0 {
-		colorLogs = color[0]
-	} else {
-		colorLogs = true
+// New returns a logger writing text-formatted records to w at the given level.
+// Timestamps are omitted so that command output stays stable and diffable; the
+// gateway supplies its own timestamps on the data it returns.
+func New(w io.Writer, level slog.Level) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+
+			return a
+		},
+	}))
+}
+
+// LevelFor returns the log level implied by a debug toggle.
+func LevelFor(debug bool) slog.Level {
+	if debug {
+		return slog.LevelDebug
 	}
+
+	return slog.LevelInfo
 }
 
-// IsDebug returns whether debug logging is enabled.
-func IsDebug() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	return debugMode
+// Into returns a copy of ctx carrying l, so that code further down the call
+// stack can retrieve it with [Load].
+func Into(ctx context.Context, l *slog.Logger) context.Context {
+	return context.WithValue(ctx, ctxKey{}, l)
 }
 
-// LogDebug writes a debug message if debugMode is enabled.
-//
-//nolint:goprintffuncname // Named for parity with pypowerwall.
-func LogDebug(format string, v ...any) {
-	if !IsDebug() {
-		return
+// Load returns the logger carried by ctx, falling back to [slog.Default] when
+// the context carries none. It never returns nil.
+func Load(ctx context.Context) *slog.Logger {
+	if ctx != nil {
+		if l, ok := ctx.Value(ctxKey{}).(*slog.Logger); ok && l != nil {
+			return l
+		}
 	}
-	mu.RLock()
-	colored := colorLogs
-	mu.RUnlock()
 
-	msg := fmt.Sprintf(format, v...)
-	if colored {
-		fmt.Fprintf(os.Stdout, "\x1b[31;1mDEBUG: %s\x1b[0m\n", msg)
-	} else {
-		fmt.Fprintf(os.Stdout, "DEBUG: %s\n", msg)
-	}
+	return slog.Default()
 }
 
-// LogError writes an error message.
-//
-//nolint:goprintffuncname // Named for parity with pypowerwall.
-func LogError(format string, v ...any) {
-	msg := fmt.Sprintf(format, v...)
-	fmt.Fprintf(os.Stderr, "ERROR: %s\n", msg)
-}
-
-// LogWarn writes a warning message.
-//
-//nolint:goprintffuncname // Named for parity with pypowerwall.
-func LogWarn(format string, v ...any) {
-	msg := fmt.Sprintf(format, v...)
-	fmt.Fprintf(os.Stdout, "WARNING: %s\n", msg)
+// With returns a copy of ctx carrying the context's logger extended with args,
+// so that attributes accumulate as a request descends the call stack.
+func With(ctx context.Context, args ...any) context.Context {
+	return Into(ctx, Load(ctx).With(args...))
 }

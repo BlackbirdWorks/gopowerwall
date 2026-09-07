@@ -124,7 +124,7 @@ func NewTEDAPIv1r(host, password, rsaKeyPath string, timeout time.Duration, pool
 }
 
 // Login authenticates with the gateway via /api/login/Basic to obtain a Bearer token.
-func (v *TEDAPIv1r) Login() error {
+func (v *TEDAPIv1r) Login(ctx context.Context) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -139,7 +139,7 @@ func (v *TEDAPIv1r) Login() error {
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -165,13 +165,13 @@ func (v *TEDAPIv1r) Login() error {
 	}
 
 	v.token = res.Token
-	logger.LogDebug("v1r login successful, token acquired")
+	logger.Load(ctx).DebugContext(ctx, "v1r login successful, token acquired")
 
 	return nil
 }
 
 // GetDin queries the gateway DIN via /tedapi/din.
-func (v *TEDAPIv1r) GetDin() (string, error) {
+func (v *TEDAPIv1r) GetDin(ctx context.Context) (string, error) {
 	v.mu.Lock()
 	if v.din != "" {
 		din := v.din
@@ -182,7 +182,7 @@ func (v *TEDAPIv1r) GetDin() (string, error) {
 	v.mu.Unlock()
 
 	url := fmt.Sprintf("https://%s/tedapi/din", v.host)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -259,7 +259,7 @@ func (v *TEDAPIv1r) Sign(tlvPayload []byte) ([]byte, error) {
 }
 
 // PostV1r wraps envelopeBytes in an RSA-signed RoutableMessage and POSTs to /tedapi/v1r.
-func (v *TEDAPIv1r) PostV1r(envelopeBytes []byte, din string) ([]byte, error) {
+func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din string) ([]byte, error) {
 	routable := &combined.RoutableMessage{
 		ToDestination: &combined.Destination{
 			SubDestination: &combined.Destination_Domain{
@@ -300,7 +300,7 @@ func (v *TEDAPIv1r) PostV1r(envelopeBytes []byte, din string) ([]byte, error) {
 	}
 
 	url := fmt.Sprintf("https://%s/tedapi/v1r", v.host)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(wireBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -313,11 +313,11 @@ func (v *TEDAPIv1r) PostV1r(envelopeBytes []byte, din string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		logger.LogWarn("v1r auth error (%d), attempting re-login", resp.StatusCode)
-		if loginErr := v.Login(); loginErr == nil {
+		logger.Load(ctx).WarnContext(ctx, "v1r auth error, attempting re-login", "status", resp.StatusCode)
+		if loginErr := v.Login(ctx); loginErr == nil {
 			// Retry once
 			req2, _ := http.NewRequestWithContext(
-				context.Background(),
+				ctx,
 				http.MethodPost,
 				url,
 				bytes.NewReader(wireBytes),
@@ -359,7 +359,11 @@ func (v *TEDAPIv1r) PostV1r(envelopeBytes []byte, din string) ([]byte, error) {
 }
 
 // SendTEGMessage sends a TEGMessages command via v1r and parses the response envelope.
-func (v *TEDAPIv1r) SendTEGMessage(din string, teg *combined.TEGMessages) (*combined.MessageEnvelope, error) {
+func (v *TEDAPIv1r) SendTEGMessage(
+	ctx context.Context,
+	din string,
+	teg *combined.TEGMessages,
+) (*combined.MessageEnvelope, error) {
 	msg := &combined.MessageEnvelope{
 		DeliveryChannel: combined.DeliveryChannel_DELIVERY_CHANNEL_HERMES_COMMAND,
 		Sender: &combined.Participant{
@@ -382,7 +386,7 @@ func (v *TEDAPIv1r) SendTEGMessage(din string, teg *combined.TEGMessages) (*comb
 		return nil, err
 	}
 
-	inner, err := v.PostV1r(envelopeBytes, din)
+	inner, err := v.PostV1r(ctx, envelopeBytes, din)
 	if err != nil {
 		return nil, err
 	}
@@ -396,8 +400,8 @@ func (v *TEDAPIv1r) SendTEGMessage(din string, teg *combined.TEGMessages) (*comb
 }
 
 // ScheduleMaxBackup schedules a manual backup event (storm watch / max backup) via v1r TEGMessages.
-func (v *TEDAPIv1r) ScheduleMaxBackup(durationSeconds int) (bool, error) {
-	din, err := v.GetDin()
+func (v *TEDAPIv1r) ScheduleMaxBackup(ctx context.Context, durationSeconds int) (bool, error) {
+	din, err := v.GetDin(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -406,7 +410,7 @@ func (v *TEDAPIv1r) ScheduleMaxBackup(durationSeconds int) (bool, error) {
 	}
 
 	// Gateway requires canceling existing backup event before scheduling new
-	_, _ = v.CancelMaxBackup()
+	_, _ = v.CancelMaxBackup(ctx)
 
 	now := time.Now().Unix()
 	teg := &combined.TEGMessages{
@@ -423,13 +427,13 @@ func (v *TEDAPIv1r) ScheduleMaxBackup(durationSeconds int) (bool, error) {
 		},
 	}
 
-	resp, err := v.SendTEGMessage(din, teg)
+	resp, err := v.SendTEGMessage(ctx, din, teg)
 	if err != nil {
 		return false, err
 	}
 
 	if resp.GetTeg() != nil && resp.GetTeg().GetScheduleManualBackupEventResponse() != nil {
-		logger.LogDebug("Max backup scheduled for %ds", durationSeconds)
+		logger.Load(ctx).DebugContext(ctx, "max backup scheduled", "duration_seconds", durationSeconds)
 
 		return true, nil
 	}
@@ -438,8 +442,8 @@ func (v *TEDAPIv1r) ScheduleMaxBackup(durationSeconds int) (bool, error) {
 }
 
 // CancelMaxBackup cancels the active manual backup event via v1r TEGMessages.
-func (v *TEDAPIv1r) CancelMaxBackup() (bool, error) {
-	din, err := v.GetDin()
+func (v *TEDAPIv1r) CancelMaxBackup(ctx context.Context) (bool, error) {
+	din, err := v.GetDin(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -450,13 +454,13 @@ func (v *TEDAPIv1r) CancelMaxBackup() (bool, error) {
 		},
 	}
 
-	resp, err := v.SendTEGMessage(din, teg)
+	resp, err := v.SendTEGMessage(ctx, din, teg)
 	if err != nil {
 		return false, err
 	}
 
 	if resp.GetTeg() != nil && resp.GetTeg().GetCancelManualBackupEventResponse() != nil {
-		logger.LogDebug("Max backup cancelled")
+		logger.Load(ctx).DebugContext(ctx, "max backup cancelled")
 
 		return true, nil
 	}
@@ -465,8 +469,8 @@ func (v *TEDAPIv1r) CancelMaxBackup() (bool, error) {
 }
 
 // GetBackupEvents retrieves active backup events via v1r TEGMessages.
-func (v *TEDAPIv1r) GetBackupEvents() (map[string]any, error) {
-	din, err := v.GetDin()
+func (v *TEDAPIv1r) GetBackupEvents(ctx context.Context) (map[string]any, error) {
+	din, err := v.GetDin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +481,7 @@ func (v *TEDAPIv1r) GetBackupEvents() (map[string]any, error) {
 		},
 	}
 
-	resp, err := v.SendTEGMessage(din, teg)
+	resp, err := v.SendTEGMessage(ctx, din, teg)
 	if err != nil {
 		return nil, err
 	}
@@ -514,9 +518,9 @@ func (v *TEDAPIv1r) GetBackupEvents() (map[string]any, error) {
 }
 
 // APIGet makes an authenticated GET request with the Bearer token to a standard gateway endpoint.
-func (v *TEDAPIv1r) APIGet(path string) (any, error) {
+func (v *TEDAPIv1r) APIGet(ctx context.Context, path string) (any, error) {
 	url := fmt.Sprintf("https://%s%s", v.host, path)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

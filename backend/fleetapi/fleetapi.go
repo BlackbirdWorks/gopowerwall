@@ -52,8 +52,8 @@ type PyPowerwallFleetAPI struct {
 	cache       *cache.ResponseCache
 	client      *http.Client
 	configData  map[string]any
-	pollAPIMap  map[string]func(force, recursive, raw bool) (any, error)
-	postAPIMap  map[string]func(payload any, din string, recursive, raw bool) (any, error)
+	pollAPIMap  map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap  map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
 	email       string
 	siteID      string
 	authPath    string
@@ -82,86 +82,86 @@ func New(email string, cacheTTL, timeout time.Duration, siteID, authPath string)
 }
 
 func (f *PyPowerwallFleetAPI) initAPIMaps() {
-	f.pollAPIMap = map[string]func(force, recursive, raw bool) (any, error){
-		"/api/devices/vitals": func(_, _, _ bool) (any, error) {
+	f.pollAPIMap = map[string]func(ctx context.Context, force, recursive, raw bool) (any, error){
+		"/api/devices/vitals": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{}, nil
 		},
-		"/vitals": func(_, _, _ bool) (any, error) {
+		"/vitals": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{}, nil
 		},
-		"/api/meters/aggregates": func(force, _, _ bool) (any, error) {
-			return f.getAPIMetersAggregates(force)
+		"/api/meters/aggregates": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPIMetersAggregates(ctx, force)
 		},
-		"/api/operation": func(force, _, _ bool) (any, error) {
-			return f.getAPIOperation(force)
+		"/api/operation": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPIOperation(ctx, force)
 		},
-		"/api/site_info": func(force, _, _ bool) (any, error) {
-			return f.getAPISiteInfo(force)
+		"/api/site_info": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPISiteInfo(ctx, force)
 		},
-		"/api/site_info/site_name": func(force, _, _ bool) (any, error) {
-			return f.getAPISiteInfoSiteName(force)
+		"/api/site_info/site_name": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPISiteInfoSiteName(ctx, force)
 		},
-		"/api/status": func(force, _, _ bool) (any, error) {
-			return f.getAPIStatus(force)
+		"/api/status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPIStatus(ctx, force)
 		},
-		"/api/system_status": func(force, _, _ bool) (any, error) {
-			return f.getAPISystemStatus(force)
+		"/api/system_status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPISystemStatus(ctx, force)
 		},
-		"/api/system_status/grid_status": func(force, _, _ bool) (any, error) {
-			return f.getAPISystemStatusGridStatus(force)
+		"/api/system_status/grid_status": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPISystemStatusGridStatus(ctx, force)
 		},
-		"/api/system_status/soe": func(force, _, _ bool) (any, error) {
-			return f.getAPISystemStatusSOE(force)
+		"/api/system_status/soe": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPISystemStatusSOE(ctx, force)
 		},
-		"/api/login/Basic": func(_, _, _ bool) (any, error) {
+		"/api/login/Basic": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{"token": "fleetapi_token"}, nil
 		},
-		"/api/logout": func(_, _, _ bool) (any, error) {
+		"/api/logout": func(_ context.Context, _, _, _ bool) (any, error) {
 			return map[string]any{"message": "logged out"}, nil
 		},
-		"/api/powerwalls": func(_, _, _ bool) (any, error) {
+		"/api/powerwalls": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockPowerwalls), nil
 		},
-		"/api/meters/site": func(_, _, _ bool) (any, error) {
+		"/api/meters/site": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockMetersSite), nil
 		},
-		"/api/meters": func(_, _, _ bool) (any, error) {
+		"/api/meters": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockMeters), nil
 		},
-		"/api/sitemaster": func(_, _, _ bool) (any, error) {
+		"/api/sitemaster": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSitemaster), nil
 		},
-		"/api/customer": func(_, _, _ bool) (any, error) {
+		"/api/customer": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockCustomer), nil
 		},
-		"/api/installer": func(_, _, _ bool) (any, error) {
+		"/api/installer": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockInstaller), nil
 		},
-		"/api/networks": func(_, _, _ bool) (any, error) {
+		"/api/networks": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockNetworks), nil
 		},
-		"/api/auth/toggle/supported": func(_, _, _ bool) (any, error) {
+		"/api/auth/toggle/supported": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockAuthToggle), nil
 		},
-		"/api/system/update/status": func(_, _, _ bool) (any, error) {
+		"/api/system/update/status": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockUpdate), nil
 		},
-		"/api/solars": func(_, _, _ bool) (any, error) {
+		"/api/solars": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSolars), nil
 		},
 	}
 
-	f.postAPIMap = map[string]func(payload any, din string, recursive, raw bool) (any, error){
+	f.postAPIMap = map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error){
 		"/api/operation": f.postAPIOperation,
 	}
 }
 
 // Authenticate reads the FleetAPI configuration file and verifies authentication.
-func (f *PyPowerwallFleetAPI) Authenticate() error {
+func (f *PyPowerwallFleetAPI) Authenticate(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	logger.LogDebug("Tesla FleetAPI mode enabled")
+	logger.Load(ctx).DebugContext(ctx, "FleetAPI mode enabled")
 	cfgPath := filepath.Join(f.authPath, ConfigFile)
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -188,41 +188,41 @@ func (f *PyPowerwallFleetAPI) Authenticate() error {
 		return fmt.Errorf("%w: missing access_token in FleetAPI config file", backend.ErrLogin)
 	}
 
-	logger.LogDebug("FleetAPI connected (site: %s, base: %s)", f.siteID, f.baseURL)
+	logger.Load(ctx).DebugContext(ctx, "FleetAPI connected", "site", f.siteID, "base_url", f.baseURL)
 
 	return nil
 }
 
 // Close closes any open sessions.
-func (f *PyPowerwallFleetAPI) Close() error {
+func (f *PyPowerwallFleetAPI) Close(_ context.Context) error {
 	return nil
 }
 
 // Poll fetches an endpoint through dispatch or returns an unknown API error.
-func (f *PyPowerwallFleetAPI) Poll(api string, force, recursive, raw bool) (any, error) {
+func (f *PyPowerwallFleetAPI) Poll(ctx context.Context, api string, force, recursive, raw bool) (any, error) {
 	handler, ok := f.pollAPIMap[api]
 	if !ok {
-		logger.LogError(" -- fleetapi: Unknown API: %s", api)
+		logger.Load(ctx).ErrorContext(ctx, "unknown fleetapi poll endpoint", "api", api)
 
 		return map[string]string{"ERROR": "Unknown API: " + api}, nil
 	}
 
-	return handler(force, recursive, raw)
+	return handler(ctx, force, recursive, raw)
 }
 
 // Post sends a command to the FleetAPI endpoint.
-func (f *PyPowerwallFleetAPI) Post(api string, payload any, _ string, _, _ bool) (any, error) {
+func (f *PyPowerwallFleetAPI) Post(ctx context.Context, api string, payload any, _ string, _, _ bool) (any, error) {
 	handler, ok := f.postAPIMap[api]
 	if !ok {
-		logger.LogError(" -- fleetapi: Unknown POST API: %s", api)
+		logger.Load(ctx).ErrorContext(ctx, "unknown fleetapi post endpoint", "api", api)
 
 		return map[string]string{"ERROR": "Unknown API: " + api}, nil
 	}
 
-	return handler(payload, "", false, false)
+	return handler(ctx, payload, "", false, false)
 }
 
-func (f *PyPowerwallFleetAPI) getSiteData(force bool) (map[string]any, error) {
+func (f *PyPowerwallFleetAPI) getSiteData(ctx context.Context, force bool) (map[string]any, error) {
 	if !force {
 		if val, found, _ := f.cache.Get("SITE_DATA"); found {
 			if m, ok := val.(map[string]any); ok {
@@ -232,7 +232,7 @@ func (f *PyPowerwallFleetAPI) getSiteData(force bool) (map[string]any, error) {
 	}
 
 	url := fmt.Sprintf("%s/api/1/energy_sites/%s/live_status", f.baseURL, f.siteID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +254,7 @@ func (f *PyPowerwallFleetAPI) getSiteData(force bool) (map[string]any, error) {
 	return data, nil
 }
 
-func (f *PyPowerwallFleetAPI) getSiteConfig(force bool) (map[string]any, error) {
+func (f *PyPowerwallFleetAPI) getSiteConfig(ctx context.Context, force bool) (map[string]any, error) {
 	if !force {
 		if val, found, _ := f.cache.Get("SITE_CONFIG", siteConfigTTL); found {
 			if m, ok := val.(map[string]any); ok {
@@ -264,7 +264,7 @@ func (f *PyPowerwallFleetAPI) getSiteConfig(force bool) (map[string]any, error) 
 	}
 
 	url := fmt.Sprintf("%s/api/1/energy_sites/%s/site_info", f.baseURL, f.siteID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -295,9 +295,9 @@ func updateFleetInstantPower(stub map[string]any, key string, power any) {
 	}
 }
 
-func (f *PyPowerwallFleetAPI) getAPIMetersAggregates(force bool) (any, error) {
+func (f *PyPowerwallFleetAPI) getAPIMetersAggregates(ctx context.Context, force bool) (any, error) {
 	stub := stubs.MetersAggregatesStub()
-	data, _ := f.getSiteData(force)
+	data, _ := f.getSiteData(ctx, force)
 	if data == nil {
 		return stub, nil
 	}
@@ -315,8 +315,8 @@ func (f *PyPowerwallFleetAPI) getAPIMetersAggregates(force bool) (any, error) {
 	return stub, nil
 }
 
-func (f *PyPowerwallFleetAPI) getAPIOperation(force bool) (any, error) {
-	cfg, _ := f.getSiteConfig(force)
+func (f *PyPowerwallFleetAPI) getAPIOperation(ctx context.Context, force bool) (any, error) {
+	cfg, _ := f.getSiteConfig(ctx, force)
 	mode := "self_consumption"
 	reserve := 20.0
 
@@ -337,15 +337,15 @@ func (f *PyPowerwallFleetAPI) getAPIOperation(force bool) (any, error) {
 	}, nil
 }
 
-func (f *PyPowerwallFleetAPI) postAPIOperation(payload any, _ string, _, _ bool) (any, error) {
-	logger.LogDebug("FleetAPI post operation: %v", payload)
+func (f *PyPowerwallFleetAPI) postAPIOperation(ctx context.Context, payload any, _ string, _, _ bool) (any, error) {
+	logger.Load(ctx).DebugContext(ctx, "FleetAPI post operation", "payload", payload)
 	f.cache.Invalidate("/api/operation")
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
-func (f *PyPowerwallFleetAPI) getAPISiteInfo(force bool) (any, error) {
-	cfg, _ := f.getSiteConfig(force)
+func (f *PyPowerwallFleetAPI) getAPISiteInfo(ctx context.Context, force bool) (any, error) {
+	cfg, _ := f.getSiteConfig(ctx, force)
 	siteName := "Powerwall"
 	tz := "America/Los_Angeles"
 	if cfg != nil {
@@ -363,12 +363,12 @@ func (f *PyPowerwallFleetAPI) getAPISiteInfo(force bool) (any, error) {
 	}, nil
 }
 
-func (f *PyPowerwallFleetAPI) getAPISiteInfoSiteName(force bool) (any, error) {
-	return f.getAPISiteInfo(force)
+func (f *PyPowerwallFleetAPI) getAPISiteInfoSiteName(ctx context.Context, force bool) (any, error) {
+	return f.getAPISiteInfo(ctx, force)
 }
 
-func (f *PyPowerwallFleetAPI) getAPIStatus(force bool) (any, error) {
-	cfg, _ := f.getSiteConfig(force)
+func (f *PyPowerwallFleetAPI) getAPIStatus(ctx context.Context, force bool) (any, error) {
+	cfg, _ := f.getSiteConfig(ctx, force)
 	din := f.siteID
 	var version any = "23.28.2 27626f98"
 	if cfg != nil {
@@ -396,15 +396,15 @@ func (f *PyPowerwallFleetAPI) getAPIStatus(force bool) (any, error) {
 	}, nil
 }
 
-func (f *PyPowerwallFleetAPI) getAPISystemStatus(_ bool) (any, error) {
+func (f *PyPowerwallFleetAPI) getAPISystemStatus(_ context.Context, _ bool) (any, error) {
 	stub := stubs.SystemStatusStub()
 	stub["battery_blocks"] = []any{}
 
 	return stub, nil
 }
 
-func (f *PyPowerwallFleetAPI) getAPISystemStatusGridStatus(force bool) (any, error) {
-	data, _ := f.getSiteData(force)
+func (f *PyPowerwallFleetAPI) getAPISystemStatusGridStatus(ctx context.Context, force bool) (any, error) {
+	data, _ := f.getSiteData(ctx, force)
 	statusStr := "SystemGridConnected"
 	if data != nil {
 		gridStatus := lookup.Lookup(data, "response", "grid_status")
@@ -420,8 +420,8 @@ func (f *PyPowerwallFleetAPI) getAPISystemStatusGridStatus(force bool) (any, err
 	}, nil
 }
 
-func (f *PyPowerwallFleetAPI) getAPISystemStatusSOE(force bool) (any, error) {
-	data, _ := f.getSiteData(force)
+func (f *PyPowerwallFleetAPI) getAPISystemStatusSOE(ctx context.Context, force bool) (any, error) {
+	data, _ := f.getSiteData(ctx, force)
 	pct := 100.0
 	if data != nil {
 		if p := lookup.Lookup(data, "response", "percentage_charged"); p != nil {
@@ -437,22 +437,22 @@ func (f *PyPowerwallFleetAPI) getAPISystemStatusSOE(force bool) (any, error) {
 }
 
 // Vitals returns vitals data for the Powerwall system.
-func (f *PyPowerwallFleetAPI) Vitals() (map[string]any, error) {
+func (f *PyPowerwallFleetAPI) Vitals(_ context.Context) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
 // GetTimeRemaining returns the time remaining until Powerwall is depleted.
 // Invariant: get_time_remaining() returns 0.0 in FleetAPI mode when unknown.
-func (f *PyPowerwallFleetAPI) GetTimeRemaining() (*float64, error) {
+func (f *PyPowerwallFleetAPI) GetTimeRemaining(_ context.Context) (*float64, error) {
 	zero := 0.0
 
 	return &zero, nil
 }
 
 // Power returns current aggregate power values across site, solar, battery, and load.
-func (f *PyPowerwallFleetAPI) Power() (map[string]float64, error) {
+func (f *PyPowerwallFleetAPI) Power(ctx context.Context) (map[string]float64, error) {
 	site, solar, battery, load := 0.0, 0.0, 0.0, 0.0
-	payload, err := f.Poll("/api/meters/aggregates", false, false, false)
+	payload, err := f.Poll(ctx, "/api/meters/aggregates", false, false, false)
 	if err == nil && payload != nil {
 		site = getFloatVal(lookup.Lookup(payload, "site", "instant_power"))
 		solar = getFloatVal(lookup.Lookup(payload, "solar", "instant_power"))
@@ -469,9 +469,9 @@ func (f *PyPowerwallFleetAPI) Power() (map[string]float64, error) {
 }
 
 // FetchPower returns instant power or detailed sensor reading.
-func (f *PyPowerwallFleetAPI) FetchPower(sensor string, verbose bool) (any, error) {
+func (f *PyPowerwallFleetAPI) FetchPower(ctx context.Context, sensor string, verbose bool) (any, error) {
 	if verbose {
-		payload, err := f.Poll("/api/meters/aggregates", false, false, false)
+		payload, err := f.Poll(ctx, "/api/meters/aggregates", false, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +481,7 @@ func (f *PyPowerwallFleetAPI) FetchPower(sensor string, verbose bool) (any, erro
 
 		return nil, backend.ErrNotFound
 	}
-	p, err := f.Power()
+	p, err := f.Power(ctx)
 	if err != nil {
 		return 0.0, err
 	}
@@ -490,15 +490,15 @@ func (f *PyPowerwallFleetAPI) FetchPower(sensor string, verbose bool) (any, erro
 }
 
 // SetGridCharging controls grid charging in FleetAPI mode.
-func (f *PyPowerwallFleetAPI) SetGridCharging(mode bool) (map[string]any, error) {
-	logger.LogDebug("SetGridCharging(%v)", mode)
+func (f *PyPowerwallFleetAPI) SetGridCharging(ctx context.Context, mode bool) (map[string]any, error) {
+	logger.Load(ctx).DebugContext(ctx, "set grid charging", "mode", mode)
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
 // GetGridCharging returns current grid charging mode.
-func (f *PyPowerwallFleetAPI) GetGridCharging() (*bool, error) {
-	cfg, err := f.getSiteConfig(false)
+func (f *PyPowerwallFleetAPI) GetGridCharging(ctx context.Context) (*bool, error) {
+	cfg, err := f.getSiteConfig(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -514,15 +514,15 @@ func (f *PyPowerwallFleetAPI) GetGridCharging() (*bool, error) {
 }
 
 // SetGridExport controls grid export in FleetAPI mode.
-func (f *PyPowerwallFleetAPI) SetGridExport(mode string) (map[string]any, error) {
-	logger.LogDebug("SetGridExport(%s)", mode)
+func (f *PyPowerwallFleetAPI) SetGridExport(ctx context.Context, mode string) (map[string]any, error) {
+	logger.Load(ctx).DebugContext(ctx, "set grid export", "mode", mode)
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
 // GetGridExport returns current grid export mode.
-func (f *PyPowerwallFleetAPI) GetGridExport() (*string, error) {
-	cfg, err := f.getSiteConfig(false)
+func (f *PyPowerwallFleetAPI) GetGridExport(ctx context.Context) (*string, error) {
+	cfg, err := f.getSiteConfig(ctx, false)
 	if err != nil {
 		return nil, err
 	}

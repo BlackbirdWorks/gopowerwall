@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -25,7 +26,7 @@ var (
 	errInvalidMode         = errors.New("control command mode invalid")
 )
 
-func (s *Server) checkControlToken(token string) bool {
+func (s *Server) checkControlToken(_ context.Context, token string) bool {
 	if s.Config.ControlSecret == "" || token == "" {
 		return false
 	}
@@ -36,13 +37,14 @@ func (s *Server) checkControlToken(token string) bool {
 }
 
 func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, reqPath string) {
+	ctx := r.Context()
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	if !strings.HasPrefix(reqPath, "/control") {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Invalid Request"})
-		s.recordStats(reqPath, true, false)
+		s.recordStats(ctx, reqPath, true, false)
 
 		return
 	}
@@ -50,7 +52,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, reqPath stri
 	if s.Config.ControlSecret == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: errControlSecretNotSet.Error()})
-		s.recordStats(reqPath, true, false)
+		s.recordStats(ctx, reqPath, true, false)
 
 		return
 	}
@@ -58,7 +60,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, reqPath stri
 	if r.ContentLength > MaxPostBody {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: errInvalidRequest.Error()})
-		s.recordStats(reqPath, true, false)
+		s.recordStats(ctx, reqPath, true, false)
 
 		return
 	}
@@ -67,7 +69,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, reqPath stri
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: errInvalidRequest.Error()})
-		s.recordStats(reqPath, true, false)
+		s.recordStats(ctx, reqPath, true, false)
 
 		return
 	}
@@ -76,16 +78,16 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, reqPath stri
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: errInvalidRequest.Error()})
-		s.recordStats(reqPath, true, false)
+		s.recordStats(ctx, reqPath, true, false)
 
 		return
 	}
 
 	token := vals.Get("token")
-	if !s.checkControlToken(token) {
+	if !s.checkControlToken(ctx, token) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{"unauthorized": errInvalidToken.Error()})
-		s.recordStats(reqPath, true, false)
+		s.recordStats(ctx, reqPath, true, false)
 
 		return
 	}
@@ -100,32 +102,32 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, reqPath stri
 		action = parts[1]
 	}
 
-	s.dispatchControl(w, action, vals)
+	s.dispatchControl(ctx, w, action, vals)
 }
 
-func (s *Server) dispatchControl(w http.ResponseWriter, action string, vals url.Values) {
+func (s *Server) dispatchControl(ctx context.Context, w http.ResponseWriter, action string, vals url.Values) {
 	value := vals.Get("value")
 
 	switch action {
 	case keyReserve:
-		s.handleControlReserve(w, value, vals.Get("mode"))
+		s.handleControlReserve(ctx, w, value, vals.Get("mode"))
 	case keyMode:
-		s.handleControlMode(w, value, vals.Get("level"))
+		s.handleControlMode(ctx, w, value, vals.Get("level"))
 	case keyGridCharging:
-		s.handleControlGridCharging(w, value)
+		s.handleControlGridCharging(ctx, w, value)
 	case keyGridExport:
-		s.handleControlGridExport(w, value)
+		s.handleControlGridExport(ctx, w, value)
 	case keyMaxBackup:
-		s.handleControlMaxBackup(w, value)
+		s.handleControlMaxBackup(ctx, w, value)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Invalid Command Action"})
 	}
 }
 
-func (s *Server) handleControlReserve(w http.ResponseWriter, value, mode string) {
+func (s *Server) handleControlReserve(ctx context.Context, w http.ResponseWriter, value, mode string) {
 	if value == "" {
-		res := s.PW.GetReserve(false, false)
+		res := s.PW.GetReserve(ctx, false, false)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyReserve: res})
 
 		return
@@ -147,7 +149,7 @@ func (s *Server) handleControlReserve(w http.ResponseWriter, value, mode string)
 			return
 		}
 		fVal := float64(intVal)
-		res, setErr := s.PW.SetOperation(&fVal, &mode)
+		res, setErr := s.PW.SetOperation(ctx, &fVal, &mode)
 		if setErr != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to set reserve+mode"})
@@ -159,7 +161,7 @@ func (s *Server) handleControlReserve(w http.ResponseWriter, value, mode string)
 		return
 	}
 
-	res, setErr := s.PW.SetReserve(float64(intVal))
+	res, setErr := s.PW.SetReserve(ctx, float64(intVal))
 	if setErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to set reserve"})
@@ -169,9 +171,9 @@ func (s *Server) handleControlReserve(w http.ResponseWriter, value, mode string)
 	_ = json.NewEncoder(w).Encode(res)
 }
 
-func (s *Server) handleControlMode(w http.ResponseWriter, value, levelStr string) {
+func (s *Server) handleControlMode(ctx context.Context, w http.ResponseWriter, value, levelStr string) {
 	if value == "" {
-		res := s.PW.GetMode()
+		res := s.PW.GetMode(ctx)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyMode: res})
 
 		return
@@ -193,7 +195,7 @@ func (s *Server) handleControlMode(w http.ResponseWriter, value, levelStr string
 			return
 		}
 		fLvl := float64(lvl)
-		res, setErr := s.PW.SetOperation(&fLvl, &value)
+		res, setErr := s.PW.SetOperation(ctx, &fLvl, &value)
 		if setErr != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to set reserve+mode"})
@@ -205,7 +207,7 @@ func (s *Server) handleControlMode(w http.ResponseWriter, value, levelStr string
 		return
 	}
 
-	res, setErr := s.PW.SetMode(value)
+	res, setErr := s.PW.SetMode(ctx, value)
 	if setErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to set mode"})
@@ -215,9 +217,9 @@ func (s *Server) handleControlMode(w http.ResponseWriter, value, levelStr string
 	_ = json.NewEncoder(w).Encode(res)
 }
 
-func (s *Server) handleControlGridCharging(w http.ResponseWriter, value string) {
+func (s *Server) handleControlGridCharging(ctx context.Context, w http.ResponseWriter, value string) {
 	if value == "" {
-		gc := s.PW.GetGridCharging()
+		gc := s.PW.GetGridCharging(ctx)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyGridCharging: gc})
 
 		return
@@ -232,7 +234,7 @@ func (s *Server) handleControlGridCharging(w http.ResponseWriter, value string) 
 	}
 
 	bVal := lower == valTrue
-	_, setErr := s.PW.SetGridCharging(bVal)
+	_, setErr := s.PW.SetGridCharging(ctx, bVal)
 	if setErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to set grid_charging"})
@@ -242,9 +244,9 @@ func (s *Server) handleControlGridCharging(w http.ResponseWriter, value string) 
 	_ = json.NewEncoder(w).Encode(map[string]string{keyGridCharging: "Set Successfully"})
 }
 
-func (s *Server) handleControlGridExport(w http.ResponseWriter, value string) {
+func (s *Server) handleControlGridExport(ctx context.Context, w http.ResponseWriter, value string) {
 	if value == "" {
-		ge := s.PW.GetGridExport()
+		ge := s.PW.GetGridExport(ctx)
 		_ = json.NewEncoder(w).Encode(map[string]any{keyGridExport: ge})
 
 		return
@@ -258,7 +260,7 @@ func (s *Server) handleControlGridExport(w http.ResponseWriter, value string) {
 		return
 	}
 
-	_, setErr := s.PW.SetGridExport(lower)
+	_, setErr := s.PW.SetGridExport(ctx, lower)
 	if setErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to set grid_export"})
@@ -268,7 +270,7 @@ func (s *Server) handleControlGridExport(w http.ResponseWriter, value string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{keyGridExport: "Set Successfully"})
 }
 
-func (s *Server) handleControlMaxBackup(w http.ResponseWriter, value string) {
+func (s *Server) handleControlMaxBackup(ctx context.Context, w http.ResponseWriter, value string) {
 	if !s.PW.IsTEDAPI() {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "max_backup requires v1r LAN transport"})
@@ -277,7 +279,7 @@ func (s *Server) handleControlMaxBackup(w http.ResponseWriter, value string) {
 	}
 
 	if value == "" {
-		events, err := s.PW.GetBackupEvents()
+		events, err := s.PW.GetBackupEvents(ctx)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to get backup events"})
@@ -290,7 +292,7 @@ func (s *Server) handleControlMaxBackup(w http.ResponseWriter, value string) {
 	}
 
 	if strings.EqualFold(value, "cancel") {
-		_, err := s.PW.CancelMaxBackup()
+		_, err := s.PW.CancelMaxBackup(ctx)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to cancel max backup"})
@@ -311,7 +313,7 @@ func (s *Server) handleControlMaxBackup(w http.ResponseWriter, value string) {
 		return
 	}
 
-	_, err = s.PW.ScheduleMaxBackup(sec)
+	_, err = s.PW.ScheduleMaxBackup(ctx, sec)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to schedule max backup"})

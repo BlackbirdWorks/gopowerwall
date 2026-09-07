@@ -295,7 +295,7 @@ func (c *Client) tryReauth(
 		return nil
 	}
 
-	logger.LogDebug("Received 401 Unauthorized - attempting reauth")
+	logger.Load(ctx).DebugContext(ctx, "received 401 Unauthorized, attempting reauth")
 	if err := reauth(ctx, c); err != nil {
 		return nil
 	}
@@ -319,7 +319,7 @@ func (c *Client) tryReauth(
 }
 
 // handleStatus processes HTTP response codes and extracts body or error.
-func (c *Client) handleStatus(resp *http.Response, endpoint string) ([]byte, error) {
+func (c *Client) handleStatus(ctx context.Context, resp *http.Response, endpoint string) ([]byte, error) {
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
 		respBytes, readErr := io.ReadAll(resp.Body)
@@ -334,7 +334,8 @@ func (c *Client) handleStatus(resp *http.Response, endpoint string) ([]byte, err
 
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
 		c.SetCooldown(defaultCooldownDuration)
-		logger.LogWarn("Received HTTP %d from %s - entered cooldown", resp.StatusCode, endpoint)
+		logger.Load(ctx).
+			WarnContext(ctx, "entered cooldown after throttling response", "status", resp.StatusCode, "endpoint", endpoint)
 
 		return nil, fmt.Errorf("%w: HTTP %d", backend.ErrRateLimited, resp.StatusCode)
 
@@ -391,7 +392,7 @@ func (c *Client) execute(ctx context.Context, method, path string, body []byte, 
 		}
 	}
 
-	return c.handleStatus(resp, endpoint)
+	return c.handleStatus(ctx, resp, endpoint)
 }
 
 // GetRaw performs an authenticated GET request returning raw response bytes.

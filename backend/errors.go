@@ -68,3 +68,14 @@ func (e *InvalidConfigError) Error() string {
 
 	return e.Message
 }
+
+var (
+	// ErrReserveOutOfRange indicates a backup reserve level outside 0-100.
+	ErrReserveOutOfRange = errors.New("reserve level must be between 0 and 100")
+
+	// ErrSetOperationFailed indicates the gateway rejected an operation change.
+	ErrSetOperationFailed = errors.New("failed to set operation")
+
+	// ErrInvalidGridExportMode indicates an unrecognised grid export mode.
+	ErrInvalidGridExportMode = errors.New("invalid grid export mode")
+)
