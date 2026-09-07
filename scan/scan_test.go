@@ -7,63 +7,101 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/scan"
 )
 
-func TestScanContextFormatting(t *testing.T) {
+const (
+	shortTimeout  = 100 * time.Millisecond
+	serverTimeout = 500 * time.Millisecond
+)
+
+func TestNewContextFormatting(t *testing.T) {
 	t.Parallel()
 
-	buf := &bytes.Buffer{}
-	cColor := scan.NewContext(100*time.Millisecond, true, true, buf)
-
-	if cColor.Bold() == "" || cColor.SubBold() == "" || cColor.Normal() == "" || cColor.Dim() == "" ||
-		cColor.Alert() == "" {
-		t.Error("expected color escape codes when color and interactive are true")
+	type testCase struct {
+		name        string
+		color       bool
+		interactive bool
+		wantEscapes bool
 	}
 
-	cNoColor := scan.NewContext(100*time.Millisecond, true, false, nil)
-	if cNoColor.Bold() != "" || cNoColor.SubBold() != "" || cNoColor.Normal() != "" || cNoColor.Dim() != "" ||
-		cNoColor.Alert() != "" {
-		t.Error("expected empty formatting strings when non-interactive")
+	for _, tc := range []testCase{
+		{name: "color and interactive produce escape codes", color: true, interactive: true, wantEscapes: true},
+		{name: "non-interactive forces color off", color: true, interactive: false, wantEscapes: false},
+		{name: "interactive without color has no escapes", color: false, interactive: true, wantEscapes: false},
+		{name: "neither color nor interactive", color: false, interactive: false, wantEscapes: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			sCtx := scan.NewContext(shortTimeout, tc.color, tc.interactive, buf)
+
+			codes := []string{sCtx.Bold(), sCtx.SubBold(), sCtx.Normal(), sCtx.Dim(), sCtx.Alert()}
+			for _, code := range codes {
+				if tc.wantEscapes {
+					assert.NotEmpty(t, code)
+				} else {
+					assert.Empty(t, code)
+				}
+			}
+		})
 	}
+}
+
+func TestNewContextDefaultsOutputToStdout(t *testing.T) {
+	t.Parallel()
+
+	sCtx := scan.NewContext(shortTimeout, false, true, nil)
+
+	assert.Equal(t, os.Stdout, sCtx.Output)
 }
 
 func TestHosts(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	type testCase struct {
 		name      string
 		cidr      string
+		wantHosts []string
 		wantLen   int
-		expectErr bool
-	}{
-		{"valid-24", "192.168.1.0/24", 254, false},
-		{"valid-30", "192.168.1.0/30", 2, false},
-		{"valid-31", "192.168.1.0/31", 2, false},
-		{"invalid", "not-a-cidr", 0, true},
+		wantErr   bool
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range []testCase{
+		{name: "slash-24 returns 254 usable hosts", cidr: "192.168.1.0/24", wantLen: 254},
+		{
+			name:      "slash-30 excludes network and broadcast",
+			cidr:      "192.168.1.0/30",
+			wantLen:   2,
+			wantHosts: []string{"192.168.1.1", "192.168.1.2"},
+		},
+		{name: "slash-31 treats both addresses as usable", cidr: "192.168.1.0/31", wantLen: 2},
+		{name: "slash-32 returns the single host", cidr: "192.168.1.5/32", wantLen: 1},
+		{name: "invalid cidr returns an error", cidr: "not-a-cidr", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			hosts, err := scan.Hosts(tt.cidr)
-			if tt.expectErr {
-				if err == nil {
-					t.Fatal("expected error parsing invalid CIDR")
-				}
+
+			hosts, err := scan.Hosts(tc.cidr)
+			if tc.wantErr {
+				require.Error(t, err)
 
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(hosts) != tt.wantLen {
-				t.Fatalf("Hosts(%s) length = %d, want %d", tt.cidr, len(hosts), tt.wantLen)
+			require.NoError(t, err)
+			assert.Len(t, hosts, tc.wantLen)
+			if tc.wantHosts != nil {
+				assert.Equal(t, tc.wantHosts, hosts)
 			}
 		})
 	}
@@ -73,152 +111,290 @@ func TestCheckConnection(t *testing.T) {
 	t.Parallel()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
+
+	_, portStr, err := net.SplitHostPort(listener.Addr().String())
+	require.NoError(t, err)
+	openPort, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	closedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	_, closedPortStr, err := net.SplitHostPort(closedListener.Addr().String())
+	require.NoError(t, err)
+	closedPort, err := strconv.Atoi(closedPortStr)
+	require.NoError(t, err)
+	require.NoError(t, closedListener.Close())
+
+	type testCase struct {
+		name    string
+		addr    string
+		port    int
+		timeout time.Duration
+		want    bool
 	}
-	defer listener.Close()
 
-	_, portStr, _ := net.SplitHostPort(listener.Addr().String())
-	port, _ := strconv.Atoi(portStr)
+	for _, tc := range []testCase{
+		{name: "open port succeeds", addr: "127.0.0.1", port: openPort, timeout: time.Second, want: true},
+		{name: "closed port fails", addr: "127.0.0.1", port: closedPort, timeout: shortTimeout, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	ctx := context.Background()
-
-	// 1. Success
-	if !scan.CheckConnection(ctx, "127.0.0.1", 1*time.Second, port) {
-		t.Error("expected connection to succeed")
-	}
-
-	// 2. Failure (closed port)
-	if scan.CheckConnection(ctx, "127.0.0.1", 50*time.Millisecond, 1) {
-		t.Error("expected connection to fail on closed port")
-	}
-}
-
-func TestScanIPAndEndpoints(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/status":
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"din":             "123-DIN",
-				"version":         "24.36.2",
-				"up_time_seconds": "3600",
-				"teg_type":        "teg",
-			})
-		case "/tedapi/din":
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte("User does not have adequate access rights"))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	host, portStr, _ := net.SplitHostPort(server.Listener.Addr().String())
-	_ = host
-	_ = portStr
-
-	ctx := context.Background()
-	buf := &bytes.Buffer{}
-	sCtx := scan.NewContext(500*time.Millisecond, false, true, buf)
-
-	// Scan normal powerwall status
-	dev, msg := scan.IP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
-	if dev == nil || dev.DIN != "123-DIN" || dev.Version != "24.36.2" {
-		t.Fatalf("unexpected discovered device: %+v, msg=%s", dev, msg)
+			got := scan.CheckConnection(t.Context(), tc.addr, tc.timeout, tc.port)
+			assert.Equal(t, tc.want, got)
+		})
 	}
 }
 
-func TestScanFullFlow(t *testing.T) {
+func TestIP(t *testing.T) {
 	t.Parallel()
 
-	buf := &bytes.Buffer{}
-	opts := models.ScanOptions{
-		CIDR:        "invalid-network",
-		TimeoutSec:  0.1,
-		Interactive: true,
-		Color:       true,
-		MaxHosts:    500, // Should be clamped to 256
+	type testCase struct {
+		handler     http.HandlerFunc
+		wantDevice  func(t *testing.T, dev *models.DiscoveredDevice)
+		name        string
+		wantNilDev  bool
+		unreachable bool
 	}
 
-	_, err := scan.Scan(context.Background(), opts, buf)
-	if err == nil {
-		t.Fatal("expected error on invalid CIDR in Scan")
+	for _, tc := range []testCase{
+		{
+			name: "status endpoint reports a powerwall",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/status":
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"din":             "1538000-45-C--TEST123456",
+						"version":         "24.36.2",
+						"up_time_seconds": "3600",
+						"teg_type":        "Powerwall",
+					})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			},
+			wantDevice: func(t *testing.T, dev *models.DiscoveredDevice) {
+				t.Helper()
+				require.NotNil(t, dev)
+				assert.Equal(t, "1538000-45-C--TEST123456", dev.DIN)
+				assert.Equal(t, "24.36.2", dev.Version)
+				assert.Equal(t, "Powerwall", dev.DeviceType)
+				assert.True(t, dev.IsPowerwall)
+			},
+		},
+		{
+			name: "tedapi din falls back to powerwall 3 detection",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/status":
+					w.WriteHeader(http.StatusNotFound)
+				case "/tedapi/din":
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"message":"User does not have adequate access rights"}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			},
+			wantDevice: func(t *testing.T, dev *models.DiscoveredDevice) {
+				t.Helper()
+				require.NotNil(t, dev)
+				assert.Equal(t, "Powerwall-3", dev.DIN)
+				assert.True(t, dev.IsPowerwall)
+			},
+		},
+		{
+			name: "empty din and version yields no device",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"din":"","version":""}`))
+			},
+			wantNilDev: true,
+		},
+		{
+			name:        "unreachable address returns nil without an http call",
+			unreachable: true,
+			wantNilDev:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+
+			if tc.unreachable {
+				closedListener, err := net.Listen("tcp", "127.0.0.1:0")
+				require.NoError(t, err)
+				addr := closedListener.Addr().String()
+				require.NoError(t, closedListener.Close())
+
+				sCtx := scan.NewContext(10*time.Millisecond, false, true, buf)
+				dev, msg := scan.IP(t.Context(), addr, sCtx, http.DefaultClient)
+				assert.Nil(t, dev)
+				assert.Empty(t, msg)
+
+				return
+			}
+
+			server := httptest.NewTLSServer(tc.handler)
+			t.Cleanup(server.Close)
+
+			sCtx := scan.NewContext(serverTimeout, false, true, buf)
+			dev, msg := scan.IP(t.Context(), server.Listener.Addr().String(), sCtx, server.Client())
+
+			if tc.wantNilDev {
+				assert.Nil(t, dev)
+
+				return
+			}
+			tc.wantDevice(t, dev)
+			assert.NotEmpty(t, msg)
+		})
 	}
 }
 
-func TestScanPW3Detection(t *testing.T) {
+func TestGetMyIP(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/status":
-			w.WriteHeader(http.StatusNotFound)
-		case "/tedapi/din":
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte("User does not have adequate access rights"))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	ctx := context.Background()
-	buf := &bytes.Buffer{}
-	sCtx := scan.NewContext(500*time.Millisecond, false, true, buf)
-
-	dev, msg := scan.IP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
-	if dev == nil || dev.DIN != "Powerwall-3" {
-		t.Fatalf("expected PW3 detection, got %+v (msg: %s)", dev, msg)
-	}
-}
-
-func TestScanStatusEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"din":"","version":""}`))
-	}))
-	defer server.Close()
-
-	ctx := context.Background()
-	buf := &bytes.Buffer{}
-	sCtx := scan.NewContext(500*time.Millisecond, false, true, buf)
-
-	dev, _ := scan.IP(ctx, server.Listener.Addr().String(), sCtx, server.Client())
-	if dev != nil {
-		t.Fatalf("expected nil for empty din/version, got %+v", dev)
-	}
-}
-
-func TestScanGetMyIP(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	// Might succeed if outbound network is available, or fail in sandbox. Both cases are handled gracefully.
-	_, _ = scan.GetMyIP(ctx)
+	ip, err := scan.GetMyIP(ctx)
+	if err != nil {
+		assert.Empty(t, ip)
+	} else {
+		assert.NotEmpty(t, net.ParseIP(ip))
+	}
 }
 
-func TestScanExecutionFlow(t *testing.T) {
+func TestScan(t *testing.T) {
 	t.Parallel()
 
-	buf := &bytes.Buffer{}
-	opts := models.ScanOptions{
-		CIDR:        "127.0.0.1/32",
-		TimeoutSec:  0.05,
-		Interactive: true,
-		Color:       false,
-		MaxHosts:    -1, // should default to 30
+	type testCase struct {
+		checkOutput func(t *testing.T, out string)
+		name        string
+		opts        models.ScanOptions
+		cancelCtx   bool
+		wantErr     bool
 	}
 
-	results, err := scan.Scan(context.Background(), opts, buf)
-	if err != nil {
-		t.Fatalf("unexpected error scanning 127.0.0.1/32: %v", err)
+	for _, tc := range []testCase{
+		{
+			name: "invalid cidr returns an error",
+			opts: models.ScanOptions{
+				CIDR:        "invalid-network",
+				TimeoutSec:  0.05,
+				Interactive: true,
+				Color:       true,
+				MaxHosts:    500, // clamped to 256
+			},
+			wantErr: true,
+		},
+		{
+			name: "single host cidr completes and reports progress",
+			opts: models.ScanOptions{
+				CIDR:        "127.0.0.1/32",
+				TimeoutSec:  0.05,
+				Interactive: true,
+				Color:       false,
+				MaxHosts:    -1, // defaults to 30
+			},
+			checkOutput: func(t *testing.T, out string) {
+				t.Helper()
+				assert.Contains(t, out, "gopowerwall Network Scanner")
+				assert.Contains(t, out, "Running Scan on")
+				assert.Contains(t, out, "Discovered")
+			},
+		},
+		{
+			// Interactive is left false here: with a cancelled context every one of the
+			// /24's host goroutines returns almost instantly, so many of them would race
+			// on the shared, non-thread-safe bytes.Buffer if progress lines were printed
+			// concurrently (see the reported data race in Scan's per-host Fprintf calls).
+			name: "cancelled context returns fast with no results",
+			opts: models.ScanOptions{
+				CIDR:        "10.255.255.0/24",
+				TimeoutSec:  5,
+				Interactive: false,
+				Color:       false,
+			},
+			cancelCtx: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			if tc.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			buf := &bytes.Buffer{}
+			start := time.Now()
+			results, err := scan.Scan(ctx, tc.opts, buf)
+			elapsed := time.Since(start)
+
+			if tc.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+			require.NoError(t, err)
+
+			if tc.cancelCtx {
+				assert.Empty(t, results)
+				assert.Less(t, elapsed, 10*time.Second)
+
+				return
+			}
+
+			if tc.checkOutput != nil {
+				tc.checkOutput(t, buf.String())
+			}
+			_ = results
+		})
 	}
-	_ = results
+}
+
+// TestScanInteractiveOutputIsRaceFree fans a scan out across many hosts with
+// Interactive progress reporting enabled, so every per-host goroutine writes
+// to the shared bytes.Buffer output. Run under `go test -race`, this must
+// pass without the race detector reporting a concurrent read/write on the
+// buffer (see the reported data race in Scan's per-host Fprintf calls).
+func TestScanInteractiveOutputIsRaceFree(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name string
+		cidr string
+	}
+
+	for _, tc := range []testCase{
+		{name: "loopback slash-24 fans out many concurrent unreachable hosts", cidr: "127.0.0.0/24"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			opts := models.ScanOptions{
+				CIDR:        tc.cidr,
+				TimeoutSec:  0.02,
+				Interactive: true,
+				Color:       false,
+				MaxHosts:    64,
+			}
+
+			results, err := scan.Scan(t.Context(), opts, buf)
+
+			require.NoError(t, err)
+			assert.Empty(t, results)
+			assert.NotEmpty(t, buf.String())
+		})
+	}
 }

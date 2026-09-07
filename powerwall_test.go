@@ -1,101 +1,336 @@
 package gopowerwall_test
 
 import (
-	"math"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
 )
 
+// TestPowerwallDisconnectedDegradation verifies that every facade method on a
+// Powerwall constructed against an unreachable host degrades gracefully:
+// no panics, and nil or zero-value stub results instead of errors bubbling up.
 func TestPowerwallDisconnectedDegradation(t *testing.T) {
-	// Create disconnected powerwall (invalid host)
+	t.Parallel()
+
 	pw, err := gopowerwall.New(
 		t.Context(),
-		gopowerwall.WithHost("127.0.0.1:9"), // non-routable port
+		gopowerwall.WithHost("127.0.0.1:9"), // non-routable port: nothing listens here
 		gopowerwall.WithPassword("test"),
 		gopowerwall.WithCloudMode(false),
 	)
-	if err != nil {
-		t.Fatalf("Unexpected New() err: %v", err)
+	require.NoError(t, err)
+	require.False(t, pw.IsConnected())
+
+	type testCase struct {
+		run  func(t *testing.T, pw *gopowerwall.Powerwall)
+		name string
 	}
 
-	// Must report disconnected
-	if pw.IsConnected() {
-		t.Errorf("Expected IsConnected() = false")
-	}
+	for _, tc := range []testCase{
+		{
+			name: "Poll returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Poll(t.Context(), "/api/status"))
+			},
+		},
+		{
+			name: "Level returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Level(t.Context()))
+			},
+		},
+		{
+			name: "Power returns zero summary",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				p := pw.Power(t.Context())
+				assert.Zero(t, p.Site)
+				assert.Zero(t, p.Battery)
+			},
+		},
+		{
+			name: "Site verbose returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Site(t.Context(), true))
+			},
+		},
+		{
+			name: "Solar verbose returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Solar(t.Context(), true))
+			},
+		},
+		{
+			name: "Battery verbose returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Battery(t.Context(), true))
+			},
+		},
+		{
+			name: "Load verbose returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Load(t.Context(), true))
+			},
+		},
+		{
+			name: "Grid verbose returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Grid(t.Context(), true))
+			},
+		},
+		{
+			name: "Home verbose returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Home(t.Context(), true))
+			},
+		},
+		{
+			name: "Vitals returns no devices",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				vit, vitErr := pw.Vitals(t.Context())
+				if vitErr == nil {
+					assert.Empty(t, vit.Devices)
+				}
+			},
+		},
+		{
+			name: "Strings returns no strings",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Empty(t, pw.Strings(t.Context()).Strings)
+			},
+		},
+		{
+			name: "Din returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Din(t.Context()))
+			},
+		},
+		{
+			name: "Uptime returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.Uptime(t.Context()))
+			},
+		},
+		{
+			name: "SiteName returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.SiteName(t.Context()))
+			},
+		},
+		{
+			name: "GetTimeRemaining returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.GetTimeRemaining(t.Context()))
+			},
+		},
+		{
+			name: "GetReserve returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.GetReserve(t.Context()))
+			},
+		},
+		{
+			name: "GetMode returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.GetMode(t.Context()))
+			},
+		},
+		{
+			name: "GetGridCharging returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.GetGridCharging(t.Context()))
+			},
+		},
+		{
+			name: "GetGridExport returns nil",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				assert.Nil(t, pw.GetGridExport(t.Context()))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Facade methods must never panic and gracefully return nil or stub defaults
-	if p := pw.Poll(t.Context(), "/api/status"); p != nil {
-		t.Errorf("Expected Poll() = nil, got %v", p)
-	}
-	if v := pw.Level(t.Context()); v != nil {
-		t.Errorf("Expected Level() = nil, got %v", v)
-	}
-	if p := pw.Power(t.Context()); p.Site != 0 || p.Battery != 0 {
-		t.Errorf("Expected zero Power(), got %v", p)
-	}
-	if s := pw.Site(t.Context(), true); s != nil {
-		t.Errorf("Expected Site(true) = nil, got %v", s)
-	}
-	if sol := pw.Solar(t.Context(), true); sol != nil {
-		t.Errorf("Expected Solar(true) = nil, got %v", sol)
-	}
-	if b := pw.Battery(t.Context(), true); b != nil {
-		t.Errorf("Expected Battery(true) = nil, got %v", b)
-	}
-	if l := pw.Load(t.Context(), true); l != nil {
-		t.Errorf("Expected Load(true) = nil, got %v", l)
-	}
-	if g := pw.Grid(t.Context(), true); g != nil {
-		t.Errorf("Expected Grid(true) = nil, got %v", g)
-	}
-	if h := pw.Home(t.Context(), true); h != nil {
-		t.Errorf("Expected Home(true) = nil, got %v", h)
-	}
-	if vit, err := pw.Vitals(t.Context()); err == nil && len(vit.Devices) > 0 {
-		t.Errorf("Expected empty Vitals(), got %v", vit)
-	}
-	if str := pw.Strings(t.Context()); len(str.Strings) > 0 {
-		t.Errorf("Expected empty Strings(), got %v", str)
-	}
-	if d := pw.Din(t.Context()); d != nil {
-		t.Errorf("Expected Din() = nil, got %v", d)
-	}
-	if u := pw.Uptime(t.Context()); u != nil {
-		t.Errorf("Expected Uptime() = nil, got %v", u)
-	}
-	if sn := pw.SiteName(t.Context()); sn != nil {
-		t.Errorf("Expected SiteName() = nil, got %v", sn)
-	}
-	if tm := pw.GetTimeRemaining(t.Context()); tm != nil {
-		t.Errorf("Expected GetTimeRemaining() = nil, got %v", tm)
-	}
-	if r := pw.GetReserve(t.Context()); r != nil {
-		t.Errorf("Expected GetReserve() = nil, got %v", r)
-	}
-	if m := pw.GetMode(t.Context()); m != nil {
-		t.Errorf("Expected GetMode() = nil, got %v", m)
-	}
-	if gc := pw.GetGridCharging(t.Context()); gc != nil {
-		t.Errorf("Expected GetGridCharging() = nil, got %v", gc)
-	}
-	if ge := pw.GetGridExport(t.Context()); ge != nil {
-		t.Errorf("Expected GetGridExport() = nil, got %v", ge)
+			tc.run(t, pw)
+		})
 	}
 }
 
-func TestScaleFormula(t *testing.T) {
-	// Formula: (level / 0.95) - (5.0 / 0.95)
-	// For level 100: (100 / 0.95) - (5 / 0.95) = 95 / 0.95 = 100.0
-	// For level 5.0: (5 / 0.95) - (5 / 0.95) = 0.0
-	scaleFormula := func(level float64) float64 {
-		return (level / 0.95) - (5.0 / 0.95)
+const stringVitalFieldsPerLabel = 3
+
+// vitalFloat builds a single named float DeviceVital.
+func vitalFloat(name string, value float64) *teslapower.DeviceVital {
+	return &teslapower.DeviceVital{Name: new(name), Value: &teslapower.DeviceVital_FloatValue{FloatValue: value}}
+}
+
+// stringLabelVitals builds the PVAC_Vsolar/Isolar/Psolar<label> vitals fields
+// that Strings reads, with distinct values per label so a bug that reads the
+// wrong field (e.g. "PVAC_Vsolar0" instead of "PVAC_VsolarA") is caught.
+func stringLabelVitals(base float64) []*teslapower.DeviceVital {
+	labels := [...]string{"A", "B", "C", "D"}
+	vitals := make([]*teslapower.DeviceVital, 0, len(labels)*stringVitalFieldsPerLabel)
+	for i, label := range labels {
+		v := base + float64(i)*10
+		vitals = append(vitals,
+			vitalFloat("PVAC_Vsolar"+label, v),
+			vitalFloat("PVAC_Isolar"+label, v+1),
+			vitalFloat("PVAC_Psolar"+label, v+2),
+		)
 	}
 
-	if val := scaleFormula(100.0); math.Abs(val-100.0) > 0.001 {
-		t.Errorf("scaleFormula(100) = %v, want 100.0", val)
+	return vitals
+}
+
+// buildMultiPVACVitalsProtobuf encodes two distinct PVAC devices, each
+// reporting its own A-D string data, plus a device-level alert on the first
+// one. It backs the regression tests for Strings' device-collision bug and
+// Alerts' []string type-assertion bug.
+func buildMultiPVACVitalsProtobuf(t *testing.T) []byte {
+	t.Helper()
+
+	pb := &teslapower.DevicesWithVitals{
+		Devices: []*teslapower.SiteControllerConnectedDeviceWithVitals{
+			{
+				Device: &teslapower.SiteControllerConnectedDevice{
+					Device: &teslapower.Device{Din: &teslapower.StringValue{Value: "PVAC--1"}},
+				},
+				Vitals: stringLabelVitals(100),
+				Alerts: []string{"PVACAlertOne"},
+			},
+			{
+				Device: &teslapower.SiteControllerConnectedDevice{
+					Device: &teslapower.Device{Din: &teslapower.StringValue{Value: "PVAC--2"}},
+				},
+				Vitals: stringLabelVitals(1100),
+			},
+		},
 	}
-	if val := scaleFormula(5.0); math.Abs(val-0.0) > 0.001 {
-		t.Errorf("scaleFormula(5) = %v, want 0.0", val)
+
+	data, err := proto.Marshal(pb)
+	require.NoError(t, err)
+
+	return data
+}
+
+// newLocalTestPowerwall connects a Powerwall in local mode against a fake
+// gateway that serves cookie-based login and the given raw /api/devices/vitals
+// protobuf payload.
+func newLocalTestPowerwall(t *testing.T, vitalsBody []byte) *gopowerwall.Powerwall {
+	t.Helper()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/login/Basic":
+			http.SetCookie(w, &http.Cookie{Name: "AuthCookie", Value: "cookie-value"})
+			http.SetCookie(w, &http.Cookie{Name: "UserRecord", Value: "user-value"})
+			w.WriteHeader(http.StatusOK)
+		case "/api/devices/vitals":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(vitalsBody)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	pw, err := gopowerwall.New(
+		t.Context(),
+		gopowerwall.WithHost(server.Listener.Addr().String()),
+		gopowerwall.WithPassword("password"),
+		gopowerwall.WithCloudMode(false),
+		gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
+	)
+	require.NoError(t, err)
+	require.True(t, pw.IsConnected())
+
+	return pw
+}
+
+// TestStringsKeysByDeviceToAvoidCollisions is the regression test for the
+// Strings bug: ranging over the label slice used the loop index (0-3) as both
+// the lookup suffix and the map key, so real gateway fields
+// (PVAC_VsolarA..PVAC_VsolarD) were never found, and a second PVAC device
+// silently overwrote the first at the same "0".."3" keys. With the fix,
+// distinct PVAC devices each keep their own A-D entries.
+func TestStringsKeysByDeviceToAvoidCollisions(t *testing.T) {
+	t.Parallel()
+
+	pw := newLocalTestPowerwall(t, buildMultiPVACVitalsProtobuf(t))
+	result := pw.Strings(t.Context())
+
+	type testCase struct {
+		name      string
+		key       string
+		wantVolts float64
+	}
+
+	for _, tc := range []testCase{
+		{name: "device one string A", key: "PVAC--1_A", wantVolts: 100},
+		{name: "device one string D", key: "PVAC--1_D", wantVolts: 130},
+		{name: "device two string A does not collide with device one", key: "PVAC--2_A", wantVolts: 1100},
+		{name: "device two string D", key: "PVAC--2_D", wantVolts: 1130},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			metric, ok := result.Strings[tc.key]
+			require.True(t, ok, "expected key %q in Strings map, got %v", tc.key, result.Strings)
+			assert.InDelta(t, tc.wantVolts, metric.Voltage, 0.001)
+			assert.True(t, metric.Connected)
+		})
+	}
+
+	assert.Len(t, result.Strings, 8, "expected four labels for each of the two PVAC devices with no collisions")
+}
+
+// TestAlertsIncludesDeviceStringSliceAlerts is the regression test for the
+// Alerts bug: the local backend stores device alerts as []string (the
+// protobuf accessor's native type), but Alerts only type-asserted []any, so
+// every device-level alert was silently dropped.
+func TestAlertsIncludesDeviceStringSliceAlerts(t *testing.T) {
+	t.Parallel()
+
+	pw := newLocalTestPowerwall(t, buildMultiPVACVitalsProtobuf(t))
+	alerts := pw.Alerts(t.Context()).Alerts
+
+	type testCase struct {
+		name string
+		want string
+	}
+
+	for _, tc := range []testCase{
+		{name: "device []string alert surfaces in the alert list", want: "PVACAlertOne"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Contains(t, alerts, tc.want)
+		})
 	}
 }

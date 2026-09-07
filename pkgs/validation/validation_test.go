@@ -1,82 +1,61 @@
 package validation_test
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/blackbirdworks/gopowerwall/pkgs/validation"
 )
 
-func TestValidationTable(t *testing.T) {
+func TestIsValidHost(t *testing.T) {
 	t.Parallel()
 
-	hostTests := []struct {
-		host  string
-		name  string
-		valid bool
-	}{
-		{
-			name:  "valid IPv4",
-			host:  "192.168.91.1",
-			valid: true,
-		},
-		{
-			name:  "valid IPv4 with port",
-			host:  "192.168.91.1:443",
-			valid: true,
-		},
-		{
-			name:  "valid hostname",
-			host:  "teg.lan",
-			valid: true,
-		},
-		{
-			name:  "empty string",
-			host:  "",
-			valid: false,
-		},
+	type testCase struct {
+		name string
+		host string
+		want bool
 	}
 
-	for _, tt := range hostTests {
-		t.Run("host_"+tt.name, func(t *testing.T) {
+	for _, tc := range []testCase{
+		{name: "valid IPv4", host: "192.168.91.1", want: true},
+		{name: "valid IPv4 with port", host: "192.168.91.1:443", want: true},
+		{name: "valid hostname", host: "teg.lan", want: true},
+		{name: "valid hostname with port", host: "teg.lan:443", want: true},
+		{name: "valid fully qualified hostname with trailing dot", host: "teg.example.com.", want: true},
+		{name: "valid IPv6", host: "::1", want: true},
+		{name: "empty string", host: "", want: false},
+		{name: "invalid hostname characters", host: "!!!bad!!!", want: false},
+		{name: "too long", host: strings.Repeat("a", 256), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := validation.IsValidHost(tt.host)
-			if got != tt.valid {
-				t.Errorf("IsValidHost(%q) = %v, want %v", tt.host, got, tt.valid)
-			}
+			assert.Equal(t, tc.want, validation.IsValidHost(tc.host))
 		})
 	}
+}
 
-	emailTests := []struct {
-		email string
+func TestIsValidEmail(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
 		name  string
-		valid bool
-	}{
-		{
-			name:  "valid email",
-			email: "user@example.com",
-			valid: true,
-		},
-		{
-			name:  "missing domain",
-			email: "user@",
-			valid: false,
-		},
-		{
-			name:  "empty string",
-			email: "",
-			valid: false,
-		},
+		email string
+		want  bool
 	}
 
-	for _, tt := range emailTests {
-		t.Run("email_"+tt.name, func(t *testing.T) {
+	for _, tc := range []testCase{
+		{name: "valid email", email: "user@example.com", want: true},
+		{name: "missing domain", email: "user@", want: false},
+		{name: "missing at sign", email: "userexample.com", want: false},
+		{name: "empty string", email: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := validation.IsValidEmail(tt.email)
-			if got != tt.valid {
-				t.Errorf("IsValidEmail(%q) = %v, want %v", tt.email, got, tt.valid)
-			}
+			assert.Equal(t, tc.want, validation.IsValidEmail(tc.email))
 		})
 	}
 }

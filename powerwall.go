@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -768,9 +767,17 @@ func (p *Powerwall) Alerts(ctx context.Context, _ ...bool) models.AlertsList {
 
 	vitals, _ := p.Vitals(ctx)
 	for _, data := range vitals.Devices {
-		if rawAlerts, ok := data["alerts"].([]any); ok {
+		switch rawAlerts := data["alerts"].(type) {
+		case []any:
+			// A JSON-decoded backend (e.g. cloud or fleetapi) yields []any.
 			for _, a := range rawAlerts {
 				alertSet[fmt.Sprintf("%v", a)] = struct{}{}
+			}
+		case []string:
+			// The local backend stores the protobuf accessor's []string result
+			// directly (see backend/local.go's devMap["alerts"] assignment).
+			for _, a := range rawAlerts {
+				alertSet[a] = struct{}{}
 			}
 		}
 	}
@@ -800,15 +807,25 @@ func (p *Powerwall) Strings(ctx context.Context, _ ...bool) models.SolarStrings 
 	vitals, _ := p.Vitals(ctx)
 
 	for dev, data := range vitals.Devices {
-		if strings.HasPrefix(dev, "PVAC") {
-			for stringID := range []string{"A", "B", "C", "D"} {
-				key := strconv.Itoa(stringID)
-				strMap[key] = models.StringMetric{
-					Connected: true,
-					Voltage:   LookupFloat(data, "PVAC_Vsolar"+key),
-					Current:   LookupFloat(data, "PVAC_Isolar"+key),
-					Power:     LookupFloat(data, "PVAC_Psolar"+key),
-				}
+		if !strings.HasPrefix(dev, "PVAC") {
+			continue
+		}
+		for _, label := range []string{"A", "B", "C", "D"} {
+			// Key on the originating PVAC device name plus the string label so
+			// that a site with more than one PVAC inverter does not have one
+			// device's strings silently overwrite another's. pypowerwall's own
+			// upstream /strings implementation keys on a different,
+			// firmware-version-specific field naming scheme
+			// (PVAC_PVMeasuredVoltage/Current/Power) that has no equivalent for
+			// the PVAC_Vsolar<label> fields used here, so there is no directly
+			// analogous upstream key to mirror; "<device>_<label>" is the
+			// simplest non-colliding choice that still preserves device identity.
+			key := dev + "_" + label
+			strMap[key] = models.StringMetric{
+				Connected: true,
+				Voltage:   LookupFloat(data, "PVAC_Vsolar"+label),
+				Current:   LookupFloat(data, "PVAC_Isolar"+label),
+				Power:     LookupFloat(data, "PVAC_Psolar"+label),
 			}
 		}
 	}

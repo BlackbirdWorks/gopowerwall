@@ -1,178 +1,366 @@
 package cache_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/blackbirdworks/gopowerwall/pkgs/cache"
 )
 
-func TestResponseCacheTable(t *testing.T) {
+func TestResponseCacheGetSet(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		setup       func(c *cache.ResponseCache)
-		expectedVal any
-		name        string
-		key         string
-		expectFound bool
-		expectNeg   bool
-	}{
+	type testCase struct {
+		wantVal   any
+		setup     func(c *cache.ResponseCache)
+		name      string
+		key       string
+		customTTL []time.Duration
+		wantFound bool
+		wantNeg   bool
+	}
+
+	for _, tc := range []testCase{
 		{
 			name: "cache hit on stored value",
 			setup: func(c *cache.ResponseCache) {
 				c.Set("/api/test", "value1")
 			},
-			key:         "/api/test",
-			expectedVal: "value1",
-			expectFound: true,
-			expectNeg:   false,
+			key:       "/api/test",
+			wantVal:   "value1",
+			wantFound: true,
 		},
 		{
-			name:        "cache miss on missing key",
-			setup:       func(_ *cache.ResponseCache) {},
-			key:         "/api/missing",
-			expectedVal: nil,
-			expectFound: false,
-			expectNeg:   false,
+			name:      "cache miss on missing key",
+			setup:     func(_ *cache.ResponseCache) {},
+			key:       "/api/missing",
+			wantFound: false,
 		},
 		{
 			name: "negative cache hit",
 			setup: func(c *cache.ResponseCache) {
 				c.SetNegative("/api/404", 500*time.Millisecond)
 			},
-			key:         "/api/404",
-			expectedVal: nil,
-			expectFound: true,
-			expectNeg:   true,
+			key:       "/api/404",
+			wantFound: true,
+			wantNeg:   true,
 		},
 		{
-			name: "invalidation removes mapped key",
+			name: "custom TTL younger than entry still hits",
 			setup: func(c *cache.ResponseCache) {
-				c.Set("/api/operation", "op-val")
-				c.Invalidate("/api/operation")
+				c.Set("/api/fresh", "fresh-val")
 			},
-			key:         "/api/operation",
-			expectedVal: nil,
-			expectFound: false,
-			expectNeg:   false,
+			key:       "/api/fresh",
+			customTTL: []time.Duration{time.Minute},
+			wantVal:   "fresh-val",
+			wantFound: true,
 		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		{
+			name: "custom TTL shorter than entry age misses",
+			setup: func(c *cache.ResponseCache) {
+				c.Set("/api/stale", "stale-val")
+				time.Sleep(10 * time.Millisecond)
+			},
+			key:       "/api/stale",
+			customTTL: []time.Duration{time.Millisecond},
+			wantFound: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			c := cache.NewResponseCache(1 * time.Second)
-			defer c.Close()
-			tt.setup(c)
-			val, found, isNeg := c.Get(tt.key)
-			if found != tt.expectFound {
-				t.Errorf("found = %v, want %v", found, tt.expectFound)
-			}
-			if isNeg != tt.expectNeg {
-				t.Errorf("isNegative = %v, want %v", isNeg, tt.expectNeg)
-			}
-			if val != tt.expectedVal {
-				t.Errorf("val = %v, want %v", val, tt.expectedVal)
+			c := cache.NewResponseCache(time.Second)
+			t.Cleanup(c.Close)
+			tc.setup(c)
+
+			val, found, isNeg := c.Get(tc.key, tc.customTTL...)
+			assert.Equal(t, tc.wantFound, found)
+			assert.Equal(t, tc.wantNeg, isNeg)
+			assert.Equal(t, tc.wantVal, val)
+		})
+	}
+}
+
+func TestResponseCacheInvalidate(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name       string
+		setup      func(c *cache.ResponseCache)
+		invalidate string
+		checkKeys  []string
+	}
+
+	for _, tc := range []testCase{
+		{
+			name: "invalidating a mapped write endpoint clears every mapped read key",
+			setup: func(c *cache.ResponseCache) {
+				c.Set("/api/operation", "op-val")
+				c.Set("SITE_CONFIG", "cfg-val")
+			},
+			invalidate: "/api/operation",
+			checkKeys:  []string{"/api/operation", "SITE_CONFIG"},
+		},
+		{
+			name: "invalidating an unmapped key deletes only that key",
+			setup: func(c *cache.ResponseCache) {
+				c.Set("/api/other", "other-val")
+			},
+			invalidate: "/api/other",
+			checkKeys:  []string{"/api/other"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := cache.NewResponseCache(time.Second)
+			t.Cleanup(c.Close)
+			tc.setup(c)
+
+			c.Invalidate(tc.invalidate)
+
+			for _, key := range tc.checkKeys {
+				_, found, _ := c.Get(key)
+				assert.Falsef(t, found, "expected key %q to be invalidated", key)
 			}
 		})
 	}
 }
 
-func TestPerformanceCacheTable(t *testing.T) {
+func TestResponseCacheClear(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		setup       func(pc *cache.PerformanceCache)
-		name        string
-		key         string
-		expectedVal string
-		expectFound bool
-	}{
+	c := cache.NewResponseCache(time.Second)
+	t.Cleanup(c.Close)
+
+	c.Set("/api/a", "a-val")
+	c.Set("/api/b", "b-val")
+	c.Clear()
+
+	_, foundA, _ := c.Get("/api/a")
+	_, foundB, _ := c.Get("/api/b")
+	assert.False(t, foundA)
+	assert.False(t, foundB)
+}
+
+func TestResponseCacheCooldown(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name     string
+		cooldown time.Duration
+		wait     time.Duration
+		want     bool
+	}
+
+	for _, tc := range []testCase{
+		{name: "immediately within cooldown", cooldown: 100 * time.Millisecond, wait: 0, want: true},
+		{name: "past cooldown expiry", cooldown: 10 * time.Millisecond, wait: 30 * time.Millisecond, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := cache.NewResponseCache(time.Second)
+			t.Cleanup(c.Close)
+
+			c.SetCooldown(tc.cooldown)
+			time.Sleep(tc.wait)
+			assert.Equal(t, tc.want, c.InCooldown())
+		})
+	}
+}
+
+func TestPerformanceCache(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name      string
+		setup     func(pc *cache.PerformanceCache)
+		key       string
+		wantVal   string
+		wantFound bool
+	}
+
+	for _, tc := range []testCase{
 		{
 			name: "hit on valid key",
 			setup: func(pc *cache.PerformanceCache) {
 				pc.Set("/aggregates", `{"site": 100}`)
 			},
-			key:         "/aggregates",
-			expectedVal: `{"site": 100}`,
-			expectFound: true,
+			key:       "/aggregates",
+			wantVal:   `{"site": 100}`,
+			wantFound: true,
 		},
 		{
-			name:        "miss on absent key",
-			setup:       func(_ *cache.PerformanceCache) {},
-			key:         "/absent",
-			expectedVal: "",
-			expectFound: false,
+			name:      "miss on absent key",
+			setup:     func(_ *cache.PerformanceCache) {},
+			key:       "/absent",
+			wantFound: false,
 		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			pc := cache.NewPerformanceCache(1 * time.Second)
-			defer pc.Close()
-			tt.setup(pc)
-			val, found := pc.Get(tt.key)
-			if found != tt.expectFound {
-				t.Errorf("found = %v, want %v", found, tt.expectFound)
-			}
-			if val != tt.expectedVal {
-				t.Errorf("val = %v, want %v", val, tt.expectedVal)
-			}
+			pc := cache.NewPerformanceCache(time.Second)
+			t.Cleanup(pc.Close)
+			tc.setup(pc)
+
+			val, found := pc.Get(tc.key)
+			assert.Equal(t, tc.wantFound, found)
+			assert.Equal(t, tc.wantVal, val)
 		})
 	}
 }
 
-func TestDegradationCacheTable(t *testing.T) {
+func TestPerformanceCacheSizeAndClear(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		setup         func(dc *cache.DegradationCache)
-		name          string
-		key           string
-		expectVal     string
-		expectExists  bool
-		expectExpired bool
-	}{
+	pc := cache.NewPerformanceCache(time.Second)
+	t.Cleanup(pc.Close)
+
+	pc.Set("/one", "1")
+	pc.Set("/two", "2")
+	require.Equal(t, 2, pc.Size())
+
+	pc.Clear()
+	assert.Equal(t, 0, pc.Size())
+}
+
+func TestDegradationCacheGetSet(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name        string
+		setup       func(dc *cache.DegradationCache)
+		key         string
+		wantVal     string
+		wantExists  bool
+		wantExpired bool
+	}
+
+	for _, tc := range []testCase{
 		{
 			name: "fresh data in degradation cache",
 			setup: func(dc *cache.DegradationCache) {
 				dc.Set("/vitals", "good-data")
 			},
-			key:           "/vitals",
-			expectVal:     "good-data",
-			expectExists:  true,
-			expectExpired: false,
+			key:        "/vitals",
+			wantVal:    "good-data",
+			wantExists: true,
 		},
 		{
-			name:          "missing key",
-			setup:         func(_ *cache.DegradationCache) {},
-			key:           "/missing",
-			expectVal:     "",
-			expectExists:  false,
-			expectExpired: true,
+			name:        "missing key reports expired",
+			setup:       func(_ *cache.DegradationCache) {},
+			key:         "/missing",
+			wantExpired: true,
 		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			dc := cache.NewDegradationCache(1 * time.Second)
-			tt.setup(dc)
-			val, exists, expired := dc.Get(tt.key)
-			if exists != tt.expectExists {
-				t.Errorf("exists = %v, want %v", exists, tt.expectExists)
-			}
-			if expired != tt.expectExpired {
-				t.Errorf("expired = %v, want %v", expired, tt.expectExpired)
-			}
-			if val != tt.expectVal {
-				t.Errorf("val = %v, want %v", val, tt.expectVal)
-			}
+			dc := cache.NewDegradationCache(time.Second)
+			tc.setup(dc)
+
+			val, exists, expired := dc.Get(tc.key)
+			assert.Equal(t, tc.wantExists, exists)
+			assert.Equal(t, tc.wantExpired, expired)
+			assert.Equal(t, tc.wantVal, val)
 		})
 	}
+}
+
+func TestDegradationCacheAges(t *testing.T) {
+	t.Parallel()
+
+	dc := cache.NewDegradationCache(10 * time.Millisecond)
+	dc.Set("/vitals", "good-data")
+	time.Sleep(30 * time.Millisecond)
+
+	val, exists, expired := dc.Get("/vitals")
+	assert.True(t, exists)
+	assert.True(t, expired)
+	assert.Equal(t, "good-data", val)
+}
+
+func TestDegradationCacheSnapshotAndClear(t *testing.T) {
+	t.Parallel()
+
+	dc := cache.NewDegradationCache(time.Minute)
+	dc.Set("/a", "a-val")
+	dc.Set("/b", "b-val")
+
+	count, snapshot := dc.Snapshot()
+	require.Equal(t, 2, count)
+	require.Len(t, snapshot, 2)
+	for _, entry := range snapshot {
+		assert.Contains(t, entry, "age_seconds")
+		assert.Contains(t, entry, "is_expired")
+	}
+
+	cleared := dc.Clear()
+	assert.Equal(t, 2, cleared)
+
+	countAfter, _ := dc.Snapshot()
+	assert.Equal(t, 0, countAfter)
+}
+
+func TestRateLimiterShouldLog(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name         string
+		want         []bool
+		maxPerMinute int
+		calls        int
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:         "unlimited when max is zero",
+			maxPerMinute: 0,
+			calls:        3,
+			want:         []bool{true, true, true},
+		},
+		{
+			name:         "unlimited when max is negative",
+			maxPerMinute: -1,
+			calls:        2,
+			want:         []bool{true, true},
+		},
+		{
+			name:         "allows up to the limit then blocks",
+			maxPerMinute: 2,
+			calls:        3,
+			want:         []bool{true, true, false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rl := cache.NewRateLimiter()
+			got := make([]bool, 0, tc.calls)
+			for range tc.calls {
+				got = append(got, rl.ShouldLog("some.func", tc.maxPerMinute))
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestRateLimiterResetsBucketMapWhenLarge(t *testing.T) {
+	t.Parallel()
+
+	rl := cache.NewRateLimiter()
+	for i := range 205 {
+		rl.ShouldLog(fmt.Sprintf("func-%d", i), 1000)
+	}
+
+	// The bucket map should have been reset internally without panicking, and
+	// a brand new key should still be tracked correctly from a count of one.
+	assert.True(t, rl.ShouldLog("fresh-func", 1))
+	assert.False(t, rl.ShouldLog("fresh-func", 1))
 }

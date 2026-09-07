@@ -73,13 +73,20 @@ var BuildVersion = "dev" //nolint:gochecknoglobals // Build information is stand
 // Get returns the injected build version, falling back to the module's embedded
 // build info for `go install` builds, and finally to "dev".
 func Get() string {
-	if BuildVersion != "dev" {
-		return BuildVersion
+	info, ok := debug.ReadBuildInfo()
+
+	return resolve(BuildVersion, info, ok)
+}
+
+// resolve implements the decision behind [Get] as a pure function so tests can
+// exercise every branch, including the ldflags-override one, without mutating
+// the [BuildVersion] package global.
+func resolve(build string, info *debug.BuildInfo, ok bool) string {
+	if build != "dev" {
+		return build
 	}
-	if info, ok := debug.ReadBuildInfo(); ok {
-		if info.Main.Version != "" && info.Main.Version != "(devel)" {
-			return info.Main.Version
-		}
+	if ok && info != nil && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
 	}
 
 	return "dev"

@@ -204,8 +204,10 @@ func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request, reqPath strin
 	if s.Config.HTTPSMode == "yes" || s.Config.HTTPSMode == "http" {
 		cookieSuffix = "path=/;SameSite=None;Secure;"
 	}
-	w.Header().Set("Set-Cookie", "AuthCookie=1234567890;"+cookieSuffix)
-	w.Header().Set("Set-Cookie", "UserRecord=1234567890;"+cookieSuffix)
+	// Add, not Set: both cookies must be sent. A second Set-Cookie header
+	// written via Header().Set would silently overwrite the first.
+	w.Header().Add("Set-Cookie", "AuthCookie=1234567890;"+cookieSuffix)
+	w.Header().Add("Set-Cookie", "UserRecord=1234567890;"+cookieSuffix)
 
 	targetFile := reqPath
 	if targetFile == "/" || targetFile == "" {

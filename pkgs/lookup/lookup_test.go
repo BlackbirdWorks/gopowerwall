@@ -3,66 +3,65 @@ package lookup_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
 
-func TestLookupTable(t *testing.T) {
+func TestLookup(t *testing.T) {
 	t.Parallel()
 
-	data := map[string]any{
+	nested := map[string]any{
 		"a": map[string]any{
 			"b": map[string]any{
 				"c": 42,
 			},
 		},
-		"simple": "hello",
+		"simple":     "hello",
+		"stringmap":  map[string]string{"key": "value"},
+		"notAMap":    123,
+		"nilValue":   nil,
+		"emptyLevel": map[string]any{},
 	}
 
-	tests := []struct {
-		expected any
-		name     string
-		keys     []string
-	}{
-		{
-			name:     "flat key lookup",
-			keys:     []string{"simple"},
-			expected: "hello",
-		},
-		{
-			name:     "nested variadic keys",
-			keys:     []string{"a", "b", "c"},
-			expected: 42,
-		},
-		{
-			name:     "nested dot notation",
-			keys:     []string{"a.b.c"},
-			expected: 42,
-		},
-		{
-			name:     "missing key",
-			keys:     []string{"a", "missing"},
-			expected: nil,
-		},
-		{
-			name:     "nil input",
-			keys:     []string{"a"},
-			expected: nil,
-		},
+	type testCase struct {
+		data any
+		want any
+		name string
+		keys []string
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range []testCase{
+		{name: "flat key lookup", data: nested, keys: []string{"simple"}, want: "hello"},
+		{name: "nested variadic keys", data: nested, keys: []string{"a", "b", "c"}, want: 42},
+		{name: "nested dot notation", data: nested, keys: []string{"a.b.c"}, want: 42},
+		{name: "mixed dot and plain keys", data: nested, keys: []string{"a.b", "c"}, want: 42},
+		{name: "missing key at leaf", data: nested, keys: []string{"a", "missing"}, want: nil},
+		{name: "missing top level key", data: nested, keys: []string{"missing"}, want: nil},
+		{name: "nil input data", data: nil, keys: []string{"a"}, want: nil},
+		{name: "no keys returns data unchanged", data: nested, keys: nil, want: nested},
+		{name: "string map value lookup", data: map[string]string{"key": "value"}, keys: []string{"key"}, want: "value"},
+		{
+			name: "string map missing key",
+			data: map[string]string{"key": "value"},
+			keys: []string{"missing"},
+			want: nil,
+		},
+		{name: "traversal through nested string map", data: nested, keys: []string{"stringmap", "key"}, want: "value"},
+		{
+			name: "descending into non-map value returns nil",
+			data: nested,
+			keys: []string{"notAMap", "anything"},
+			want: nil,
+		},
+		{name: "descending into nil value returns nil", data: nested, keys: []string{"nilValue", "anything"}, want: nil},
+		{name: "descending into empty map returns nil", data: nested, keys: []string{"emptyLevel", "missing"}, want: nil},
+		{name: "non-map, non-string-map root returns nil", data: 42, keys: []string{"a"}, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var input any = data
-			if tt.name == "nil input" {
-				input = nil
-			}
-
-			got := lookup.Lookup(input, tt.keys...)
-			if got != tt.expected {
-				t.Errorf("Lookup(%v) = %v, want %v", tt.keys, got, tt.expected)
-			}
+			assert.Equal(t, tc.want, lookup.Lookup(tc.data, tc.keys...))
 		})
 	}
 }

@@ -412,6 +412,7 @@ func Scan(ctx context.Context, opts models.ScanOptions, out io.Writer) ([]models
 
 	var (
 		mu      sync.Mutex
+		outMu   sync.Mutex
 		wg      sync.WaitGroup
 		results []models.DiscoveredDevice
 	)
@@ -427,7 +428,9 @@ func Scan(ctx context.Context, opts models.ScanOptions, out io.Writer) ([]models
 			}()
 
 			if sCtx.Interactive {
+				outMu.Lock()
 				fmt.Fprintf(sCtx.Output, "%s\r\t  Host: %s%s ...%s", sCtx.Dim(), sCtx.SubBold(), addr, sCtx.Normal())
+				outMu.Unlock()
 			}
 
 			dev, msg := IP(ctx, addr, sCtx, httpClient)
@@ -437,7 +440,9 @@ func Scan(ctx context.Context, opts models.ScanOptions, out io.Writer) ([]models
 				mu.Unlock()
 				if sCtx.Interactive {
 					hostLine := fmt.Sprintf("%s\r\t  Host: %s%s ...%s", sCtx.Dim(), sCtx.SubBold(), addr, sCtx.Normal())
+					outMu.Lock()
 					fmt.Fprintf(sCtx.Output, "%s %s\n", hostLine, msg)
+					outMu.Unlock()
 				}
 			}
 		}(host)

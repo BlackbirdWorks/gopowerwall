@@ -114,6 +114,7 @@ func NewServer(ctx context.Context, cfg Config, pw *gopowerwall.Powerwall) *Serv
 			gopowerwall.WithRSAKeyPath(cfg.RsaKeyPath),
 			gopowerwall.WithWiFiHost(cfg.WifiHost),
 			gopowerwall.WithTimeout(cfg.TimeoutDuration()),
+			gopowerwall.WithCacheFile(cfg.CacheFile),
 		)
 		if err != nil {
 			logger.Load(ctx).ErrorContext(ctx, "failed to initialize Powerwall client", "error", err)
