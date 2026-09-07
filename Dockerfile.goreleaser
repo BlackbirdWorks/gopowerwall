@@ -1,0 +1,15 @@
+# Dockerfile used by GoReleaser for multi-arch builds
+FROM scratch
+
+ARG TARGETPLATFORM
+
+WORKDIR /app
+
+COPY $TARGETPLATFORM/proxy .
+
+# pypowerwall proxy default port
+EXPOSE 8675
+
+LABEL org.opencontainers.image.source="https://github.com/blackbirdworks/gopowerwall"
+
+CMD ["./proxy"]
