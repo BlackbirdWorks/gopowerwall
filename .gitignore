@@ -1,0 +1,18 @@
+# Build output
+/bin/
+/gopowerwall
+
+# Test and coverage artifacts
+*.out
+coverage.html
+
+# Powerwall auth token cache - never commit
+.powerwall
+
+# Editors and OS
+/.idea
+*.iml
+.DS_Store
+*.swp
+*.tmp
+*.log
