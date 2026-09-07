@@ -9,6 +9,14 @@ coverage.html
 # Powerwall auth token cache - never commit
 .powerwall
 
+# Local credentials and environment - never commit
+.env
+.env.*
+!.env.example
+*.pem
+.pypowerwall.auth
+.pypowerwall.fleetapi
+
 # Editors and OS
 /.idea
 *.iml
