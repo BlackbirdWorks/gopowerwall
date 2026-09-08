@@ -32,6 +32,10 @@ jobs:
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
+        with:
+          # Build-tagged files are excluded by default, which silently left the
+          # whole of test/integration unlinted.
+          args: --timeout 10m --build-tags=integration
 
   vet:
     runs-on: ubuntu-latest

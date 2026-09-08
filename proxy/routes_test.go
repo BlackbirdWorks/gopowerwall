@@ -10,6 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
 )
 
 // TestGETRoutesAgainstConnectedGateway exercises the proxy's read-only GET
@@ -106,10 +109,16 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"TEPINV--1", "PINV_Fout"},
 		},
 		{
+			// The PVAC--1/PVS--1 fixture devices (testutil_test.go) report
+			// real gateway field names for string A only, so /strings - a
+			// flat dict per pypowerwall/__init__.py:497-549's shape, not
+			// wrapped under a "strings" key - has exactly one entry with
+			// capitalized field names and Connected read from the sibling
+			// PVS device rather than hardcoded.
 			name:       "strings",
 			path:       "/strings",
 			wantStatus: http.StatusOK,
-			wantSubs:   []string{`"strings"`},
+			wantSubs:   []string{`"PVAC--1_A"`, `"Connected":true`, `"Voltage":245.5`, `"State":"PV_Active"`},
 		},
 		{
 			name:       "temps",
@@ -140,6 +149,22 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			path:       "/alerts/pw",
 			wantStatus: http.StatusOK,
 			wantSubs:   []string{"SystemConnectedToGrid"},
+		},
+		{
+			// Local mode has no TEDAPI client attached, so this mirrors
+			// pypowerwall's own `... if pw.tedapi else {}` fallback
+			// (server.py:2483-2487): the route exists and returns valid,
+			// empty JSON rather than 404ing or erroring.
+			name:       "fans raw is empty without a tedapi client",
+			path:       "/fans",
+			wantStatus: http.StatusOK,
+			wantSubs:   []string{"{}"},
+		},
+		{
+			name:       "fans pw is empty without a tedapi client",
+			path:       "/fans/pw",
+			wantStatus: http.StatusOK,
+			wantSubs:   []string{"{}"},
 		},
 		{
 			name:       "version",
@@ -265,7 +290,7 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			name:       "pw strings",
 			path:       "/pw/strings",
 			wantStatus: http.StatusOK,
-			wantSubs:   []string{"strings"},
+			wantSubs:   []string{`"PVAC--1_A"`, `"Connected":true`},
 		},
 		{
 			name:       "pw din",
@@ -403,6 +428,66 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, resp.StatusCode, "body: %s", body)
 			for _, sub := range tc.wantSubs {
 				assert.Contains(t, string(body), sub)
+			}
+		})
+	}
+}
+
+// TestStringsRouteMatchesUpstreamShape is the regression test for the
+// /strings and /pw/strings JSON parity bug: gopowerwall's proxy used to
+// marshal [gopowerwall.Powerwall.Strings]'s idiomatic Go type directly,
+// which wraps every entry under a top-level "strings" key and lowercases
+// each field (connected/voltage/current/power) - pypowerwall's own /strings
+// (proxy/server.py:1764-1768, calling pw.strings(jsonformat=True)) and its
+// /json "strings" field (proxy/server.py:2283, pw.strings(jsonformat=False))
+// both emit a flat dict with no such wrapper, keying each entry's fields as
+// Connected/Voltage/Current/Power/State (pypowerwall/__init__.py:497-549).
+// This asserts the proxy's own solarStringsJSON conversion produces that
+// shape (using gopowerwall's own "<device>_<label>" outer keys, a
+// documented and deliberate divergence - see solarStringsJSON's doc
+// comment - since upstream's letter-plus-rotating-device-index keys have no
+// equivalent once the vitals map's PVAC-device iteration order is lost).
+func TestStringsRouteMatchesUpstreamShape(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name string
+		path string
+	}
+
+	for _, tc := range []testCase{
+		{name: "/strings", path: "/strings"},
+		{name: "/pw/strings", path: "/pw/strings"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gw := newFakeGateway(t, nil)
+			pw := newLocalPowerwall(t, gw)
+			ts := newProxyServer(t, baseTestConfig(), pw)
+
+			resp, err := ts.Client().Get(ts.URL + tc.path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			var body map[string]map[string]any
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+
+			assert.NotContains(t, body, "strings", "the response must not be wrapped under a top-level \"strings\" key")
+
+			entry, ok := body["PVAC--1_A"]
+			require.True(t, ok, "expected key \"PVAC--1_A\" in %v", body)
+			assert.Equal(t, true, entry["Connected"])
+			assert.InDelta(t, 245.5, entry["Voltage"], 0.001)
+			assert.InDelta(t, 8.2, entry["Current"], 0.001)
+			assert.InDelta(t, 2013.0, entry["Power"], 0.001)
+			assert.Equal(t, "PV_Active", entry["State"])
+
+			for _, lowercase := range []string{"connected", "voltage", "current", "power", "state"} {
+				assert.NotContains(t, entry, lowercase,
+					"field names must be capitalized to match pypowerwall's own dict keys")
 			}
 		})
 	}
@@ -662,4 +747,86 @@ func TestJSONAndCSVv2GridStatusReflectsRealGridState(t *testing.T) {
 			assert.Equal(t, strconv.Itoa(tc.wantGridStatus), fields[5], "/csv/v2 GridStatus column")
 		})
 	}
+}
+
+// TestPodRouteIncludesTEPODVitalsAugmentation is the regression test for the
+// /pod route's missing vitals-augmentation pass (docs/parity-matrix.md's
+// /pod row): before the fix, /pod only ever emitted the per-battery-block
+// loop's fields and never emitted "POD_nom_energy_to_be_charged" under any
+// connection mode. This adds a single TEPOD vitals device on top of the
+// fixture gateway's two-battery-block /api/system_status response
+// (proxy/web/bogus/api.system_status.json) and asserts the TEPOD device's
+// data overwrites PW1_* (vitals-iteration order, matching pypowerwall's own
+// assumption that TEPOD devices enumerate in the same order as
+// battery_blocks - see gopowerwall.Powerwall.PODView's doc comment), while
+// PW2_* - which has no matching TEPOD device - keeps the block loop's own
+// placeholder untouched.
+func TestPodRouteIncludesTEPODVitalsAugmentation(t *testing.T) {
+	t.Parallel()
+
+	strVal := func(v string) *teslapower.StringValue { return &teslapower.StringValue{Value: v} }
+	boolVital := func(name string, val bool) *teslapower.DeviceVital {
+		return &teslapower.DeviceVital{Name: &name, Value: &teslapower.DeviceVital_BoolValue{BoolValue: val}}
+	}
+	floatVital := func(name string, val float64) *teslapower.DeviceVital {
+		return &teslapower.DeviceVital{Name: &name, Value: &teslapower.DeviceVital_FloatValue{FloatValue: val}}
+	}
+
+	pb := &teslapower.DevicesWithVitals{
+		Devices: []*teslapower.SiteControllerConnectedDeviceWithVitals{
+			{
+				Device: &teslapower.SiteControllerConnectedDevice{
+					Device: &teslapower.Device{Din: strVal("TEPOD--9999--0001")},
+				},
+				Vitals: []*teslapower.DeviceVital{
+					boolVital("POD_ActiveHeating", true),
+					boolVital("POD_ChargeComplete", false),
+					boolVital("POD_ChargeRequest", true),
+					boolVital("POD_DischargeComplete", false),
+					boolVital("POD_PermanentlyFaulted", false),
+					boolVital("POD_PersistentlyFaulted", false),
+					boolVital("POD_enable_line", true),
+					floatVital("POD_available_charge_power", 3300.0),
+					floatVital("POD_available_dischg_power", 3200.0),
+					floatVital("POD_nom_energy_remaining", 9000.0),
+					floatVital("POD_nom_energy_to_be_charged", 4500.0),
+					floatVital("POD_nom_full_pack_energy", 13500.0),
+				},
+			},
+		},
+	}
+	data, err := proto.Marshal(pb)
+	require.NoError(t, err)
+
+	gw := newFakeGateway(t, map[string]http.HandlerFunc{
+		"/api/devices/vitals": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(data)
+		},
+	})
+	pw := newLocalPowerwall(t, gw)
+	ts := newProxyServer(t, baseTestConfig(), pw)
+
+	resp, err := ts.Client().Get(ts.URL + "/pod")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+
+	assert.Equal(t, "TEPOD--9999--0001", body["PW1_name"])
+	assert.InDelta(t, 1.0, body["PW1_POD_ActiveHeating"], 0)
+	assert.InDelta(t, 0.0, body["PW1_POD_ChargeComplete"], 0)
+	assert.InDelta(t, 1.0, body["PW1_POD_ChargeRequest"], 0)
+	assert.InDelta(t, 1.0, body["PW1_POD_enable_line"], 0)
+	assert.InDelta(t, 3300.0, body["PW1_POD_available_charge_power"], 0)
+	assert.InDelta(t, 3200.0, body["PW1_POD_available_dischg_power"], 0)
+	assert.InDelta(t, 9000.0, body["PW1_POD_nom_energy_remaining"], 0)
+	assert.InDelta(t, 4500.0, body["PW1_POD_nom_energy_to_be_charged"], 0)
+	assert.InDelta(t, 13500.0, body["PW1_POD_nom_full_pack_energy"], 0)
+
+	// PW2 (the second battery block) has no matching TEPOD device, so it
+	// keeps the block loop's own placeholder: the key exists (upstream
+	// always emits it) but is JSON null, not a number.
+	assert.Contains(t, body, "PW2_POD_nom_energy_to_be_charged")
+	assert.Nil(t, body["PW2_POD_nom_energy_to_be_charged"])
 }

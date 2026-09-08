@@ -1032,13 +1032,103 @@ func lookupFloat(m map[string]any, key string) float64 {
 	return v
 }
 
-// Strings returns per-solar-string measurements (voltage, current, power),
-// keyed by "<PVAC device name>_<label>" (label is one of A/B/C/D) so that a
-// site with more than one PVAC inverter keeps each device's four strings
-// distinct rather than colliding. Only [ModeLocal], [ModeTEDAPI], and
-// [ModeV1r] populate this (see [Powerwall.Vitals]); other modes, and any
-// failure of the underlying Vitals call, silently return an empty (but
-// non-nil) [models.SolarStrings].
+// lookupFloatPtr retrieves m[key] as a *float64, returning nil if the key is
+// absent or its value is neither a float64 nor an int - unlike lookupFloat,
+// it preserves the missing/zero distinction, matching pypowerwall's
+// get_value(m, key), which returns raw None (JSON null) for a missing field
+// rather than coercing it to zero (server.py:1132-1137, used throughout
+// generate_pod's vitals-augmentation pass for the power/energy fields).
+func lookupFloatPtr(m map[string]any, key string) *float64 {
+	v, err := floatFromAny(m[key])
+	if err != nil {
+		return nil
+	}
+
+	return &v
+}
+
+// intOrZero coerces m[key] to an int, mirroring pypowerwall's
+// int(get_value(v, key) or 0) coercion used throughout generate_pod's
+// TEPOD vitals-augmentation pass (server.py:2196-2244): a missing, nil,
+// false, or zero-valued field all yield 0, matching Python's falsy-or-0
+// fallback; any other value is coerced to its int equivalent rather than
+// clamped to 1, since upstream's "or 0" only substitutes a default and
+// otherwise passes the field through as-is.
+func intOrZero(m map[string]any, key string) int {
+	switch v := m[key].(type) {
+	case bool:
+		if v {
+			return 1
+		}
+
+		return 0
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 0
+	}
+}
+
+// solarStringLabels are the possible PV string labels vitals fields carry.
+// PW3 gateways report up to six strings, A-F; PW2 gateways report at most
+// four, A-D. See pypowerwall's tedapi vitals synthesis
+// (pypowerwall/tedapi/__init__.py:1030, "PW3 has 6 strings A-F") and its
+// device_controller esCan.bus.PVAC fields (A-D only). Iterating the full A-F
+// superset is safe for both: a label a given device does not report is
+// simply absent from its vitals map and skipped (see hasStringLabel below).
+//
+//nolint:gochecknoglobals // Read-only constant table, not mutated.
+var solarStringLabels = []string{"A", "B", "C", "D", "E", "F"}
+
+// hasStringLabel reports whether data carries any per-string vitals field
+// for label, so [Powerwall.Strings] does not fabricate an all-zero entry for
+// a label a device never reported (e.g. E/F on a 4-string PW2 gateway).
+func hasStringLabel(data map[string]any, label string) bool {
+	suffixes := []string{
+		"PVAC_PVMeasuredVoltage_",
+		"PVAC_PVCurrent_",
+		"PVAC_PVMeasuredPower_",
+		"PVAC_PvState_",
+	}
+	for _, suffix := range suffixes {
+		if _, ok := data[suffix+label]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Strings returns per-solar-string measurements (voltage, current, power,
+// state, and connected status), keyed by "<PVAC device name>_<label>" so
+// that a site with more than one PVAC inverter keeps each device's strings
+// distinct rather than colliding - pypowerwall's own upstream strings()
+// keys on a letter derived from the field name plus a rotating per-device
+// index instead (pypowerwall/__init__.py:495-549), a scheme this package
+// has no direct equivalent for since Go's vitals map does not preserve
+// PVAC-device iteration order; "<device>_<label>" is the simplest
+// non-colliding choice that still preserves device identity.
+//
+// Each field is read from the real gateway vitals field names upstream
+// produces: PVAC_PVMeasuredVoltage_<label>, PVAC_PVCurrent_<label>, and
+// PVAC_PVMeasuredPower_<label> for voltage/current/power,
+// PVAC_PvState_<label> for the raw PV state string, and
+// PVS_String<label>_Connected - read from the sibling "PVS" device sharing
+// the same device-name suffix as the PVAC device - for Connected. That
+// mirrors pypowerwall/__init__.py:497-549's own field scan (it merges the
+// PVS device's "*String*" fields into the PVAC device's dict before
+// scanning) and pypowerwall/tedapi/__init__.py:1032-1069's TEDAPI-mode
+// synthesis of those same field names from raw PCH_Pv* signals. Connected
+// is read verbatim from that field rather than re-derived from State: on
+// TEDAPI it was itself derived from state ("Pv_Active" in state) by the
+// backend's own vitals synthesis, but on local firmware it is an
+// independent hardware reading, so Powerwall.Strings must not recompute it.
+//
+// Only [ModeLocal], [ModeTEDAPI], and [ModeV1r] populate this (see
+// [Powerwall.Vitals]); other modes, and any failure of the underlying
+// Vitals call, silently return an empty (but non-nil) [models.SolarStrings].
 func (p *Powerwall) Strings(ctx context.Context) models.SolarStrings {
 	strMap := make(map[string]models.StringMetric)
 	vitals, _ := p.Vitals(ctx)
@@ -1047,22 +1137,31 @@ func (p *Powerwall) Strings(ctx context.Context) models.SolarStrings {
 		if !strings.HasPrefix(dev, "PVAC") {
 			continue
 		}
-		for _, label := range []string{"A", "B", "C", "D"} {
-			// Key on the originating PVAC device name plus the string label so
-			// that a site with more than one PVAC inverter does not have one
-			// device's strings silently overwrite another's. pypowerwall's own
-			// upstream /strings implementation keys on a different,
-			// firmware-version-specific field naming scheme
-			// (PVAC_PVMeasuredVoltage/Current/Power) that has no equivalent for
-			// the PVAC_Vsolar<label> fields used here, so there is no directly
-			// analogous upstream key to mirror; "<device>_<label>" is the
-			// simplest non-colliding choice that still preserves device identity.
+
+		// The sibling PVS device shares everything after the "PVAC" prefix
+		// in its own name (e.g. "PVAC--1" / "PVS--1"), mirroring
+		// pypowerwall/__init__.py:509's `"PVS" + str(device)[4:]`.
+		pvsData := vitals.Devices["PVS"+dev[len("PVAC"):]]
+
+		for _, label := range solarStringLabels {
+			if !hasStringLabel(data, label) {
+				continue
+			}
+
+			var connected bool
+			if pvsData != nil {
+				connected, _ = pvsData["PVS_String"+label+"_Connected"].(bool)
+			}
+
+			state, _ := data["PVAC_PvState_"+label].(string)
+
 			key := dev + "_" + label
 			strMap[key] = models.StringMetric{
-				Connected: true,
-				Voltage:   lookupFloat(data, "PVAC_Vsolar"+label),
-				Current:   lookupFloat(data, "PVAC_Isolar"+label),
-				Power:     lookupFloat(data, "PVAC_Psolar"+label),
+				Connected: connected,
+				Voltage:   lookupFloat(data, "PVAC_PVMeasuredVoltage_"+label),
+				Current:   lookupFloat(data, "PVAC_PVCurrent_"+label),
+				Power:     lookupFloat(data, "PVAC_PVMeasuredPower_"+label),
+				State:     state,
 			}
 		}
 	}
@@ -1869,13 +1968,26 @@ func (p *Powerwall) Snapshot(ctx context.Context, opts ...AggregatesOption) mode
 }
 
 // PODView returns the per-battery-block operational view derived from
-// [Powerwall.SystemStatus], [Powerwall.GetTimeRemaining], and
-// [Powerwall.GetReserve]. Like [Powerwall.Snapshot], it degrades
+// [Powerwall.SystemStatus], [Powerwall.Vitals], [Powerwall.GetTimeRemaining],
+// and [Powerwall.GetReserve]. Like [Powerwall.Snapshot], it degrades
 // gracefully: a disconnected Powerwall or a failed SystemStatus read simply
 // yields an empty Blocks slice and zero-valued totals rather than an error.
 // TimeRemainingHours and BackupReservePercent are nil specifically when
 // that one read fails, since pypowerwall's own /pod reports those two
 // fields as JSON null rather than a zero number in that case.
+//
+// TEPODEntries is the second, independent augmentation pass upstream's
+// generate_pod performs (server.py:2196-2244, "Augment with Vitals Data"):
+// every vitals device whose name starts with "TEPOD" (a battery-block
+// heating/POD-controller device - see pypowerwall/tedapi/__init__.py:
+// 1018-1022 for how pypowerwall's own TEDAPI backend synthesizes one)
+// contributes one entry, in vitals-iteration order. Upstream's own code
+// comment ("Expansion packs are now included in vitals() as TEPOD entries,
+// so they're automatically picked up by the loop above") documents that it
+// trusts TEPOD devices to enumerate in the same order as SystemStatus's
+// battery_blocks, an assumption this method mirrors by sorting device names
+// for a deterministic order - Go's vitals map, unlike Python's dict, has no
+// stable iteration order of its own to (mis)trust in the first place.
 func (p *Powerwall) PODView(ctx context.Context) models.PODView {
 	sys, _ := p.SystemStatus(ctx)
 
@@ -1893,7 +2005,58 @@ func (p *Powerwall) PODView(ctx context.Context) models.PODView {
 		view.BackupReservePercent = &reserve
 	}
 
+	vitals, _ := p.Vitals(ctx)
+
+	deviceNames := make([]string, 0, len(vitals.Devices))
+	for name := range vitals.Devices {
+		if strings.HasPrefix(name, "TEPOD") {
+			deviceNames = append(deviceNames, name)
+		}
+	}
+	sort.Strings(deviceNames)
+
+	for _, name := range deviceNames {
+		data := vitals.Devices[name]
+		view.TEPODEntries = append(view.TEPODEntries, models.PODTEPODEntry{
+			Device:                  name,
+			ActiveHeating:           intOrZero(data, "POD_ActiveHeating"),
+			ChargeComplete:          intOrZero(data, "POD_ChargeComplete"),
+			ChargeRequest:           intOrZero(data, "POD_ChargeRequest"),
+			DischargeComplete:       intOrZero(data, "POD_DischargeComplete"),
+			PermanentlyFaulted:      intOrZero(data, "POD_PermanentlyFaulted"),
+			PersistentlyFaulted:     intOrZero(data, "POD_PersistentlyFaulted"),
+			EnableLine:              intOrZero(data, "POD_enable_line"),
+			AvailableChargePower:    lookupFloatPtr(data, "POD_available_charge_power"),
+			AvailableDischargePower: lookupFloatPtr(data, "POD_available_dischg_power"),
+			NomEnergyRemaining:      lookupFloatPtr(data, "POD_nom_energy_remaining"),
+			NomEnergyToBeCharged:    lookupFloatPtr(data, "POD_nom_energy_to_be_charged"),
+			NomFullPackEnergy:       lookupFloatPtr(data, "POD_nom_full_pack_energy"),
+		})
+	}
+
 	return view
+}
+
+// GetFanSpeeds returns the raw cooling-fan speed readings the active
+// TEDAPI/v1r client reports, keyed by synthesized PVAC device name -
+// backing the gopowerwall proxy's /fans and /fans/pw routes, mirroring
+// pypowerwall's `pw.tedapi.get_fan_speeds() if pw.tedapi else {}`
+// (server.py:2483-2500). It is empty for every other connection mode,
+// matching upstream's own `pw.tedapi` falsy gate. See
+// [github.com/blackbirdworks/gopowerwall/backend/tedapi.ExtractFanSpeeds]'s
+// doc comment for a static ambiguity in upstream's own query text that
+// means this may legitimately return empty even in TEDAPI/v1r mode on real
+// hardware - this method faithfully reproduces that upstream behavior
+// rather than working around it.
+func (p *Powerwall) GetFanSpeeds(ctx context.Context) map[string]models.FanSpeedEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.tedapi == nil {
+		return map[string]models.FanSpeedEntry{}
+	}
+
+	return p.tedapi.GetFanSpeeds(ctx, false)
 }
 
 // FrequencyView returns the per-device frequency/voltage view derived from

@@ -83,7 +83,7 @@ func (s *Server) lookupPWFacingSystem(ctx context.Context, sub string) (any, boo
 	case "temps":
 		return s.PW.Temps(ctx), true
 	case "strings":
-		return s.PW.Strings(ctx), true
+		return solarStringsJSON(s.PW.Strings(ctx)), true
 	case "din":
 		return map[string]any{"din": orNil(s.PW.Din(ctx))}, true
 	case keyUptime:

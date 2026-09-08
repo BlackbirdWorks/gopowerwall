@@ -204,35 +204,79 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 	}
 }
 
-const stringVitalFieldsPerLabel = 3
+const stringVitalFieldsPerLabel = 4
+
+// solarStringTestLabels are the four labels stringLabelVitals/pvsLabelVitals
+// populate; only A-D are populated deliberately, so tests can assert E/F are
+// absent (see hasStringLabel in powerwall.go) rather than fabricated as
+// all-zero entries.
+var solarStringTestLabels = [...]string{"A", "B", "C", "D"} //nolint:gochecknoglobals // Read-only test fixture table.
 
 // vitalFloat builds a single named float DeviceVital.
 func vitalFloat(name string, value float64) *teslapower.DeviceVital {
 	return &teslapower.DeviceVital{Name: new(name), Value: &teslapower.DeviceVital_FloatValue{FloatValue: value}}
 }
 
-// stringLabelVitals builds the PVAC_Vsolar/Isolar/Psolar<label> vitals fields
-// that Strings reads, with distinct values per label so a bug that reads the
-// wrong field (e.g. "PVAC_Vsolar0" instead of "PVAC_VsolarA") is caught.
+// vitalString builds a single named string DeviceVital.
+func vitalString(name, value string) *teslapower.DeviceVital {
+	return &teslapower.DeviceVital{Name: new(name), Value: &teslapower.DeviceVital_StringValue{StringValue: value}}
+}
+
+// vitalBool builds a single named bool DeviceVital.
+func vitalBool(name string, value bool) *teslapower.DeviceVital {
+	return &teslapower.DeviceVital{Name: new(name), Value: &teslapower.DeviceVital_BoolValue{BoolValue: value}}
+}
+
+// stringLabelVitals builds the real gateway vitals field names Strings reads
+// off a PVAC device - PVAC_PVMeasuredVoltage_<label>, PVAC_PVCurrent_<label>,
+// PVAC_PVMeasuredPower_<label>, and PVAC_PvState_<label> - with distinct
+// values per label so a bug that reads the wrong field, or the wrong label
+// range, is caught. Only labels A-D are populated (E/F are deliberately
+// absent, see [TestStringsKeysByDeviceToAvoidCollisions]). Label B's state
+// is "PV_Standby" (not containing "Pv_Active") so the Connected-derivation
+// test data covers both outcomes; C uses "PV_Active_Parallel" to exercise
+// the substring match.
 func stringLabelVitals(base float64) []*teslapower.DeviceVital {
-	labels := [...]string{"A", "B", "C", "D"}
-	vitals := make([]*teslapower.DeviceVital, 0, len(labels)*stringVitalFieldsPerLabel)
-	for i, label := range labels {
+	states := map[string]string{
+		"A": "PV_Active",
+		"B": "PV_Standby",
+		"C": "PV_Active_Parallel",
+		"D": "PV_Active",
+	}
+	vitals := make([]*teslapower.DeviceVital, 0, len(solarStringTestLabels)*stringVitalFieldsPerLabel)
+	for i, label := range solarStringTestLabels {
 		v := base + float64(i)*10
 		vitals = append(vitals,
-			vitalFloat("PVAC_Vsolar"+label, v),
-			vitalFloat("PVAC_Isolar"+label, v+1),
-			vitalFloat("PVAC_Psolar"+label, v+2),
+			vitalFloat("PVAC_PVMeasuredVoltage_"+label, v),
+			vitalFloat("PVAC_PVCurrent_"+label, v+1),
+			vitalFloat("PVAC_PVMeasuredPower_"+label, v+2),
+			vitalString("PVAC_PvState_"+label, states[label]),
 		)
 	}
 
 	return vitals
 }
 
-// buildMultiPVACVitalsProtobuf encodes two distinct PVAC devices, each
-// reporting its own A-D string data, plus a device-level alert on the first
-// one. It backs the regression tests for Strings' device-collision bug and
-// Alerts' []string type-assertion bug.
+// pvsLabelVitals builds the sibling PVS device's PVS_String<label>_Connected
+// fields Strings merges in by device-name suffix. Connected is false only
+// for B, matching stringLabelVitals' non-"Pv_Active" state for B, and true
+// for the wrongly-"Standby"-adjacent C to prove Connected is read verbatim
+// from this field rather than re-derived from state.
+func pvsLabelVitals() []*teslapower.DeviceVital {
+	connected := map[string]bool{"A": true, "B": false, "C": true, "D": true}
+	vitals := make([]*teslapower.DeviceVital, 0, len(solarStringTestLabels))
+	for _, label := range solarStringTestLabels {
+		vitals = append(vitals, vitalBool("PVS_String"+label+"_Connected", connected[label]))
+	}
+
+	return vitals
+}
+
+// buildMultiPVACVitalsProtobuf encodes two distinct PVAC devices (each with
+// its own sibling PVS device), each reporting its own A-D string data, plus
+// a device-level alert on the first one. It backs the regression tests for
+// Strings' device-collision bug, its real-field-name/Connected-derivation
+// bug, and Alerts' []string type-assertion bug.
 func buildMultiPVACVitalsProtobuf(t *testing.T) []byte {
 	t.Helper()
 
@@ -247,9 +291,21 @@ func buildMultiPVACVitalsProtobuf(t *testing.T) []byte {
 			},
 			{
 				Device: &teslapower.SiteControllerConnectedDevice{
+					Device: &teslapower.Device{Din: &teslapower.StringValue{Value: "PVS--1"}},
+				},
+				Vitals: pvsLabelVitals(),
+			},
+			{
+				Device: &teslapower.SiteControllerConnectedDevice{
 					Device: &teslapower.Device{Din: &teslapower.StringValue{Value: "PVAC--2"}},
 				},
 				Vitals: stringLabelVitals(1100),
+			},
+			{
+				Device: &teslapower.SiteControllerConnectedDevice{
+					Device: &teslapower.Device{Din: &teslapower.StringValue{Value: "PVS--2"}},
+				},
+				Vitals: pvsLabelVitals(),
 			},
 		},
 	}
@@ -294,12 +350,24 @@ func newLocalTestPowerwall(t *testing.T, vitalsBody []byte) *gopowerwall.Powerwa
 	return pw
 }
 
-// TestStringsKeysByDeviceToAvoidCollisions is the regression test for the
-// Strings bug: ranging over the label slice used the loop index (0-3) as both
-// the lookup suffix and the map key, so real gateway fields
-// (PVAC_VsolarA..PVAC_VsolarD) were never found, and a second PVAC device
-// silently overwrote the first at the same "0".."3" keys. With the fix,
-// distinct PVAC devices each keep their own A-D entries.
+// TestStringsKeysByDeviceToAvoidCollisions is the regression test for three
+// Strings bugs, all failing before their respective fixes:
+//
+//  1. Ranging over the label slice used the loop index (0-3) as both the
+//     lookup suffix and the map key, so real gateway fields
+//     (PVAC_VsolarA..PVAC_VsolarD) were never found, and a second PVAC
+//     device silently overwrote the first at the same "0".."3" keys. With
+//     the fix, distinct PVAC devices each keep their own A-D entries.
+//  2. Strings read invented field names (PVAC_Vsolar<label> etc.) that no
+//     gateway - local firmware or TEDAPI - ever produces, so every reading
+//     came back zero. With the fix, it reads the real field names
+//     (PVAC_PVMeasuredVoltage_<label>, PVAC_PVCurrent_<label>,
+//     PVAC_PVMeasuredPower_<label>, PVAC_PvState_<label>).
+//  3. Connected was hardcoded true unconditionally. With the fix, it is
+//     read from the sibling PVS device's PVS_String<label>_Connected field
+//     - verbatim, not re-derived from state (see stringLabelVitals' B/C
+//     data, where state and Connected deliberately disagree with a naive
+//     "Pv_Active substring" re-derivation).
 func TestStringsKeysByDeviceToAvoidCollisions(t *testing.T) {
 	t.Parallel()
 
@@ -307,16 +375,40 @@ func TestStringsKeysByDeviceToAvoidCollisions(t *testing.T) {
 	result := pw.Strings(t.Context())
 
 	type testCase struct {
-		name      string
-		key       string
-		wantVolts float64
+		name          string
+		key           string
+		wantState     string
+		wantVolts     float64
+		wantCurrent   float64
+		wantPower     float64
+		wantConnected bool
 	}
 
 	for _, tc := range []testCase{
-		{name: "device one string A", key: "PVAC--1_A", wantVolts: 100},
-		{name: "device one string D", key: "PVAC--1_D", wantVolts: 130},
-		{name: "device two string A does not collide with device one", key: "PVAC--2_A", wantVolts: 1100},
-		{name: "device two string D", key: "PVAC--2_D", wantVolts: 1130},
+		{
+			name: "device one string A", key: "PVAC--1_A",
+			wantVolts: 100, wantCurrent: 101, wantPower: 102, wantState: "PV_Active", wantConnected: true,
+		},
+		{
+			name: "device one string B is not connected", key: "PVAC--1_B",
+			wantVolts: 110, wantCurrent: 111, wantPower: 112, wantState: "PV_Standby", wantConnected: false,
+		},
+		{
+			name: "device one string C reads Connected verbatim, not re-derived from state", key: "PVAC--1_C",
+			wantVolts: 120, wantCurrent: 121, wantPower: 122, wantState: "PV_Active_Parallel", wantConnected: true,
+		},
+		{
+			name: "device one string D", key: "PVAC--1_D",
+			wantVolts: 130, wantCurrent: 131, wantPower: 132, wantState: "PV_Active", wantConnected: true,
+		},
+		{
+			name: "device two string A does not collide with device one", key: "PVAC--2_A",
+			wantVolts: 1100, wantCurrent: 1101, wantPower: 1102, wantState: "PV_Active", wantConnected: true,
+		},
+		{
+			name: "device two string D", key: "PVAC--2_D",
+			wantVolts: 1130, wantCurrent: 1131, wantPower: 1132, wantState: "PV_Active", wantConnected: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -324,11 +416,17 @@ func TestStringsKeysByDeviceToAvoidCollisions(t *testing.T) {
 			metric, ok := result.Strings[tc.key]
 			require.True(t, ok, "expected key %q in Strings map, got %v", tc.key, result.Strings)
 			assert.InDelta(t, tc.wantVolts, metric.Voltage, 0.001)
-			assert.True(t, metric.Connected)
+			assert.InDelta(t, tc.wantCurrent, metric.Current, 0.001)
+			assert.InDelta(t, tc.wantPower, metric.Power, 0.001)
+			assert.Equal(t, tc.wantState, metric.State)
+			assert.Equal(t, tc.wantConnected, metric.Connected)
 		})
 	}
 
 	assert.Len(t, result.Strings, 8, "expected four labels for each of the two PVAC devices with no collisions")
+
+	assert.NotContains(t, result.Strings, "PVAC--1_E", "label E is absent from vitals and must not be fabricated")
+	assert.NotContains(t, result.Strings, "PVAC--1_F", "label F is absent from vitals and must not be fabricated")
 }
 
 // TestAlertsIncludesDeviceStringSliceAlerts is the regression test for the
@@ -530,4 +628,82 @@ func TestSOEAndGridStatusResponseSurviveEarlierParsedPoll(t *testing.T) {
 			tc.run(t, pw)
 		})
 	}
+}
+
+// TestPODViewIncludesTEPODVitalsAugmentation is the regression test for the
+// /pod route's missing vitals-augmentation pass: before this change,
+// PODView never called Vitals at all (confirmed by grep -
+// docs/parity-matrix.md's /pod row), so a TEPOD device's data - including
+// nom_energy_to_be_charged, a field gopowerwall never emitted under any
+// connection mode - never reached the view. This mirrors pypowerwall's own
+// second, independent /pod loop (server.py:2196-2244, "Augment with Vitals
+// Data").
+func TestPODViewIncludesTEPODVitalsAugmentation(t *testing.T) {
+	t.Parallel()
+
+	pb := &teslapower.DevicesWithVitals{
+		Devices: []*teslapower.SiteControllerConnectedDeviceWithVitals{
+			{
+				Device: &teslapower.SiteControllerConnectedDevice{
+					Device: &teslapower.Device{Din: &teslapower.StringValue{Value: "TEPOD--1234--5678"}},
+				},
+				Vitals: []*teslapower.DeviceVital{
+					vitalBool("POD_ActiveHeating", true),
+					vitalBool("POD_ChargeComplete", false),
+					vitalBool("POD_ChargeRequest", true),
+					vitalBool("POD_DischargeComplete", false),
+					vitalBool("POD_PermanentlyFaulted", false),
+					vitalBool("POD_PersistentlyFaulted", false),
+					vitalBool("POD_enable_line", true),
+					vitalFloat("POD_available_charge_power", 3300.0),
+					vitalFloat("POD_available_dischg_power", 3200.0),
+					vitalFloat("POD_nom_energy_remaining", 9000.0),
+					vitalFloat("POD_nom_energy_to_be_charged", 4500.0),
+					vitalFloat("POD_nom_full_pack_energy", 13500.0),
+				},
+			},
+		},
+	}
+	data, err := proto.Marshal(pb)
+	require.NoError(t, err)
+
+	pw := newLocalTestPowerwall(t, data)
+	view := pw.PODView(t.Context())
+
+	require.Len(t, view.TEPODEntries, 1)
+	entry := view.TEPODEntries[0]
+	assert.Equal(t, "TEPOD--1234--5678", entry.Device)
+	assert.Equal(t, 1, entry.ActiveHeating)
+	assert.Equal(t, 0, entry.ChargeComplete)
+	assert.Equal(t, 1, entry.ChargeRequest)
+	assert.Equal(t, 0, entry.DischargeComplete)
+	assert.Equal(t, 0, entry.PermanentlyFaulted)
+	assert.Equal(t, 0, entry.PersistentlyFaulted)
+	assert.Equal(t, 1, entry.EnableLine)
+	require.NotNil(t, entry.AvailableChargePower)
+	assert.InDelta(t, 3300.0, *entry.AvailableChargePower, 0.001)
+	require.NotNil(t, entry.AvailableDischargePower)
+	assert.InDelta(t, 3200.0, *entry.AvailableDischargePower, 0.001)
+	require.NotNil(t, entry.NomEnergyRemaining)
+	assert.InDelta(t, 9000.0, *entry.NomEnergyRemaining, 0.001)
+	require.NotNil(t, entry.NomEnergyToBeCharged)
+	assert.InDelta(t, 4500.0, *entry.NomEnergyToBeCharged, 0.001)
+	require.NotNil(t, entry.NomFullPackEnergy)
+	assert.InDelta(t, 13500.0, *entry.NomFullPackEnergy, 0.001)
+}
+
+// TestGetFanSpeedsEmptyOutsideTEDAPIMode is the regression test proving
+// GetFanSpeeds - previously nonexistent, since no /fans route existed at
+// all (docs/parity-matrix.md's /fans row) - mirrors pypowerwall's own
+// `pw.tedapi` falsy gate (server.py:2483-2500): a local-mode connection
+// with no TEDAPI client attached returns an empty, non-nil map rather than
+// erroring or panicking.
+func TestGetFanSpeedsEmptyOutsideTEDAPIMode(t *testing.T) {
+	t.Parallel()
+
+	pw := newLocalTestPowerwall(t, buildMultiPVACVitalsProtobuf(t))
+
+	speeds := pw.GetFanSpeeds(t.Context())
+	assert.NotNil(t, speeds)
+	assert.Empty(t, speeds)
 }

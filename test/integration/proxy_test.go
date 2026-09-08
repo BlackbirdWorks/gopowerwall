@@ -169,20 +169,63 @@ func TestProxyHTTPSurface(t *testing.T) {
 			},
 		},
 		{
+			// The proxy's /strings shape is a parity contract with
+			// pypowerwall's own pw.strings(jsonformat=True)
+			// (pypowerwall/__init__.py:495-549): a flat dict, not wrapped
+			// under a top-level "strings" key, with each entry's fields
+			// capitalized (Connected/Voltage/Current/Power/State) - see
+			// proxy/routes.go's solarStringsJSON. gopowerwall keys each
+			// entry on "<PVAC device>_<A|B|C|D>" (see Powerwall.Strings);
+			// the simulator's vitals sample has one PVAC inverter
+			// reporting real gateway field names for strings A-D (decoded
+			// verbatim from the protobuf vitals payload), so there are
+			// exactly four entries with the fixture's real, non-zero
+			// readings - not the all-zero/hardcoded-Connected values the
+			// PVAC_Vsolar<label> field-naming bug used to produce.
 			name: "/strings returns the solar-strings shape",
 			path: "/strings",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var strs struct {
-					Strings map[string]struct {
-						Connected bool    `json:"connected"`
-						Voltage   float64 `json:"voltage"`
-					} `json:"strings"`
+				var strs map[string]struct {
+					State     string  `json:"State"`
+					Connected bool    `json:"Connected"`
+					Voltage   float64 `json:"Voltage"`
+					Current   float64 `json:"Current"`
+					Power     float64 `json:"Power"`
 				}
 				require.NoError(t, json.Unmarshal(body, &strs))
-				// Strings() keys on "<PVAC device>_<A|B|C|D>"; the simulator's
-				// vitals sample has one PVAC inverter, so 4 string entries.
-				assert.Len(t, strs.Strings, 4)
+				assert.Len(t, strs, 4)
+				assert.NotContains(
+					t,
+					strs,
+					"strings",
+					"the response must not be wrapped under a top-level \"strings\" key",
+				)
+
+				const device = "PVAC--1538100-00-F--C0000000000000"
+
+				a, ok := strs[device+"_A"]
+				require.True(t, ok, "expected key %q in %v", device+"_A", strs)
+				assert.True(t, a.Connected)
+				assert.InDelta(t, 256.9, a.Voltage, 0.01)
+				assert.InDelta(t, 1.74, a.Current, 0.01)
+				assert.InDelta(t, 441.0, a.Power, 0.5)
+				assert.Equal(t, "PV_Active", a.State)
+
+				// String B's simulator fixture reports a negative voltage
+				// and PVS_StringB_Connected=false - Connected must be
+				// read verbatim from that field, not re-derived from
+				// state (which is still "PV_Active").
+				b, ok := strs[device+"_B"]
+				require.True(t, ok, "expected key %q in %v", device+"_B", strs)
+				assert.False(t, b.Connected)
+				assert.InDelta(t, -2.1, b.Voltage, 0.01)
+				assert.InDelta(t, 0.0, b.Current, 0.01)
+
+				d, ok := strs[device+"_D"]
+				require.True(t, ok, "expected key %q in %v", device+"_D", strs)
+				assert.True(t, d.Connected)
+				assert.Equal(t, "PV_Active_Parallel", d.State)
 			},
 		},
 		{
@@ -240,16 +283,31 @@ func TestProxyHTTPSurface(t *testing.T) {
 		},
 		{
 			// /api/system_status is unimplemented by the simulator, so
-			// BatteryBlocks is empty and /pod's per-block fields never
-			// materialize; the top-level aggregate fields default to zero.
-			name: "/pod degrades to zero aggregates when system_status is unavailable",
+			// BatteryBlocks is empty and the per-block loop's own fields
+			// never materialize; the top-level aggregate fields default to
+			// zero. But the vitals-augmentation pass (PODView's
+			// TEPODEntries) is independent of battery_blocks and runs
+			// against the simulator's /api/devices/vitals response, which
+			// does include two TEPOD devices (see pwsimulator/stub.py) -
+			// this is the regression test for the previously-missing TEPOD
+			// augmentation pass (docs/parity-matrix.md's /pod row): before
+			// the fix, /pod had no PW1_*/PW2_* keys at all here, since
+			// PODView never called Vitals. Sorted by device name for a
+			// deterministic order (Go's vitals map, unlike Python's dict,
+			// has no iteration order of its own to trust).
+			name: "/pod's vitals augmentation populates TEPOD fields even without system_status",
 			path: "/pod",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
 				var out map[string]any
 				require.NoError(t, json.Unmarshal(body, &out))
 				assert.InDelta(t, 0.0, out["nominal_full_pack_energy"], 0.01)
-				assert.NotContains(t, out, "PW1_name")
+				assert.Equal(t, "TEPOD--1081100-10-U--T0000000000", out["PW1_name"])
+				assert.Equal(t, "TEPOD--1081100-13-V--T0000000000", out["PW2_name"])
+				assert.InDelta(t, 8605.0, out["PW1_POD_nom_energy_to_be_charged"], 0.01)
+				assert.InDelta(t, 8940.0, out["PW2_POD_nom_energy_to_be_charged"], 0.01)
+				assert.InDelta(t, 1.0, out["PW1_POD_enable_line"], 0.01)
+				assert.InDelta(t, 0.0, out["PW1_POD_ChargeComplete"], 0.01)
 			},
 		},
 		{

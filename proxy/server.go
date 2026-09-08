@@ -22,6 +22,42 @@ const (
 
 // isAllowlisted reports whether the proxy forwards reqPath to the gateway.
 // A switch keeps the route set constant and allocation-free per request.
+//
+// This is a parity surface (see .agent/rules/powerwall.md): the set below
+// is exactly pypowerwall's own ALLOWLIST (server.py:173-199, 26 entries),
+// reconciled against a prior version of this list that had drifted by 13
+// entries (docs/parity-matrix.md's allowlist row and correction #8).
+// Reconciliation decisions, made deliberately rather than defaulting to
+// "keep everything":
+//
+//   - Added "/api/system/networks" and "/api/synchrometer/ct_voltage_references":
+//     both are on upstream's ALLOWLIST and were missing here entirely, so a
+//     client requesting either was silently falling through to the static-
+//     file handler and 404ing instead of being proxied.
+//   - Removed "/api/system/networks/conn_tests": not on upstream's
+//     ALLOWLIST at all, and its path strongly suggests it triggers an
+//     active network connectivity test on the gateway rather than reading
+//     passive state - forwarding a bare GET to it is a meaningfully
+//     different risk profile than the read-only informational routes
+//     upstream actually allows, and it was almost certainly meant to *be*
+//     "/api/system/networks" (added above) rather than a deliberate,
+//     distinct addition.
+//   - Removed "/api/system_status/soe": already served by its own dedicated
+//     handler (handleCoreAPIRoutes, checked before this function ever runs)
+//     with different, correct-for-parity output; the allowlist entry was
+//     unreachable dead code, so removing it is a pure no-op that resolves
+//     the divergence rather than a behavior change.
+//   - Removed the remaining 8 ("/api/diagnostics", "/api/generators",
+//     "/api/generators/actions", "/api/syncon/vitals", "/api/syncon/actions",
+//     "/api/inverters", "/api/inverters/status", "/api/meters/status",
+//     "/api/powerwalls/status"): none has any test, documentation, or
+//     comment anywhere in this repository evidencing a deliberate reason
+//     for the addition, and two are actions-suffixed paths whose passive-GET
+//     semantics on a real gateway are unknown. Per the parity contract,
+//     forwarding a path pypowerwall's own allowlist refuses is a real
+//     behavioral difference, not a cosmetic one; absent a documented reason
+//     to diverge, this reconciliation restores exact parity with upstream's
+//     26-entry list rather than preserving undocumented scope creep.
 func isAllowlisted(reqPath string) bool {
 	switch reqPath {
 	case "/api/status",
@@ -44,21 +80,12 @@ func isAllowlisted(reqPath string) bool {
 		"/api/meters",
 		"/api/installer",
 		"/api/networks",
-		"/api/system/networks/conn_tests",
-		"/api/auth/toggle/supported",
-		"/api/solar_powerwall",
-		"/api/troubleshooting/problems",
-		"/api/diagnostics",
-		"/api/generators",
-		"/api/generators/actions",
-		"/api/syncon/vitals",
-		"/api/syncon/actions",
-		"/api/inverters",
-		"/api/inverters/status",
+		"/api/system/networks",
 		"/api/meters/readings",
-		"/api/meters/status",
-		"/api/powerwalls/status",
-		"/api/system_status/soe":
+		"/api/synchrometer/ct_voltage_references",
+		"/api/troubleshooting/problems",
+		"/api/auth/toggle/supported",
+		"/api/solar_powerwall":
 		return true
 	default:
 		return false

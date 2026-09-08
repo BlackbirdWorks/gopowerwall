@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -336,6 +337,59 @@ func (c *Client) GetStatus(ctx context.Context, force bool) map[string]any {
 	res := c.execGraphQL(ctx, query)
 	if res != nil {
 		c.cache.Set("status", res)
+	}
+
+	return res
+}
+
+// GetComponents executes the PW3 components GraphQL query (ComponentsQuery /
+// PW3Query) whose response carries the raw PCH_Pv* per-string signals used
+// to synthesize solar-string vitals - see [synthesizeStringVitals].
+func (c *Client) GetComponents(ctx context.Context, force bool) map[string]any {
+	if !force {
+		if val, found, _ := c.cache.Get("components"); found {
+			if m, ok := val.(map[string]any); ok {
+				return m
+			}
+		}
+	}
+
+	query := GetQuery(QueryRoleComponents, c.apiVersion)
+	if query == nil {
+		return nil
+	}
+
+	res := c.execGraphQL(ctx, query)
+	if res != nil {
+		c.cache.Set("components", res)
+	}
+
+	return res
+}
+
+// GetDeviceController executes the DEVICE_CONTROLLER_FULL GraphQL query,
+// mirroring pypowerwall's own get_device_controller
+// (pypowerwall/tedapi/__init__.py:738-755, cached under the same
+// "controller" name there). Its response is a superset of [Client.GetStatus]
+// carrying an additional "components" section - see [ExtractFanSpeeds],
+// the only current caller, for what that section is used for.
+func (c *Client) GetDeviceController(ctx context.Context, force bool) map[string]any {
+	if !force {
+		if val, found, _ := c.cache.Get("controller"); found {
+			if m, ok := val.(map[string]any); ok {
+				return m
+			}
+		}
+	}
+
+	query := GetQuery(QueryRoleDeviceControllerFull, c.apiVersion)
+	if query == nil {
+		return nil
+	}
+
+	res := c.execGraphQL(ctx, query)
+	if res != nil {
+		c.cache.Set("controller", res)
 	}
 
 	return res
@@ -805,6 +859,178 @@ func (p *PyPowerwallTEDAPI) getAPISystemStatusSOE(ctx context.Context, force boo
 	}, nil
 }
 
+// pchStringLetters are the PW3 solar string identifiers found in raw
+// PCH_Pv* component signals - "PW3 has 6 strings A-F"
+// (pypowerwall/tedapi/__init__.py:1030).
+//
+//nolint:gochecknoglobals // Read-only constant table, not mutated.
+var pchStringLetters = []string{"A", "B", "C", "D", "E", "F"}
+
+// pchSignalValue extracts a signal's numeric "value" as a float64, matching
+// pypowerwall's own guard (pypowerwall/tedapi/__init__.py:1041-1046): a
+// missing, null, or non-positive reading is treated as 0 rather than
+// passed through, since a disconnected string reports a nonsensical
+// negative or zero raw value.
+func pchSignalValue(sig map[string]any) float64 {
+	if v, ok := sig["value"].(float64); ok && v > 0 {
+		return v
+	}
+
+	return 0
+}
+
+// scanPCHStringSignals finds string letter n's PCH_PvState_<n>,
+// PCH_PvVoltage<n>, and PCH_PvCurrent<n> signals across every "pch"
+// component, returning the raw state text (default "Unknown" if never
+// found) and clamped voltage/current readings.
+func scanPCHStringSignals(pchList []any, n string) (string, float64, float64) {
+	pvState := "Unknown"
+
+	var pvVoltage, pvCurrent float64
+
+	for _, compAny := range pchList {
+		comp, okComp := compAny.(map[string]any)
+		if !okComp {
+			continue
+		}
+
+		signals, _ := comp["signals"].([]any)
+		for _, sigAny := range signals {
+			sig, okSig := sigAny.(map[string]any)
+			if !okSig {
+				continue
+			}
+
+			name, _ := sig["name"].(string)
+			switch name {
+			case "PCH_PvState_" + n:
+				if tv, okTV := sig["textValue"].(string); okTV {
+					pvState = tv
+				}
+			case "PCH_PvVoltage" + n:
+				pvVoltage = pchSignalValue(sig)
+			case "PCH_PvCurrent" + n:
+				pvCurrent = pchSignalValue(sig)
+			}
+		}
+	}
+
+	return pvState, pvVoltage, pvCurrent
+}
+
+// synthesizeStringVitals maps the raw PCH_PvState_<n>/PCH_PvVoltage<n>/
+// PCH_PvCurrent<n> component signals the PW3 components GraphQL query
+// returns into the PVAC_PvState_<n>/PVAC_PVMeasuredVoltage_<n>/
+// PVAC_PVCurrent_<n>/PVAC_PVMeasuredPower_<n> vitals field names that
+// pypowerwall's facade (and gopowerwall's own Powerwall.Strings) expect,
+// plus a sibling PVS_String<n>_Connected flag - mirroring
+// pypowerwall/tedapi/__init__.py:1032-1069 exactly, including the letter
+// range (A-F, not a numeric index) and the "Pv_Active" substring test for
+// Connected. It returns nil, nil if components carries no "pch" signal
+// data at all (e.g. non-PW3 hardware, or a query the gateway did not
+// answer), so callers can skip adding synthesized devices entirely rather
+// than fabricating an all-"Unknown"/all-zero PVAC/PVS pair.
+func synthesizeStringVitals(components map[string]any) (map[string]any, map[string]any) {
+	pchList, ok := lookup.Lookup(components, "components", "pch").([]any)
+	if !ok || len(pchList) == 0 {
+		return nil, nil
+	}
+
+	pvac := make(map[string]any)
+	pvs := make(map[string]any)
+
+	for _, n := range pchStringLetters {
+		pvState, pvVoltage, pvCurrent := scanPCHStringSignals(pchList, n)
+
+		pvac["PVAC_PvState_"+n] = pvState
+		pvac["PVAC_PVMeasuredVoltage_"+n] = pvVoltage
+		pvac["PVAC_PVCurrent_"+n] = pvCurrent
+		pvac["PVAC_PVMeasuredPower_"+n] = pvVoltage * pvCurrent
+		pvs["PVS_String"+n+"_Connected"] = strings.Contains(pvState, "Pv_Active")
+	}
+
+	return pvac, pvs
+}
+
+// fanSpeedSignalValue extracts a signal's numeric "value" as a *float64,
+// returning nil when absent or null - mirroring pypowerwall's own
+// `signal.get("value") is not None` guard (pypowerwall/tedapi/__init__.py:
+// 1895-1897), which passes a found value through untouched rather than
+// clamping or zeroing it the way [pchSignalValue] does for solar-string
+// readings.
+func fanSpeedSignalValue(sig map[string]any) *float64 {
+	if v, ok := sig["value"].(float64); ok {
+		return &v
+	}
+
+	return nil
+}
+
+// ExtractFanSpeeds scans data's "components.msa" component list for
+// PVAC_Fan_Speed_Actual_RPM/PVAC_Fan_Speed_Target_RPM signals, returning one
+// [models.FanSpeedEntry] per component that reported at least one of them,
+// keyed by "PVAC--<partNumber>--<serialNumber>" - a byte-for-byte port of
+// pypowerwall's extract_fan_speeds (pypowerwall/tedapi/__init__.py:
+// 1879-1903), including its ambiguity: the "msa" alias in this project's
+// own DeviceControllerQuery text (backend/tedapi/queries/V2026_06.json,
+// V2024_06.json) requests only MSA_*/METER_Z_* signal names, never
+// PVAC_Fan_Speed_*, and upstream's own query text has the identical gap -
+// the fan-speed signals live instead under the same response's
+// esCan.bus.PVAC.PVAC_Logging block. Reading them from there instead would
+// make this function work where upstream's does not, silently diverging
+// from pypowerwall's documented (if seemingly buggy) behavior on real
+// hardware. This function therefore faithfully reproduces the ambiguity
+// rather than working around it: it is expected to return an empty map
+// against real gateways today. Confirming whether get_fan_speeds() ever
+// returns real data in practice needs a live V2026_06-firmware gateway, not
+// more static analysis - see docs/parity-matrix.md's /fans row.
+func ExtractFanSpeeds(data map[string]any) map[string]models.FanSpeedEntry {
+	result := make(map[string]models.FanSpeedEntry)
+
+	msaList, _ := lookup.Lookup(data, "components", "msa").([]any)
+	for _, compAny := range msaList {
+		comp, ok := compAny.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		var entry models.FanSpeedEntry
+
+		signals, _ := comp["signals"].([]any)
+		for _, sigAny := range signals {
+			sig, okSig := sigAny.(map[string]any)
+			if !okSig {
+				continue
+			}
+
+			switch sig["name"] {
+			case "PVAC_Fan_Speed_Actual_RPM":
+				entry.ActualRPM = fanSpeedSignalValue(sig)
+			case "PVAC_Fan_Speed_Target_RPM":
+				entry.TargetRPM = fanSpeedSignalValue(sig)
+			}
+		}
+
+		if entry.ActualRPM == nil && entry.TargetRPM == nil {
+			continue
+		}
+
+		partNumber, _ := comp["partNumber"].(string)
+		serialNumber, _ := comp["serialNumber"].(string)
+		result[fmt.Sprintf("PVAC--%s--%s", partNumber, serialNumber)] = entry
+	}
+
+	return result
+}
+
+// GetFanSpeeds returns the raw cooling-fan speed readings reported by the
+// gateway's device controller, mirroring pypowerwall's get_fan_speeds
+// (pypowerwall/tedapi/__init__.py:1906-1908). See [ExtractFanSpeeds] for the
+// upstream ambiguity this faithfully reproduces.
+func (p *PyPowerwallTEDAPI) GetFanSpeeds(ctx context.Context, force bool) map[string]models.FanSpeedEntry {
+	return ExtractFanSpeeds(p.client.GetDeviceController(ctx, force))
+}
+
 // Vitals returns Powerwall vitals in TEDAPI format.
 func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) {
 	out := make(map[string]any)
@@ -824,6 +1050,13 @@ func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) 
 		"componentParentDin": fmt.Sprintf("STSTSM--%s", din),
 	}
 	out["TESYNC--None--None"] = map[string]any{}
+
+	if components := p.client.GetComponents(ctx, false); components != nil {
+		if pvac, pvs := synthesizeStringVitals(components); pvac != nil {
+			out[fmt.Sprintf("PVAC--%s", din)] = pvac
+			out[fmt.Sprintf("PVS--%s", din)] = pvs
+		}
+	}
 
 	return out, nil
 }

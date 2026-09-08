@@ -37,8 +37,35 @@ type PODView struct {
 	TimeRemainingHours     *float64
 	BackupReservePercent   *float64
 	Blocks                 []BatteryBlock
+	TEPODEntries           []PODTEPODEntry
 	NominalFullPackEnergy  float64
 	NominalEnergyRemaining float64
+}
+
+// PODTEPODEntry is one "TEPOD"-prefixed vitals device's fields, backing the
+// gopowerwall proxy's /pod route's second, vitals-derived augmentation pass
+// (pypowerwall's server.py:2196-2244, generate_pod's "Augment with Vitals
+// Data" loop - a battery-block-heating/POD-controller device pypowerwall's
+// TEDAPI backend synthesizes at pypowerwall/tedapi/__init__.py:1018-1022, or
+// that a local gateway reports natively). The boolean-shaped fields are ints
+// (0/1, or whatever raw int the device reports), not bool, mirroring
+// upstream's own int(get_value(v, key) or 0) coercion; the power/energy
+// fields are nilable pointers because upstream's get_value returns raw None
+// (JSON null) for a missing field rather than coercing it to zero.
+type PODTEPODEntry struct {
+	AvailableChargePower    *float64
+	AvailableDischargePower *float64
+	NomEnergyRemaining      *float64
+	NomEnergyToBeCharged    *float64
+	NomFullPackEnergy       *float64
+	Device                  string
+	ActiveHeating           int
+	ChargeComplete          int
+	ChargeRequest           int
+	DischargeComplete       int
+	PermanentlyFaulted      int
+	PersistentlyFaulted     int
+	EnableLine              int
 }
 
 // InverterFrequency holds one TEPINV (inverter) device's grid frequency and

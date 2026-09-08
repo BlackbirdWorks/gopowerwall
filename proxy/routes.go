@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
 
@@ -127,6 +128,33 @@ func (s *Server) generateFreq(ctx context.Context) (string, error) {
 	return string(b), err
 }
 
+// applyPODTEPODVitals overwrites pod's PW{idx}_* keys with each TEPOD
+// vitals entry's data, mirroring pypowerwall's own second, independent
+// /pod loop (server.py:2196-2244, "Augment with Vitals Data"): every TEPOD
+// vitals device overwrites the keys the per-block loop seeded, at its own
+// 1-based index derived from [gopowerwall.Powerwall.PODView]'s
+// vitals-iteration order rather than the block loop's index - see
+// PODView's own doc comment for why upstream (and this port) trust that
+// ordering to line up instead of matching by DIN.
+func applyPODTEPODVitals(pod map[string]any, entries []models.PODTEPODEntry) {
+	for idx, entry := range entries {
+		prefix := fmt.Sprintf("PW%d_", idx+1)
+		pod[prefix+"name"] = entry.Device
+		pod[prefix+"POD_ActiveHeating"] = entry.ActiveHeating
+		pod[prefix+"POD_ChargeComplete"] = entry.ChargeComplete
+		pod[prefix+"POD_ChargeRequest"] = entry.ChargeRequest
+		pod[prefix+"POD_DischargeComplete"] = entry.DischargeComplete
+		pod[prefix+"POD_PermanentlyFaulted"] = entry.PermanentlyFaulted
+		pod[prefix+"POD_PersistentlyFaulted"] = entry.PersistentlyFaulted
+		pod[prefix+"POD_enable_line"] = entry.EnableLine
+		pod[prefix+"POD_available_charge_power"] = entry.AvailableChargePower
+		pod[prefix+"POD_available_dischg_power"] = entry.AvailableDischargePower
+		pod[prefix+"POD_nom_energy_remaining"] = entry.NomEnergyRemaining
+		pod[prefix+"POD_nom_energy_to_be_charged"] = entry.NomEnergyToBeCharged
+		pod[prefix+"POD_nom_full_pack_energy"] = entry.NomFullPackEnergy
+	}
+}
+
 func (s *Server) generatePOD(ctx context.Context) (string, error) {
 	view := s.PW.PODView(ctx)
 	pod := make(map[string]any)
@@ -143,6 +171,7 @@ func (s *Server) generatePOD(ctx context.Context) (string, error) {
 		pod[prefix+"POD_available_charge_power"] = nil
 		pod[prefix+"POD_available_dischg_power"] = nil
 		pod[prefix+"POD_nom_energy_remaining"] = block.NominalEnergyRemaining
+		pod[prefix+"POD_nom_energy_to_be_charged"] = nil
 		pod[prefix+"POD_nom_full_pack_energy"] = block.NominalFullPackEnergy
 		pod[prefix+"PackagePartNumber"] = block.PackagePartNumber
 		pod[prefix+"PackageSerialNumber"] = block.PackageSerialNumber
@@ -163,6 +192,7 @@ func (s *Server) generatePOD(ctx context.Context) (string, error) {
 		pod[prefix+"OpSeqState"] = block.OpSeqState
 		pod[prefix+keyVersion] = block.Version
 	}
+	applyPODTEPODVitals(pod, view.TEPODEntries)
 	pod["nominal_full_pack_energy"] = view.NominalFullPackEnergy
 	pod["nominal_energy_remaining"] = view.NominalEnergyRemaining
 	pod["time_remaining_hours"] = view.TimeRemainingHours
@@ -191,7 +221,7 @@ func (s *Server) generateJSON(ctx context.Context) (string, error) {
 		"time_remaining_hours": snap.TimeRemaining.Hours(),
 		"full_pack_energy":     snap.FullPackEnergy,
 		"energy_remaining":     snap.EnergyRemaining,
-		"strings":              snap.Strings,
+		"strings":              solarStringsJSON(snap.Strings),
 	}
 	b, err := json.Marshal(out)
 
@@ -301,10 +331,37 @@ func (s *Server) handleVitals(ctx context.Context, w http.ResponseWriter, reqPat
 	s.respond(ctx, w, reqPath, "application/json", msg, ok)
 }
 
+// solarStringsJSON converts the client's idiomatic [models.SolarStrings]
+// into the flat shape pypowerwall's own /strings, /json ("strings" field),
+// and /pw/strings routes emit: no top-level "strings" wrapper, and each
+// entry's fields capitalized (Connected/Voltage/Current/Power/State)
+// exactly as pypowerwall's strings() dict keys them
+// (pypowerwall/__init__.py:497-549) - the proxy owns this parity
+// serialization so the client can keep idiomatic Go field names
+// (models.StringMetric's own lowercase json tags) for every other caller.
+// The outer map key remains gopowerwall's own "<device>_<label>" scheme
+// (see [gopowerwall.Powerwall.Strings]) rather than upstream's
+// letter-plus-rotating-device-index keys, since Go's vitals map does not
+// preserve the PVAC-device iteration order that scheme depends on.
+func solarStringsJSON(ss models.SolarStrings) map[string]any {
+	out := make(map[string]any, len(ss.Strings))
+	for key, m := range ss.Strings {
+		out[key] = map[string]any{
+			"Connected": m.Connected,
+			"Voltage":   m.Voltage,
+			"Current":   m.Current,
+			"Power":     m.Power,
+			"State":     m.State,
+		}
+	}
+
+	return out
+}
+
 func (s *Server) handleStrings(ctx context.Context, w http.ResponseWriter, reqPath string) {
 	msg, ok := s.cachedRouteHandler(ctx, "/strings", func(ctx context.Context) (string, error) {
 		raw, _ := s.safePWCall(ctx, "/strings", func() (any, error) {
-			v := s.PW.Strings(ctx)
+			v := solarStringsJSON(s.PW.Strings(ctx))
 			b, err := json.Marshal(v)
 			if err != nil {
 				return nil, err
@@ -359,9 +416,48 @@ func (s *Server) handleMetricsStatusRoutes(ctx context.Context, w http.ResponseW
 
 		return true
 
+	case "/fans":
+		raw := s.PW.GetFanSpeeds(ctx)
+		b, _ := json.Marshal(raw)
+		s.respond(ctx, w, reqPath, "application/json", string(b), true)
+
+		return true
+
+	case "/fans/pw":
+		raw := fanSpeedsPWJSON(s.PW.GetFanSpeeds(ctx))
+		b, _ := json.Marshal(raw)
+		s.respond(ctx, w, reqPath, "application/json", string(b), true)
+
+		return true
+
 	default:
 		return false
 	}
+}
+
+// fanSpeedsPWJSON flattens the client's [models.FanSpeedEntry] map into the
+// simplified FAN{i}_actual/FAN{i}_target shape pypowerwall's /fans/pw route
+// emits (server.py:2488-2500): 1-based, ordered by sorting the fan-speed
+// map's own device-name keys - not by any inherent index, since the raw
+// map carries no ordering of its own on either side. A field is JSON null
+// (rather than absent) when the corresponding device never reported that
+// particular signal, matching upstream's `value.get(...)` returning None.
+func fanSpeedsPWJSON(speeds map[string]models.FanSpeedEntry) map[string]any {
+	keys := make([]string, 0, len(speeds))
+	for k := range speeds {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make(map[string]any, len(keys)*2) //nolint:mnd // two output keys (_actual/_target) per device.
+	for i, k := range keys {
+		entry := speeds[k]
+		prefix := fmt.Sprintf("FAN%d", i+1)
+		out[prefix+"_actual"] = entry.ActualRPM
+		out[prefix+"_target"] = entry.TargetRPM
+	}
+
+	return out
 }
 
 func (s *Server) handleSystemManagementRoutes(ctx context.Context, w http.ResponseWriter, reqPath string) bool {

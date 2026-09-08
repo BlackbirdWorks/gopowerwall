@@ -111,6 +111,106 @@ func TestNewServerBuildsPowerwallWhenNilGiven(t *testing.T) {
 	assert.False(t, srv.PW.IsConnected())
 }
 
+// TestAllowlistPinnedToUpstreamRouteSet is the regression test for the
+// proxy's ALLOWLIST parity gap (docs/parity-matrix.md's allowlist row and
+// correction #8): gopowerwall's isAllowlisted (proxy/server.go) had drifted
+// from pypowerwall's own ALLOWLIST (server.py:173-199) by 13 entries. Since
+// isAllowlisted is unexported, this asserts the reconciled route set by its
+// observable HTTP behavior against a disconnected Powerwall rather than by
+// calling the function directly:
+//
+//   - Every path on upstream's own ALLOWLIST must not 404: it either goes
+//     through handleAllowlistRoute (answering 200 with "null" for a
+//     disconnected backend, since every entry starts with "/api/") or one
+//     of the handful of dedicated handlers checked earlier in handleGet's
+//     dispatch that happen to cover the same path.
+//   - Every path this repo's isAllowlisted used to carry beyond upstream's
+//     list, with no test/doc/comment anywhere evidencing a deliberate
+//     reason to diverge, must now 404: with no allowlist entry, no static
+//     file, and proxyLocalGateway's own "/api/*" exclusion, nothing else
+//     in handleWeb can answer for it.
+//
+// "/api/customer/registration" (present on both upstream's ALLOWLIST and
+// its DISABLED list, and unaffected by this reconciliation) is deliberately
+// excluded here - TestServerServeHTTPDispatch's "disabled endpoint refuses
+// outright" case already covers it. "/api/system_status/soe" is likewise
+// excluded from the "no longer allowed" set below: it is separately served
+// by its own dedicated handler (handleCoreAPIRoutes) regardless of
+// isAllowlisted, so removing its now-redundant allowlist entry is a no-op
+// this test should not expect to change observable behavior for - pinning
+// it to 404 here would itself be a false regression.
+func TestAllowlistPinnedToUpstreamRouteSet(t *testing.T) {
+	t.Parallel()
+
+	upstreamAllowlisted := []string{
+		"/api/status",
+		"/api/site_info/site_name",
+		"/api/meters/site",
+		"/api/meters/solar",
+		"/api/sitemaster",
+		"/api/powerwalls",
+		"/api/system_status",
+		"/api/system_status/grid_status",
+		"/api/system/update/status",
+		"/api/site_info",
+		"/api/system_status/grid_faults",
+		"/api/operation",
+		"/api/site_info/grid_codes",
+		"/api/solars",
+		"/api/solars/brands",
+		"/api/customer",
+		"/api/meters",
+		"/api/installer",
+		"/api/networks",
+		"/api/system/networks",
+		"/api/meters/readings",
+		"/api/synchrometer/ct_voltage_references",
+		"/api/troubleshooting/problems",
+		"/api/auth/toggle/supported",
+		"/api/solar_powerwall",
+	}
+
+	noLongerAllowed := []string{
+		"/api/system/networks/conn_tests",
+		"/api/diagnostics",
+		"/api/generators",
+		"/api/generators/actions",
+		"/api/syncon/vitals",
+		"/api/syncon/actions",
+		"/api/inverters",
+		"/api/inverters/status",
+		"/api/meters/status",
+		"/api/powerwalls/status",
+	}
+
+	pw := newDisconnectedPowerwall(t)
+	ts := newProxyServer(t, baseTestConfig(), pw)
+
+	for _, path := range upstreamAllowlisted {
+		t.Run("allowed "+path, func(t *testing.T) {
+			t.Parallel()
+
+			resp, err := ts.Client().Get(ts.URL + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode, "expected %s to be allowlisted", path)
+		})
+	}
+
+	for _, path := range noLongerAllowed {
+		t.Run("no longer allowed "+path, func(t *testing.T) {
+			t.Parallel()
+
+			resp, err := ts.Client().Get(ts.URL + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode, "expected %s to no longer be allowlisted", path)
+		})
+	}
+}
+
 func TestServerLifecycleStartAndShutdown(t *testing.T) {
 	t.Parallel()
 

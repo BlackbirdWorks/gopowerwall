@@ -41,6 +41,12 @@ func vitalsProtoFixture(t *testing.T) []byte {
 	floatVital := func(name string, val float64) *teslapower.DeviceVital {
 		return &teslapower.DeviceVital{Name: &name, Value: &teslapower.DeviceVital_FloatValue{FloatValue: val}}
 	}
+	stringVital := func(name, val string) *teslapower.DeviceVital {
+		return &teslapower.DeviceVital{Name: &name, Value: &teslapower.DeviceVital_StringValue{StringValue: val}}
+	}
+	boolVital := func(name string, val bool) *teslapower.DeviceVital {
+		return &teslapower.DeviceVital{Name: &name, Value: &teslapower.DeviceVital_BoolValue{BoolValue: val}}
+	}
 	device := func(
 		din string,
 		alerts []string,
@@ -70,9 +76,13 @@ func vitalsProtoFixture(t *testing.T) []byte {
 				floatVital("THC_AmbientTemp", 28.5),
 			),
 			device("PVAC--1", []string{"StringFault"},
-				floatVital("PVAC_Vsolar0", 245.5),
-				floatVital("PVAC_Isolar0", 8.2),
-				floatVital("PVAC_Psolar0", 2013.0),
+				floatVital("PVAC_PVMeasuredVoltage_A", 245.5),
+				floatVital("PVAC_PVCurrent_A", 8.2),
+				floatVital("PVAC_PVMeasuredPower_A", 2013.0),
+				stringVital("PVAC_PvState_A", "PV_Active"),
+			),
+			device("PVS--1", nil,
+				boolVital("PVS_StringA_Connected", true),
 			),
 		},
 	}

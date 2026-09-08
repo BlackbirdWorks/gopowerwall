@@ -240,13 +240,13 @@ func TestHandwrittenRoundTrip(t *testing.T) {
 		},
 		{
 			name:  "StringMetric",
-			model: models.StringMetric{Connected: true, Voltage: 245.5, Current: 8.2, Power: 2013},
+			model: models.StringMetric{Connected: true, Voltage: 245.5, Current: 8.2, Power: 2013, State: "PV_Active"},
 		},
 		{
 			name: "SolarStrings",
 			model: models.SolarStrings{
 				Strings: map[string]models.StringMetric{
-					"PVAC--1_A": {Connected: true, Voltage: 245.5, Current: 8.2, Power: 2013},
+					"PVAC--1_A": {Connected: true, Voltage: 245.5, Current: 8.2, Power: 2013, State: "PV_Active"},
 				},
 			},
 		},

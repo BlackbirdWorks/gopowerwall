@@ -1007,6 +1007,88 @@ func TestBackendVitals(t *testing.T) {
 		assert.Equal(t, "STSTSM--VIN-3", tesla["componentParentDin"])
 		assert.Contains(t, out, "TESYNC--None--None")
 	})
+
+	// This is the regression test for the TEDAPI vitals synthesis bug: the
+	// PW3Query/ComponentsQuery GraphQL query already requests the raw
+	// PCH_PvState_<n>/PCH_PvVoltage<n>/PCH_PvCurrent<n> component signals
+	// (backend/tedapi/queries/V2024_06.json and V2026_06.json), but nothing
+	// in backend/tedapi ever parsed the response into the PVAC_PvState_<n>/
+	// PVAC_PVMeasuredVoltage_<n>/PVAC_PVCurrent_<n>/PVAC_PVMeasuredPower_<n>
+	// field names pypowerwall's facade (and Powerwall.Strings) expect - see
+	// pypowerwall/tedapi/__init__.py:1032-1069. Before the fix, Vitals never
+	// added a "PVAC--"/"PVS--" device at all in TEDAPI mode, so /strings
+	// read all-zero in every mode that went through TEDAPI.
+	t.Run("synthesizes PVAC/PVS string vitals from raw PCH component signals", func(t *testing.T) {
+		t.Parallel()
+
+		componentsJSON := `{
+			"components": {
+				"pch": [
+					{
+						"signals": [
+							{"name": "PCH_PvState_A", "textValue": "Pv_Active"},
+							{"name": "PCH_PvVoltageA", "value": 385.2},
+							{"name": "PCH_PvCurrentA", "value": 12.5},
+							{"name": "PCH_PvState_B", "textValue": "Pv_Standby"},
+							{"name": "PCH_PvVoltageB", "value": -1.0},
+							{"name": "PCH_PvCurrentB", "value": 0.0},
+							{"name": "PCH_PvState_F", "textValue": "Pv_Active_Parallel"},
+							{"name": "PCH_PvVoltageF", "value": 402.1},
+							{"name": "PCH_PvCurrentF", "value": 9.75}
+						]
+					}
+				]
+			}
+		}`
+		host, _ := newLegacyTEDAPIServer(t, `{"vin":"VIN-9"}`, componentsJSON)
+		p := newLegacyBackend(host)
+
+		out, err := p.Vitals(t.Context())
+		require.NoError(t, err)
+
+		pvac, ok := out["PVAC--VIN-9"].(map[string]any)
+		require.True(t, ok, "expected a synthesized PVAC device, got %v", out)
+		pvs, ok := out["PVS--VIN-9"].(map[string]any)
+		require.True(t, ok, "expected a synthesized PVS device, got %v", out)
+
+		assert.Equal(t, "Pv_Active", pvac["PVAC_PvState_A"])
+		assert.InDelta(t, 385.2, pvac["PVAC_PVMeasuredVoltage_A"], 0.001)
+		assert.InDelta(t, 12.5, pvac["PVAC_PVCurrent_A"], 0.001)
+		assert.InDelta(t, 385.2*12.5, pvac["PVAC_PVMeasuredPower_A"], 0.001)
+		assert.Equal(t, true, pvs["PVS_StringA_Connected"])
+
+		// A negative reading is clamped to 0, matching
+		// pypowerwall/tedapi/__init__.py:1041-1046's own guard, and a
+		// "Standby" state (no "Pv_Active" substring) is not Connected.
+		assert.Equal(t, "Pv_Standby", pvac["PVAC_PvState_B"])
+		assert.InDelta(t, 0.0, pvac["PVAC_PVMeasuredVoltage_B"], 0.001)
+		assert.InDelta(t, 0.0, pvac["PVAC_PVMeasuredPower_B"], 0.001)
+		assert.Equal(t, false, pvs["PVS_StringB_Connected"])
+
+		// A letter with no matching signal at all still gets an entry,
+		// defaulting to "Unknown"/0/not-connected (PW3 always reports A-F).
+		assert.Equal(t, "Unknown", pvac["PVAC_PvState_C"])
+		assert.InDelta(t, 0.0, pvac["PVAC_PVMeasuredVoltage_C"], 0.001)
+		assert.Equal(t, false, pvs["PVS_StringC_Connected"])
+
+		// The letter range is A-F (PW3's six strings), not A-D.
+		assert.Equal(t, "Pv_Active_Parallel", pvac["PVAC_PvState_F"])
+		assert.InDelta(t, 402.1, pvac["PVAC_PVMeasuredVoltage_F"], 0.001)
+		assert.InDelta(t, 9.75, pvac["PVAC_PVCurrent_F"], 0.001)
+		assert.Equal(t, true, pvs["PVS_StringF_Connected"])
+	})
+
+	t.Run("no PCH component data means no synthesized PVAC/PVS devices", func(t *testing.T) {
+		t.Parallel()
+
+		host, _ := newLegacyTEDAPIServer(t, `{"vin":"VIN-10"}`, `{}`)
+		p := newLegacyBackend(host)
+
+		out, err := p.Vitals(t.Context())
+		require.NoError(t, err)
+		assert.NotContains(t, out, "PVAC--VIN-10")
+		assert.NotContains(t, out, "PVS--VIN-10")
+	})
 }
 
 func TestBackendGetTimeRemainingUnsupported(t *testing.T) {
@@ -1172,4 +1254,205 @@ func TestBackendMaxBackupDelegationErrorPropagation(t *testing.T) {
 
 	_, err = p.CancelMaxBackup(t.Context())
 	require.Error(t, err)
+}
+
+// TestExtractFanSpeeds is the regression test for /fans and /fans/pw: no
+// fan-speed extraction existed anywhere in this package before this change
+// (docs/parity-matrix.md's /fans row - confirmed by grep, zero matches for
+// "Fan_Speed" under backend/tedapi/*.go). It is a byte-for-byte port of
+// pypowerwall's extract_fan_speeds (pypowerwall/tedapi/__init__.py:
+// 1879-1903), deliberately including the static ambiguity documented on
+// [tedapi.ExtractFanSpeeds]: these cases exercise the function's own
+// "components.msa" scanning logic against a synthetic payload, not a claim
+// about what a real gateway returns - the last case specifically proves
+// that fan-speed signals reported under the sibling
+// esCan.bus.PVAC.PVAC_Logging path (where this project's own GraphQL query
+// text actually requests them) are *not* found, matching upstream's
+// identical gap rather than working around it.
+func TestExtractFanSpeeds(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		data map[string]any
+		want map[string]models.FanSpeedEntry
+		name string
+	}
+
+	rpm := func(v float64) *float64 { return &v }
+
+	for _, tc := range []testCase{
+		{
+			name: "nil data yields empty map",
+			data: nil,
+			want: map[string]models.FanSpeedEntry{},
+		},
+		{
+			name: "no components section yields empty map",
+			data: map[string]any{"esCan": map[string]any{}},
+			want: map[string]models.FanSpeedEntry{},
+		},
+		{
+			name: "msa component reporting both signals",
+			data: map[string]any{
+				"components": map[string]any{
+					"msa": []any{
+						map[string]any{
+							"partNumber":   "1729100-XX-E",
+							"serialNumber": "TG12345",
+							"signals": []any{
+								map[string]any{"name": "PVAC_Fan_Speed_Actual_RPM", "value": 2500.0},
+								map[string]any{"name": "PVAC_Fan_Speed_Target_RPM", "value": 2600.0},
+								map[string]any{"name": "MSA_pcbaId", "value": 1.0},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]models.FanSpeedEntry{
+				"PVAC--1729100-XX-E--TG12345": {ActualRPM: rpm(2500.0), TargetRPM: rpm(2600.0)},
+			},
+		},
+		{
+			name: "msa component reporting only one signal leaves the other nil",
+			data: map[string]any{
+				"components": map[string]any{
+					"msa": []any{
+						map[string]any{
+							"partNumber":   "PN1",
+							"serialNumber": "SN1",
+							"signals": []any{
+								map[string]any{"name": "PVAC_Fan_Speed_Actual_RPM", "value": 1800.0},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]models.FanSpeedEntry{
+				"PVAC--PN1--SN1": {ActualRPM: rpm(1800.0)},
+			},
+		},
+		{
+			name: "a null-valued signal is treated as absent, not zero",
+			data: map[string]any{
+				"components": map[string]any{
+					"msa": []any{
+						map[string]any{
+							"partNumber":   "PN2",
+							"serialNumber": "SN2",
+							"signals": []any{
+								map[string]any{"name": "PVAC_Fan_Speed_Actual_RPM", "value": nil},
+								map[string]any{"name": "PVAC_Fan_Speed_Target_RPM", "value": 900.0},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]models.FanSpeedEntry{
+				"PVAC--PN2--SN2": {TargetRPM: rpm(900.0)},
+			},
+		},
+		{
+			name: "a component reporting neither fan signal is skipped entirely",
+			data: map[string]any{
+				"components": map[string]any{
+					"msa": []any{
+						map[string]any{
+							"partNumber":   "PN3",
+							"serialNumber": "SN3",
+							"signals": []any{
+								map[string]any{"name": "MSA_pcbaId", "value": 5.0},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]models.FanSpeedEntry{},
+		},
+		{
+			name: "fan signals under esCan.bus.PVAC.PVAC_Logging are not found (upstream's own ambiguity)",
+			data: map[string]any{
+				"esCan": map[string]any{
+					"bus": map[string]any{
+						"PVAC": map[string]any{
+							"PVAC_Logging": map[string]any{
+								"PVAC_Fan_Speed_Actual_RPM": 3000.0,
+								"PVAC_Fan_Speed_Target_RPM": 3000.0,
+							},
+						},
+					},
+				},
+				"components": map[string]any{
+					"msa": []any{
+						map[string]any{
+							"partNumber":   "PN4",
+							"serialNumber": "SN4",
+							"signals": []any{
+								map[string]any{"name": "MSA_pcbaId", "value": 1.0},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]models.FanSpeedEntry{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := tedapi.ExtractFanSpeeds(tc.data)
+			require.Len(t, got, len(tc.want))
+			for key, wantEntry := range tc.want {
+				gotEntry, ok := got[key]
+				require.True(t, ok, "missing key %q in %v", key, got)
+
+				if wantEntry.ActualRPM == nil {
+					assert.Nil(t, gotEntry.ActualRPM)
+				} else {
+					require.NotNil(t, gotEntry.ActualRPM)
+					assert.InDelta(t, *wantEntry.ActualRPM, *gotEntry.ActualRPM, 0.001)
+				}
+
+				if wantEntry.TargetRPM == nil {
+					assert.Nil(t, gotEntry.TargetRPM)
+				} else {
+					require.NotNil(t, gotEntry.TargetRPM)
+					assert.InDelta(t, *wantEntry.TargetRPM, *gotEntry.TargetRPM, 0.001)
+				}
+			}
+		})
+	}
+}
+
+// TestBackendGetFanSpeeds exercises PyPowerwallTEDAPI.GetFanSpeeds end to
+// end against a mocked GraphQL response, proving the DeviceControllerFull
+// query wiring (Client.GetDeviceController) and ExtractFanSpeeds compose
+// correctly.
+func TestBackendGetFanSpeeds(t *testing.T) {
+	t.Parallel()
+
+	queryJSON := `{
+		"components": {
+			"msa": [
+				{
+					"partNumber": "1729100-XX-E",
+					"serialNumber": "TG12345",
+					"signals": [
+						{"name": "PVAC_Fan_Speed_Actual_RPM", "value": 2200.0},
+						{"name": "PVAC_Fan_Speed_Target_RPM", "value": 2400.0}
+					]
+				}
+			]
+		}
+	}`
+	host, _ := newLegacyTEDAPIServer(t, `{"vin":"VIN-FAN"}`, queryJSON)
+	p := newLegacyBackend(host)
+
+	speeds := p.GetFanSpeeds(t.Context(), false)
+
+	entry, ok := speeds["PVAC--1729100-XX-E--TG12345"]
+	require.True(t, ok, "expected a fan speed entry, got %v", speeds)
+	require.NotNil(t, entry.ActualRPM)
+	require.NotNil(t, entry.TargetRPM)
+	assert.InDelta(t, 2200.0, *entry.ActualRPM, 0.001)
+	assert.InDelta(t, 2400.0, *entry.TargetRPM, 0.001)
 }
