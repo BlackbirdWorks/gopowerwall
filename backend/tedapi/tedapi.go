@@ -507,6 +507,50 @@ func (p *PyPowerwallTEDAPI) GetConfig(ctx context.Context, force ...bool) map[st
 	return p.client.GetConfig(ctx, f)
 }
 
+// GetStatus returns the basic device controller status map.
+func (p *PyPowerwallTEDAPI) GetStatus(ctx context.Context, force ...bool) map[string]any {
+	f := false
+	if len(force) > 0 {
+		f = force[0]
+	}
+
+	return p.client.GetStatus(ctx, f)
+}
+
+// GetComponents returns the raw component signals query response.
+func (p *PyPowerwallTEDAPI) GetComponents(ctx context.Context, force ...bool) map[string]any {
+	f := false
+	if len(force) > 0 {
+		f = force[0]
+	}
+
+	return p.client.GetComponents(ctx, f)
+}
+
+// GetBatteryBlocks returns battery blocks extracted from configuration.
+func (p *PyPowerwallTEDAPI) GetBatteryBlocks(ctx context.Context, force ...bool) []any {
+	cfg := p.GetConfig(ctx, force...)
+	if cfg == nil {
+		return []any{}
+	}
+	blocks, ok := cfg["battery_blocks"].([]any)
+	if !ok || blocks == nil {
+		return []any{}
+	}
+
+	return blocks
+}
+
+// GetDeviceController returns the full device controller query response.
+func (p *PyPowerwallTEDAPI) GetDeviceController(ctx context.Context, force ...bool) map[string]any {
+	f := false
+	if len(force) > 0 {
+		f = force[0]
+	}
+
+	return p.client.GetDeviceController(ctx, f)
+}
+
 func (p *PyPowerwallTEDAPI) initAPIMaps() {
 	p.pollAPIMap = map[string]func(ctx context.Context, force, recursive, raw bool) (any, error){
 		"/api/devices/vitals": func(ctx context.Context, _, _, _ bool) (any, error) {
@@ -1153,12 +1197,56 @@ func (p *PyPowerwallTEDAPI) GetBackupEvents(ctx context.Context) (map[string]any
 	return p.v1r.GetBackupEvents(ctx)
 }
 
-// GoOffGrid is unsupported by TEDAPI.
-func (p *PyPowerwallTEDAPI) GoOffGrid(_ context.Context) (models.Operation, error) {
-	return models.Operation{}, backend.ErrUnsupported
+// GoOffGrid requests intentional islanding through the signed v1r transport.
+func (p *PyPowerwallTEDAPI) GoOffGrid(ctx context.Context) (models.Operation, error) {
+	if p.v1r == nil {
+		return models.Operation{}, backend.ErrUnsupported
+	}
+	din, _ := p.v1r.GetDin(ctx)
+	if din == "" {
+		din = p.client.din
+	}
+	if din == "" {
+		cfg := p.client.GetConfig(ctx, false)
+		if v, ok := cfg["vin"].(string); ok {
+			din = v
+		}
+	}
+	if din == "" {
+		return models.Operation{}, backend.ErrNotFound
+	}
+
+	_, err := p.v1r.SendIslandMode(ctx, din, IslandModeOffGrid, true)
+	if err != nil {
+		return models.Operation{}, err
+	}
+
+	return models.Operation{}, nil
 }
 
-// ReconnectGrid is unsupported by TEDAPI.
-func (p *PyPowerwallTEDAPI) ReconnectGrid(_ context.Context) (models.Operation, error) {
-	return models.Operation{}, backend.ErrUnsupported
+// ReconnectGrid requests grid reconnection through the signed v1r transport.
+func (p *PyPowerwallTEDAPI) ReconnectGrid(ctx context.Context) (models.Operation, error) {
+	if p.v1r == nil {
+		return models.Operation{}, backend.ErrUnsupported
+	}
+	din, _ := p.v1r.GetDin(ctx)
+	if din == "" {
+		din = p.client.din
+	}
+	if din == "" {
+		cfg := p.client.GetConfig(ctx, false)
+		if v, ok := cfg["vin"].(string); ok {
+			din = v
+		}
+	}
+	if din == "" {
+		return models.Operation{}, backend.ErrNotFound
+	}
+
+	_, err := p.v1r.SendIslandMode(ctx, din, IslandModeReconnect, false)
+	if err != nil {
+		return models.Operation{}, err
+	}
+
+	return models.Operation{}, nil
 }

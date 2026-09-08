@@ -151,17 +151,25 @@ const (
 		`"Cached_readings":{"instant_power":0,"frequency":0,` +
 		`"instant_average_voltage":210.89,"instant_average_current":0}}]`
 
-	MockMeters = `[{"id": 0, "location": "site", "type": "synchrometerX"}, ` +
-		`{"id": 1, "location": "load", "type": "synchrometerX"}, ` +
-		`{"id": 2, "location": "solar", "type": "synchrometerX"}]`
+	MockMeters = `[{"serial":"VAH1234AB1234","short_id":"73533","type":"neurio_w2_tcp","connected":true,` +
+		`"cts":[{"type":"solarRGM","valid":[true,false,false,false],"inverted":[false,false,false,false],` +
+		`"real_power_scale_factor":2}],"ip_address":"PWRview-73533","mac":"01-23-45-56-78-90"},` +
+		`{"serial":"JBL12345Y1F012synchrometerY","short_id":"1232100-00-E--TG123456789EGG","type":"synchrometerY"},` +
+		`{"serial":"JBL12345Y1F012synchrometerX","short_id":"1232100-00-E--TG123456789EGG","type":"synchrometerX",` +
+		`"cts":[{"type":"site","valid":[true,true,false,false],"inverted":[false,false,false,false]}]}]`
 
-	MockSitemaster = `{"status": "StatusUp", "running": true, "connected_to_tesla": true}`
-	MockCustomer   = `{"registered": true}`
-	MockInstaller  = `{"ready_for_customer": true}`
+	MockSitemaster = `{"status": "StatusUp", "running": true, "connected_to_tesla": true, ` +
+		`"power_supply_mode": false, "can_reboot": "Yes"}`
+	MockCustomer  = `{"registered": true}`
+	MockInstaller = `{"company":"Tesla","customer_id":"","phone":"","email":"","location":"","mounting":"","wiring":"",` +
+		`"backup_configuration":"Whole Home","solar_installation":"New","solar_installation_type":"PV Panel",` +
+		`"run_sitemaster":true,"verified_config":true,"installation_types":["Residential"]}`
 	MockNetworks   = `[{"network_name": "Tesla_Guest", "enabled": true}]`
-	MockAuthToggle = `{"toggle_supported": false}`
-	MockUpdate     = `{"status": "idle", "percentage": 0.0}`
-	MockSolars     = `{"brand": "Tesla", "model": "Solar Inverter"}`
+	MockAuthToggle = `{"toggle_auth_supported": true}`
+	MockUpdate     = `{"state":"/update_succeeded","info":{"status":["nonactionable"]},` +
+		`"current_time":1702756114429,"last_status_time":1702753309227,"version":"23.28.2 27626f98",` +
+		`"offline_updating":false,"offline_update_error":"","estimated_bytes_per_second":null}`
+	MockSolars = `[{"brand":"Tesla","model":"Solar Inverter 7.6","power_rating_watts":7600}]`
 )
 
 // ParseJSON parses a canned JSON string into an any.

@@ -116,6 +116,9 @@ var (
 	// ErrInvalidGridExportMode indicates an unrecognised grid export mode.
 	ErrInvalidGridExportMode = errors.New("invalid grid export mode")
 
+	// ErrInvalidIslandMode indicates an unsupported or invalid island mode (must be 1 or 6).
+	ErrInvalidIslandMode = errors.New("invalid island mode: must be 1 (reconnect) or 6 (off-grid)")
+
 	// ErrOperationBackfillFailed indicates that a local-mode partial
 	// SetOperation call could not read back the current backup_reserve_percent
 	// or real_mode value needed to avoid clobbering the field the caller did

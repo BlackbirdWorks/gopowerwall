@@ -20,6 +20,8 @@ var (
 	ErrBatteryLevelRead = errors.New("unable to read current battery level from Powerwall")
 )
 
+const reserveThreshold80 = 80.0
+
 // SetCmd configures Powerwall operating mode and reserve levels.
 type SetCmd struct {
 	Mode         string `help:"Operating mode: self_consumption, backup, or autonomous" name:"mode"`
@@ -113,9 +115,20 @@ func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall, w 
 	if err != nil {
 		return ErrBatteryLevelRead
 	}
+	capped := pw.IsCloud() || pw.IsFleetAPI()
+	if lvl > reserveThreshold80 && capped {
+		logger.Load(ctx).WarnContext(ctx, "Tesla cloud and FleetAPI limit backup reserve to 80% maximum")
+	}
 	fmt.Fprintf(w, "Setting Powerwall Reserve to Current Charge Level %.1f\n", lvl)
 	if _, setErr := pw.SetReserve(ctx, lvl); setErr != nil {
 		logger.Load(ctx).ErrorContext(ctx, "failed to set reserve", "error", setErr)
+
+		return nil
+	}
+	if capped {
+		if applied, getErr := pw.GetReserveForced(ctx); getErr == nil {
+			fmt.Fprintf(w, "Powerwall Reserve actually set to %.1f\n", applied)
+		}
 	}
 
 	return nil

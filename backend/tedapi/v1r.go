@@ -27,6 +27,7 @@ import (
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/proto/tedapi/combined"
+	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -59,6 +60,11 @@ const (
 	// through the wire field and lets the gateway itself be the authority
 	// on what backup duration makes physical sense.
 	maxBackupSeconds = math.MaxUint32
+
+	// IslandModeReconnect is mode 1: close the contactor to reconnect to the grid.
+	IslandModeReconnect = 1
+	// IslandModeOffGrid is mode 6: open the contactor to physically island off-grid.
+	IslandModeOffGrid = 6
 )
 
 // TEDAPIv1r implements RSA-signed transport for Powerwall 3 LAN TEDAPI (/tedapi/v1r).
@@ -634,4 +640,74 @@ func (v *TEDAPIv1r) APIGet(ctx context.Context, path string) (any, error) {
 	}
 
 	return string(b), nil
+}
+
+// SendIslandMode sends Tesla's TEGAPISetIslandModeRequest via the signed v1r path.
+// mode 6 + force=true physically opens the grid contactor (intentional islanding);
+// mode 1 closes it (grid reconnect).
+func (v *TEDAPIv1r) SendIslandMode(ctx context.Context, din string, mode int, force bool) (map[string]any, error) {
+	if mode != IslandModeReconnect && mode != IslandModeOffGrid {
+		return nil, fmt.Errorf("%w: got %d", backend.ErrInvalidIslandMode, mode)
+	}
+
+	teg := &teslapower.TEGMessages{
+		Message: &teslapower.TEGMessages_SetIslandModeRequest{
+			SetIslandModeRequest: &teslapower.TEGAPISetIslandModeRequest{
+				Mode:  int32(mode),
+				Force: force,
+			},
+		},
+	}
+
+	envelope := &teslapower.MessageEnvelope{
+		DeliveryChannel: 1, // DELIVERY_CHANNEL_HERMES_COMMAND
+		Sender: &teslapower.Participant{
+			Id: &teslapower.Participant_AuthorizedClient{
+				AuthorizedClient: 1, // CUSTOMER_MOBILE_APP
+			},
+		},
+		Recipient: &teslapower.Participant{
+			Id: &teslapower.Participant_Din{
+				Din: din,
+			},
+		},
+		Payload: &teslapower.MessageEnvelope_Teg{
+			Teg: teg,
+		},
+	}
+
+	wireBytes, err := proto.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("marshal island mode request: %w", err)
+	}
+
+	respBytes, err := v.PostV1r(ctx, wireBytes, din)
+	if err != nil {
+		return nil, fmt.Errorf("post island mode request: %w", err)
+	}
+
+	var respEnv teslapower.MessageEnvelope
+	if unmarshalErr := proto.Unmarshal(respBytes, &respEnv); unmarshalErr != nil {
+		return nil, fmt.Errorf("unmarshal island mode response: %w", unmarshalErr)
+	}
+
+	var result *int32
+	if tegResp := respEnv.GetTeg(); tegResp != nil {
+		if islandResp := tegResp.GetSetIslandModeResponse(); islandResp != nil {
+			r := islandResp.GetResult()
+			result = &r
+		}
+	}
+
+	res := map[string]any{
+		"mode":  mode,
+		"force": force,
+	}
+	if result != nil {
+		res["result"] = *result
+	} else {
+		res["result"] = nil
+	}
+
+	return res, nil
 }

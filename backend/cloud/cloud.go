@@ -942,6 +942,36 @@ func (c *PyPowerwallCloud) GetGridExport(ctx context.Context) (*string, error) {
 	return &mode, nil
 }
 
+// GetBattery returns the raw Tesla site_status (battery summary) payload.
+func (c *PyPowerwallCloud) GetBattery(ctx context.Context, force ...bool) (any, error) {
+	f := false
+	if len(force) > 0 {
+		f = force[0]
+	}
+
+	return c.getSiteBattery(ctx, f)
+}
+
+// GetSitePower returns the raw Tesla live_status (power summary) payload.
+func (c *PyPowerwallCloud) GetSitePower(ctx context.Context, force ...bool) (any, error) {
+	f := false
+	if len(force) > 0 {
+		f = force[0]
+	}
+
+	return c.getSiteData(ctx, f)
+}
+
+// GetSiteConfig returns the raw Tesla site_info (config summary) payload.
+func (c *PyPowerwallCloud) GetSiteConfig(ctx context.Context, force ...bool) (any, error) {
+	f := false
+	if len(force) > 0 {
+		f = force[0]
+	}
+
+	return c.getSiteConfig(ctx, f)
+}
+
 func getFloat(val any) float64 {
 	if val == nil {
 		return 0.0

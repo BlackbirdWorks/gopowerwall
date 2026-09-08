@@ -848,6 +848,26 @@ func (f *PyPowerwallFleetAPI) GetGridExport(ctx context.Context) (*string, error
 	return &mode, nil
 }
 
+// GetSiteInfo returns the raw FleetAPI site_info payload.
+func (f *PyPowerwallFleetAPI) GetSiteInfo(ctx context.Context, force ...bool) (any, error) {
+	forced := false
+	if len(force) > 0 {
+		forced = force[0]
+	}
+
+	return f.getSiteConfig(ctx, forced)
+}
+
+// GetLiveStatus returns the raw FleetAPI live_status payload.
+func (f *PyPowerwallFleetAPI) GetLiveStatus(ctx context.Context, force ...bool) (any, error) {
+	forced := false
+	if len(force) > 0 {
+		forced = force[0]
+	}
+
+	return f.getSiteData(ctx, forced)
+}
+
 func getFloatVal(val any) float64 {
 	if val == nil {
 		return 0.0

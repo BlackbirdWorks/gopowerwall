@@ -18,6 +18,7 @@ import (
 	"github.com/blackbirdworks/gopowerwall/models"
 	tedapipb "github.com/blackbirdworks/gopowerwall/proto/tedapi"
 	"github.com/blackbirdworks/gopowerwall/proto/tedapi/combined"
+	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
 )
 
 const (
@@ -1195,16 +1196,164 @@ func TestBackendMaxBackupDelegation(t *testing.T) {
 	})
 }
 
-func TestBackendGoOffGridAndReconnectGridUnsupported(t *testing.T) {
+func TestBackendGoOffGridAndReconnectGrid(t *testing.T) {
 	t.Parallel()
 
-	p := newLegacyBackend("127.0.0.1:1")
+	tests := []struct {
+		wantErrIs error
+		name      string
+		action    string
+		useV1r    bool
+		hasDin    bool
+		serverErr bool
+		wantErr   bool
+	}{
+		{
+			name:      "off-grid unsupported without v1r",
+			action:    "off-grid",
+			useV1r:    false,
+			wantErr:   true,
+			wantErrIs: backend.ErrUnsupported,
+		},
+		{
+			name:      "reconnect unsupported without v1r",
+			action:    "reconnect",
+			useV1r:    false,
+			wantErr:   true,
+			wantErrIs: backend.ErrUnsupported,
+		},
+		{
+			name:      "off-grid fails when din is missing",
+			action:    "off-grid",
+			useV1r:    true,
+			hasDin:    false,
+			wantErr:   true,
+			wantErrIs: backend.ErrNotFound,
+		},
+		{
+			name:      "reconnect fails when din is missing",
+			action:    "reconnect",
+			useV1r:    true,
+			hasDin:    false,
+			wantErr:   true,
+			wantErrIs: backend.ErrNotFound,
+		},
+		{
+			name:    "off-grid success with v1r",
+			action:  "off-grid",
+			useV1r:  true,
+			hasDin:  true,
+			wantErr: false,
+		},
+		{
+			name:    "reconnect success with v1r",
+			action:  "reconnect",
+			useV1r:  true,
+			hasDin:  true,
+			wantErr: false,
+		},
+		{
+			name:      "off-grid server error returns error",
+			action:    "off-grid",
+			useV1r:    true,
+			hasDin:    true,
+			serverErr: true,
+			wantErr:   true,
+		},
+		{
+			name:      "reconnect server error returns error",
+			action:    "reconnect",
+			useV1r:    true,
+			hasDin:    true,
+			serverErr: true,
+			wantErr:   true,
+		},
+	}
 
-	_, err := p.GoOffGrid(t.Context())
-	require.ErrorIs(t, err, backend.ErrUnsupported)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err = p.ReconnectGrid(t.Context())
-	require.ErrorIs(t, err, backend.ErrUnsupported)
+			if !tc.useV1r {
+				p := newLegacyBackend("127.0.0.1:1")
+				var err error
+				if tc.action == "off-grid" {
+					_, err = p.GoOffGrid(t.Context())
+				} else {
+					_, err = p.ReconnectGrid(t.Context())
+				}
+				require.ErrorIs(t, err, tc.wantErrIs)
+
+				return
+			}
+
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/din":
+					if tc.hasDin {
+						_, _ = w.Write([]byte("din-123"))
+					} else {
+						w.WriteHeader(http.StatusNotFound)
+					}
+				case "/tedapi/v1r":
+					if tc.serverErr {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					readRoutableEnvelope(t, r)
+					respEnv := &teslapower.MessageEnvelope{
+						DeliveryChannel: 1,
+						Sender: &teslapower.Participant{
+							Id: &teslapower.Participant_Din{Din: "din-123"},
+						},
+						Payload: &teslapower.MessageEnvelope_Teg{
+							Teg: &teslapower.TEGMessages{
+								Message: &teslapower.TEGMessages_SetIslandModeResponse{
+									SetIslandModeResponse: &teslapower.TEGAPISetIslandModeResponse{
+										Result: 1,
+									},
+								},
+							},
+						},
+					}
+					envBytes, err := proto.Marshal(respEnv)
+					assert.NoError(t, err)
+					routable := &combined.RoutableMessage{
+						Payload: &combined.RoutableMessage_ProtobufMessageAsBytes{
+							ProtobufMessageAsBytes: envBytes,
+						},
+					}
+					data, err := proto.Marshal(routable)
+					assert.NoError(t, err)
+					_, _ = w.Write(data)
+				}
+			}
+
+			srv := newTLSServer(t, handler)
+			p := newV1rBackend(t, hostOf(srv))
+
+			var err error
+			if tc.action == "off-grid" {
+				_, err = p.GoOffGrid(t.Context())
+			} else {
+				_, err = p.ReconnectGrid(t.Context())
+			}
+
+			if tc.wantErr {
+				require.Error(t, err)
+				if tc.wantErrIs != nil {
+					require.ErrorIs(t, err, tc.wantErrIs)
+				}
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestBackendGetConfigWrapper(t *testing.T) {

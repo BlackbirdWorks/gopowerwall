@@ -195,6 +195,78 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 				assert.Error(t, callErr)
 			},
 		},
+		{
+			name: "GetTEDAPIStatus returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetTEDAPIStatus(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetTEDAPIComponents returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetTEDAPIComponents(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetTEDAPIBattery returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetTEDAPIBattery(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetTEDAPIDeviceController returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetTEDAPIDeviceController(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetCloudBattery returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetCloudBattery(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetCloudPower returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetCloudPower(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetCloudConfig returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetCloudConfig(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetFleetAPIInfo returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetFleetAPIInfo(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
+		{
+			name: "GetFleetAPIStatus returns an error",
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+				_, callErr := pw.GetFleetAPIStatus(t.Context())
+				assert.Error(t, callErr)
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

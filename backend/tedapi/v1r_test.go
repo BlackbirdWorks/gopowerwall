@@ -28,6 +28,7 @@ import (
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/tedapi"
 	"github.com/blackbirdworks/gopowerwall/proto/tedapi/combined"
+	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
 )
 
 const (
@@ -893,4 +894,113 @@ func TestV1rAPIGetContextCancellation(t *testing.T) {
 	_, err := v.APIGet(ctx, "/api/status")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSendIslandMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		wantResult any
+		name       string
+		mode       int
+		resultVal  int32
+		force      bool
+		sendResult bool
+		wantErr    bool
+	}{
+		{
+			name:    "invalid mode returns error",
+			mode:    2,
+			wantErr: true,
+		},
+		{
+			name:       "reconnect mode 1 success with result 1",
+			mode:       1,
+			force:      false,
+			resultVal:  1,
+			sendResult: true,
+			wantResult: int32(1),
+		},
+		{
+			name:       "off-grid mode 6 with force success",
+			mode:       6,
+			force:      true,
+			resultVal:  1,
+			sendResult: true,
+			wantResult: int32(1),
+		},
+		{
+			name:       "response without result returns nil result",
+			mode:       1,
+			force:      false,
+			sendResult: false,
+			wantResult: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/v1r":
+					// Read the incoming signed request
+					readRoutableEnvelope(t, r)
+
+					// Build response
+					var tegResp *teslapower.TEGMessages
+					if tc.sendResult {
+						tegResp = &teslapower.TEGMessages{
+							Message: &teslapower.TEGMessages_SetIslandModeResponse{
+								SetIslandModeResponse: &teslapower.TEGAPISetIslandModeResponse{
+									Result: tc.resultVal,
+								},
+							},
+						}
+					} else {
+						tegResp = &teslapower.TEGMessages{}
+					}
+
+					respEnv := &teslapower.MessageEnvelope{
+						DeliveryChannel: 1,
+						Sender: &teslapower.Participant{
+							Id: &teslapower.Participant_Din{Din: "testdin"},
+						},
+						Payload: &teslapower.MessageEnvelope_Teg{
+							Teg: tegResp,
+						},
+					}
+					envBytes, err := proto.Marshal(respEnv)
+					assert.NoError(t, err)
+
+					routable := &combined.RoutableMessage{
+						Payload: &combined.RoutableMessage_ProtobufMessageAsBytes{
+							ProtobufMessageAsBytes: envBytes,
+						},
+					}
+					data, err := proto.Marshal(routable)
+					assert.NoError(t, err)
+					_, _ = w.Write(data)
+				}
+			}
+
+			srv := newTLSServer(t, handler)
+			v := newV1r(t, srv.Listener.Addr().String())
+			require.NoError(t, v.Login(t.Context()))
+
+			res, err := v.SendIslandMode(t.Context(), "testdin", tc.mode, tc.force)
+			if tc.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.mode, res["mode"])
+			assert.Equal(t, tc.force, res["force"])
+			assert.Equal(t, tc.wantResult, res["result"])
+		})
+	}
 }
