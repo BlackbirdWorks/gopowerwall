@@ -221,18 +221,15 @@ func TestProxyHTTPSurface(t *testing.T) {
 				assert.InDelta(t, 6500.0, out["solar"], 0.01)
 				assert.InDelta(t, -3500.0, out["battery"], 0.01)
 				assert.InDelta(t, 23.975388, out["soe"], 1e-6)
-				// BUG (parity mismatch): proxy/routes.go's generateJSON sets
-				// grid_status by comparing gopowerwall.GridStatus(ctx,
-				// GridStatusString) against the literal "UP", but that
-				// function only ever returns "Connected", "Transition" or
-				// "Unknown" (see Powerwall.GridStatus) - never "UP". So
-				// this field is always 0, even when the grid is actually
-				// up, as it is here. See this suite's integration report.
-				assert.InDelta(t, 0.0, out["grid_status"], 0.01)
+				// generateJSON builds grid_status via
+				// gopowerwall.GridStatus(ctx, GridStatusNumeric), which
+				// returns 1 when the gateway reports SystemGridConnected -
+				// the simulator's default state, as exercised here.
+				assert.InDelta(t, 1.0, out["grid_status"], 0.01)
 			},
 		},
 		{
-			name: "/freq's grid_status (built via GridStatusNumeric, not the buggy string compare) is correct",
+			name: "/freq's grid_status (also built via GridStatusNumeric) is correct",
 			path: "/freq",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
@@ -328,10 +325,10 @@ func TestProxyCSVRoutes(t *testing.T) {
 		fields := csvFields(t, body)
 		require.Len(t, fields, 7)
 		assert.InDelta(t, -2100.0, csvFloat(t, fields, 0), 0.02, "Grid")
-		// BUG (parity mismatch): same "UP" string-compare bug as /json's
-		// grid_status - GridStatus(ctx, GridStatusString) never returns
-		// "UP", so this column is always 0 regardless of actual grid state.
-		assert.InDelta(t, 0.0, csvFloat(t, fields, 5), 0.01, "GridStatus")
+		// GridStatus is built via GridStatusNumeric, same as /json's
+		// grid_status, so it reflects the simulator's default
+		// SystemGridConnected state as 1.
+		assert.InDelta(t, 1.0, csvFloat(t, fields, 5), 0.01, "GridStatus")
 		// Reserve is 0 because the simulator does not implement
 		// /api/operation, not because of a gopowerwall defect.
 		assert.InDelta(t, 0.0, csvFloat(t, fields, 6), 0.01, "Reserve")
