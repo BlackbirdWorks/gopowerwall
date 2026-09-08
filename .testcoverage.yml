@@ -1,0 +1,14 @@
+# go-test-coverage configuration
+#
+# Used by vladopajic/go-test-coverage in CI to enforce the coverage threshold.
+
+# Total coverage threshold (percentage)
+threshold:
+  total: 85
+
+# Generated protobuf bindings and test harness code are not hand-written and
+# are excluded from the coverage denominator.
+exclude:
+  paths:
+    - ^proto/
+    - ^test/

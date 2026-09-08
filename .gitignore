@@ -30,3 +30,29 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# --- gopowerwall additions ---
+
+# Build output
+/bin/
+/gopowerwall
+
+# Coverage report
+coverage.html
+
+# Local credentials and environment - never commit
+.env
+.env.*
+!.env.example
+*.pem
+.powerwall
+.pypowerwall.auth
+.pypowerwall.fleetapi
+
+# Editors and OS
+/.idea
+*.iml
+.DS_Store
+*.swp
+*.tmp
+*.log

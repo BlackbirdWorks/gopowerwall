@@ -1,0 +1,9 @@
+.git
+.github
+.agent
+bin/
+docs/
+*.md
+coverage.out
+coverage.html
+.powerwall

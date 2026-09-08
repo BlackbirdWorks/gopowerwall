@@ -1,0 +1,38 @@
+# Dockerfile used by GoReleaser for multi-arch builds.
+#
+# GoReleaser cross-compiles the proxy and healthcheck binaries on the host
+# (see .goreleaser.yml) and stages them under $TARGETPLATFORM before this
+# Dockerfile ever runs, so there is no Go build stage here. CA certificates
+# still need a small stage of their own, since scratch has no package
+# manager to install them with.
+FROM alpine:3 AS certs
+RUN apk add --no-cache ca-certificates
+
+FROM scratch
+
+ARG TARGETPLATFORM
+
+WORKDIR /app
+
+# CA certificates for verified TLS to Tesla's cloud/Fleet APIs (backend/cloud
+# and backend/fleetapi do not skip certificate verification, unlike the
+# local gateway backends, which talk to a self-signed device on the LAN).
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+COPY $TARGETPLATFORM/proxy .
+COPY $TARGETPLATFORM/healthcheck .
+
+# pypowerwall proxy default port
+EXPOSE 8675
+
+LABEL org.opencontainers.image.source="https://github.com/blackbirdworks/gopowerwall"
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/app/healthcheck"]
+
+# Run as a fixed non-root UID/GID. scratch has no /etc/passwd, but Linux
+# does not require a passwd entry to run a process under a given numeric
+# UID/GID - only to resolve that UID to a username, which nothing here needs.
+USER 65532:65532
+
+CMD ["./proxy"]
