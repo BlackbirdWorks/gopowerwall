@@ -3,35 +3,44 @@
 // is a Go port of [pypowerwall], the Python library and proxy server for the
 // same gateway, and provides the same kind of cached, resilient access to
 // site power, battery state, vitals, and control endpoints that pypowerwall
-// gives Python programs.
+// gives Python programs - plus the derived views (aggregate meters,
+// frequency/voltage, POD, and the composite /json-style [Powerwall.Snapshot])
+// that pypowerwall's own proxy computes ad hoc, exposed here as typed
+// methods any consumer can call directly.
 //
 // Parity with pypowerwall is a deliberate but scoped goal, limited to two
 // surfaces: the gopowerwall CLI's subcommands, flags, and human-readable
 // output, and the HTTP proxy server's routes and JSON response shapes (see
 // the proxy subpackage). This package - the Go library itself - is free to
-// be idiomatic Go rather than a line-for-line transliteration, and in
-// several places (documented on the affected methods below) it still shows
-// its Python origins: methods that return bare any, pointer types used to
-// signal "value unavailable" with the underlying error discarded, and
-// variadic ...bool parameters standing in for Python's optional keyword
-// arguments. Read each such method's doc comment before relying on it.
+// be idiomatic Go rather than a line-for-line transliteration: every
+// accessor that can fail returns (T, error) rather than a nil-on-failure
+// pointer, sensor and reserve/level readers that used to fork on a trailing
+// ...bool are now two clearly-named methods, and derived JSON shapes decode
+// into typed [github.com/blackbirdworks/gopowerwall/models] structs instead
+// of bare any. See docs/migration-v2.md in the module's source repository
+// for a symbol-by-symbol before/after if you are updating code written
+// against an earlier version.
 //
 // # Connecting
 //
 // [New] builds a [Config] from [DefaultConfig] plus a chain of [Option]
 // functions (WithHost, WithPassword, and so on) and attempts to connect
 // immediately, matching pypowerwall's own "construct and connect" pattern.
-// A malformed [Config] is returned as an error; a failed *connection*
-// attempt is not - New logs it and still returns a non-nil [*Powerwall]
-// with a nil error, so callers must check [Powerwall.IsConnected] (or
-// [Powerwall.Mode]) afterward rather than trusting the error return alone.
+// A malformed [Config] is returned as an error with a nil *Powerwall. A
+// failed *connection* attempt is different: New still returns a non-nil,
+// usable [*Powerwall], now paired with a [ConnectError] instead of a
+// silently discarded failure - callers that only care whether they have a
+// live backend can check [Powerwall.IsConnected] (or [Powerwall.Mode]) and
+// ignore the error entirely; callers that want to know why can
+// [errors.As] it into a *ConnectError.
 //
 //	pw, err := gopowerwall.New(ctx,
 //		gopowerwall.WithHost("192.168.91.1"),
 //		gopowerwall.WithPassword("abcde"), // last 5 characters of the gateway password
 //	)
-//	if err != nil {
-//		log.Fatal(err)
+//	var connectErr *gopowerwall.ConnectError
+//	if err != nil && !errors.As(err, &connectErr) {
+//		log.Fatal(err) // a genuine Config problem, not just "not connected yet"
 //	}
 //	defer pw.Close(ctx)
 //
@@ -39,8 +48,11 @@
 //		log.Fatal("could not connect to gateway")
 //	}
 //
-//	level := pw.Level(ctx, true) // *float64, nil if unavailable
-//	fmt.Println("mode:", pw.Mode(), "battery:", *level)
+//	level, err := pw.LevelScaled(ctx)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	fmt.Println("mode:", pw.Mode(), "battery:", level)
 //
 // # Connection modes
 //
@@ -87,10 +99,18 @@
 // [github.com/blackbirdworks/gopowerwall/models] struct wherever one
 // exists - [Powerwall.SystemStatus], [Powerwall.SOE],
 // [Powerwall.GridStatusResponse], [Powerwall.Operation],
-// [Powerwall.SiteInfo], [Powerwall.Vitals], [Powerwall.Power], and others -
-// each returning (T, error) or a zero value on failure as documented on the
-// method. Endpoints without a typed accessor yet remain reachable through
-// the lower-level [Powerwall.Poll], [Powerwall.PollRaw], and
+// [Powerwall.SiteInfo], [Powerwall.Vitals], [Powerwall.Power],
+// [Powerwall.Status], [Powerwall.SiteReading] and its Solar/Battery/Load
+// siblings, and others - each returning (T, error), or a documented
+// zero-value-on-failure for the handful (Power, Temps, Alerts, Strings,
+// BatteryBlocks) that degrade gracefully by design. Built on top of those,
+// [Powerwall.Aggregates], [Powerwall.Snapshot], [Powerwall.PODView], and
+// [Powerwall.FrequencyView] are derived views - aggregation, unit
+// conversion, and cross-endpoint composition that a Prometheus exporter or
+// any other consumer would otherwise have to reimplement itself; the
+// gopowerwall proxy is just one caller of these, not a special one.
+// Endpoints without a typed accessor yet remain reachable through the
+// lower-level [Powerwall.Poll], [Powerwall.PollRaw], and
 // [Powerwall.PollJSON], which return any/[]byte/string respectively; prefer
 // a typed accessor when one exists.
 //

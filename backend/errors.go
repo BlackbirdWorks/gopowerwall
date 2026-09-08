@@ -63,6 +63,15 @@ var (
 	// encoding's single-byte length prefix (tag 2, TAG_PERSONALIZATION)
 	// can represent.
 	ErrDinTooLong = errors.New("din too long for v1r TLV encoding")
+
+	// ErrFieldMissing indicates the active backend answered successfully
+	// (a connection exists and the call did not fail), but the specific
+	// field a typed accessor was after was absent from, or the wrong type
+	// in, the decoded response. This is distinct from ErrNoClient ("not
+	// connected at all") and ErrUnsupported ("this backend never offers
+	// that data"): ErrFieldMissing means the gateway answered, just not
+	// with the field asked for.
+	ErrFieldMissing = errors.New("field missing from gateway response")
 )
 
 // InvalidConfigError provides details about an invalid configuration parameter.
@@ -77,6 +86,24 @@ func (e *InvalidConfigError) Error() string {
 	}
 
 	return e.Message
+}
+
+// ConnectError reports that constructing a Powerwall succeeded (the
+// configuration itself was valid) but the initial connection attempt across
+// every applicable mode failed. The caller still gets back a usable, non-nil
+// Powerwall - it is simply not connected yet ([Powerwall.IsConnected] false) -
+// so a ConnectError is informational rather than fatal: log it, surface it,
+// or ignore it and call [Powerwall.Connect] again later, all remain valid
+// responses. Mode names the [ConnectionMode] that was active when every
+// retry was exhausted, which is not necessarily the mode originally
+// configured, since Connect's fallback can move between modes on the way
+// there.
+type ConnectError struct {
+	Mode string
+}
+
+func (e *ConnectError) Error() string {
+	return "failed to connect to Powerwall in " + e.Mode + " mode after exhausting all retries/fallbacks"
 }
 
 var (

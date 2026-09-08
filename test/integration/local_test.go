@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
 
 // newLocalPowerwall connects a Powerwall to sim in local mode using the
@@ -58,8 +59,8 @@ func TestLocalModeReadSurface(t *testing.T) {
 				t.Helper()
 				data := pw.Poll(t.Context(), "/api/status")
 				require.NotNil(t, data)
-				assert.Equal(t, "1232100-00-E--TG123456789ABC", gopowerwall.Lookup(data, "din"))
-				assert.Equal(t, "23.44.0 9064fc6a", gopowerwall.Lookup(data, "version"))
+				assert.Equal(t, "1232100-00-E--TG123456789ABC", lookup.Lookup(data, "din"))
+				assert.Equal(t, "23.44.0 9064fc6a", lookup.Lookup(data, "version"))
 			},
 		},
 		{
@@ -81,11 +82,11 @@ func TestLocalModeReadSurface(t *testing.T) {
 			name: "Level reports the simulator's static SOE",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				lvl := pw.Level(t.Context(), false)
-				require.NotNil(t, lvl)
+				lvl, err := pw.Level(t.Context())
+				require.NoError(t, err)
 				// stub.py: percentage = 23.975388097174584, serialized with
 				// Python's "%f" (6 decimal places) as the wire value.
-				assert.InDelta(t, 23.975388, *lvl, 1e-6)
+				assert.InDelta(t, 23.975388, lvl, 1e-6)
 			},
 		},
 		{
@@ -101,8 +102,12 @@ func TestLocalModeReadSurface(t *testing.T) {
 			name: "GridStatus reports connected in every output form",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Equal(t, "Connected", pw.GridStatus(t.Context(), gopowerwall.GridStatusString))
-				assert.Equal(t, 1, pw.GridStatus(t.Context(), gopowerwall.GridStatusNumeric))
+				str, err := pw.GridStatusString(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, "Connected", str)
+				num, err := pw.GridStatusNumeric(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, 1, num)
 
 				resp, err := pw.GridStatusResponse(t.Context())
 				require.NoError(t, err)
@@ -154,22 +159,24 @@ func TestLocalModeReadSurface(t *testing.T) {
 			name: "SiteName reads the un-nested site name endpoint",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				name := pw.SiteName(t.Context())
-				require.NotNil(t, name)
-				assert.Equal(t, "Tesla Energy Gateway", *name)
+				name, err := pw.SiteName(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, "Tesla Energy Gateway", name)
 			},
 		},
 		{
 			name: "Status/Version/Uptime/Din read from the same gateway status payload",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Equal(t, "23.44.0 9064fc6a", pw.Version(t.Context()))
-				uptime := pw.Uptime(t.Context())
-				require.NotNil(t, uptime)
-				assert.Equal(t, "127h34m16.275122187s", *uptime)
-				din := pw.Din(t.Context())
-				require.NotNil(t, din)
-				assert.Equal(t, "1232100-00-E--TG123456789ABC", *din)
+				version, err := pw.Version(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, "23.44.0 9064fc6a", version)
+				uptime, err := pw.Uptime(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, "127h34m16.275122187s", uptime.String())
+				din, err := pw.Din(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, "1232100-00-E--TG123456789ABC", din)
 			},
 		},
 		{

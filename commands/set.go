@@ -99,8 +99,8 @@ func (c *SetCmd) applyReserve(ctx context.Context, pw *gopowerwall.Powerwall, w 
 		return
 	}
 	if capped {
-		if applied := pw.GetReserveForced(ctx); applied != nil {
-			fmt.Fprintf(w, "Powerwall Reserve actually set to %.1f\n", *applied)
+		if applied, err := pw.GetReserveForced(ctx); err == nil {
+			fmt.Fprintf(w, "Powerwall Reserve actually set to %.1f\n", applied)
 		}
 	}
 }
@@ -109,13 +109,13 @@ func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall, w 
 	if !c.Current {
 		return nil
 	}
-	lvl := pw.Level(ctx)
-	if lvl == nil {
+	lvl, err := pw.Level(ctx)
+	if err != nil {
 		return ErrBatteryLevelRead
 	}
-	fmt.Fprintf(w, "Setting Powerwall Reserve to Current Charge Level %.1f\n", *lvl)
-	if _, err := pw.SetReserve(ctx, *lvl); err != nil {
-		logger.Load(ctx).ErrorContext(ctx, "failed to set reserve", "error", err)
+	fmt.Fprintf(w, "Setting Powerwall Reserve to Current Charge Level %.1f\n", lvl)
+	if _, setErr := pw.SetReserve(ctx, lvl); setErr != nil {
+		logger.Load(ctx).ErrorContext(ctx, "failed to set reserve", "error", setErr)
 	}
 
 	return nil

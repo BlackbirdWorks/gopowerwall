@@ -1,9 +1,54 @@
 # API redesign proposal: idiomatic Go signatures for the root package
 
-This is a proposal only. Nothing in this document has been implemented, and no
-exported signature has been changed as part of writing it - see `doc.go` and the
-expanded doc comments across `powerwall.go`, `options.go`, `types.go`, and
-`errors.go` for the documentation-only pass that accompanies this proposal.
+## Status: implemented
+
+Every proposal in the "Clearly worth it" and "Arguable" sections below has been
+implemented, as part of the same change that moved all derived computation out of
+`proxy/` and `commands/` and into the root `gopowerwall` package (see
+[architecture/README.md](architecture/README.md) and
+[migration-v2.md](migration-v2.md) for the full picture and a symbol-by-symbol
+before/after). "Not worth the churn" was left alone, as recommended. Specifically:
+
+- **Proposal 1** (pointer returns -> `(T, error)`) - done for all ten methods listed.
+  `Uptime` and `GetTimeRemaining` also picked up the proposed `time.Duration` type change.
+- **Proposal 2** (`Alerts`/`Strings` drop their ignored `...bool`) - done.
+- **Proposal 3** (`Lookup`/`LookupFloat` off the public API) - done; both are gone from the
+  root package. Internal callers switched to `pkgs/lookup.Lookup` directly (`LookupFloat`
+  has no equivalent there - see migration-v2.md for the replacement pattern).
+- **Proposal 4** (variadic `...bool`) - done via option 4a (split into named methods) for
+  every case in the table, including `Status` and `GridStatus`, which the proposal itself
+  flagged as candidates for 4b (functional options) instead. In practice a straight split
+  read more clearly for both: `Status` becomes a single typed accessor with no parameter at
+  all (callers read the field they want off the returned struct), and `GridStatus` becomes
+  `GridStatusString`/`GridStatusNumeric` per proposal 5b's own suggested resolution. The
+  `AggregatesOption` functional-options pattern proposed in 4b *was* used, just for the new
+  `Aggregates`/`Snapshot` derived-view methods rather than `Status`/`GridStatus`.
+- **Proposal 5a** (`any` -> concrete types for `Status` and verbose sensor reads) - done.
+  `models.GatewayStatus` and `models.MeterReading` were both extended to be lossless
+  decodes of a real gateway response first (see migration-v2.md's "any returns become
+  concrete types" section for the exact fields added), then wired in. The proxy's two
+  `Status(ctx)` call sites (`/pw/status` and `renderIndexHTML`) were updated deliberately,
+  not as a drop-in replacement, per the proposal's own caution.
+- **Proposal 5b** (`Version`/`GridStatus` polymorphism) - resolved by proposal 4's split,
+  as anticipated.
+- **Proposal 6** (`New`'s connect behavior) - Option A implemented: `New` still attempts to
+  connect and still returns a non-nil, usable `*Powerwall` on a failed attempt, but now
+  wraps that failure as a `*ConnectError` instead of discarding it. The CLI's
+  `ConnectionFlags.BuildPowerwall` deliberately un-wraps and discards a bare `*ConnectError`
+  before returning, so the CLI's existing "build, then check `IsConnected()`" flow and its
+  human-readable output are unaffected - see that function's doc comment.
+- **Proposals 7 and 8** ("not worth the churn") - left alone, as recommended.
+- **Proposal 9** (wrapping `Power`/`Temps`/`Alerts`/`Strings`/`BatteryBlocks` in
+  `(T, error)` too) - left alone, as recommended; these still degrade to a documented zero
+  value.
+
+The rest of this document is preserved as the original design record; each proposal above
+still describes the rationale and trade-offs that were weighed before implementing it.
+
+This was originally a proposal only, with nothing implemented and no exported signature
+changed as part of writing it - see `doc.go` and the expanded doc comments across
+`powerwall.go`, `options.go`, `types.go`, and `errors.go` for the documentation-only pass
+that accompanied the original proposal, both since superseded by the implementation above.
 
 ## Why now
 

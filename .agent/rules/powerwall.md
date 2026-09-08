@@ -23,6 +23,35 @@ Values that appear on the parity surface are frozen. In particular `version.Buil
 must not be repurposed for release versioning. Use `version.BuildVersion`, which the
 Makefile injects via ldflags, for that.
 
+
+### When in doubt, read the Python
+
+pypowerwall is the authority on behaviour. When you are unsure what a field means, what
+an endpoint returns, what a default should be, or how an edge case is handled, **go and
+read the upstream source** rather than inferring it from this repo, from a fixture, or
+from what seems reasonable.
+
+    https://github.com/jasonacox/pypowerwall
+
+Fetch the raw files and read them directly; a summarised fetch loses the exact field
+names and constants that matter here. Useful entry points:
+
+    pypowerwall/__init__.py                  the Powerwall facade and its defaults
+    pypowerwall/local/pypowerwall_local.py   local gateway HTTP
+    pypowerwall/tedapi/__init__.py           TEDAPI, including vitals synthesis
+    pypowerwall/cloud/pypowerwall_cloud.py   Owner API
+    pypowerwall/fleetapi/pypowerwall_fleetapi.py
+    proxy/server.py                          the proxy routes and computed fields
+    pwsimulator/stub.py                      what the emulator actually serves
+
+Cite what you found as `file:line` when you record a conclusion, and say which upstream
+ref you read: pypowerwall changes, and an uncited claim cannot be rechecked later.
+`docs/parity-matrix.md` is an audit against a specific commit and is a good starting
+point, but it is a snapshot, not a substitute for the source.
+
+If the Python genuinely does not settle the question, say so explicitly and mark the
+conclusion unverified rather than inventing a plausible answer.
+
 ### Connection modes
 
 Five backends live under `backend/`, selected by `ConnectionMode` in `types.go`:

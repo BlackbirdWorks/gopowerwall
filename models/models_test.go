@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -80,6 +81,25 @@ func TestFixtureRoundTrip(t *testing.T) {
 				assert.Equal(t, "23.28.2 27626f98", status.Version)
 				assert.Equal(t, "teg", status.DeviceType)
 				assert.False(t, status.IsNew)
+			},
+		},
+		{
+			name:    "MetersAggregates decodes /api/meters/aggregates, including the numeric timeout field",
+			fixture: "api.meters.aggregates.json",
+			verify: func(t *testing.T, raw []byte) {
+				t.Helper()
+
+				var agg models.MetersAggregates
+				require.NoError(t, json.Unmarshal(raw, &agg))
+				assert.InDelta(t, 27.0, agg.Site.InstantPower, 0.001)
+				assert.Equal(t, 1, agg.Site.NumMetersAggregated)
+				// timeout is reported as a nanosecond duration (e.g.
+				// 1500000000, i.e. 1.5s), not the bool its field name might
+				// suggest - see MeterReading.Timeout's doc comment.
+				assert.Equal(t, 1500*time.Millisecond, agg.Site.Timeout)
+				assert.InDelta(t, -990.0, agg.Battery.InstantPower, 0.001)
+				assert.InDelta(t, 1840.0, agg.Solar.InstantPower, 0.001)
+				assert.InDelta(t, 866.25, agg.Load.InstantPower, 0.001)
 			},
 		},
 		{
@@ -185,50 +205,6 @@ func TestFixtureRoundTrip(t *testing.T) {
 			t.Parallel()
 
 			tc.verify(t, readFixture(t, tc.fixture))
-		})
-	}
-}
-
-// TestKnownFixtureMismatches is a bug report in test form. One DTO disagrees
-// with the shape of a real recorded gateway response:
-//
-//   - models.MeterReading.Timeout is typed bool, but /api/meters/aggregates
-//     reports a numeric duration in nanoseconds (e.g. 1500000000). This is
-//     latent rather than actively broken today: MetersAggregates is only
-//     referenced by the unused models.CompositeJSON type, so nothing in
-//     production currently unmarshals a live payload into it. It would fail
-//     the same way the moment it is wired up.
-//
-// Per project convention this is reported here rather than silently patched.
-//
-// models.SiteInfo.GridCode previously had the same class of problem (typed
-// string against a nested object on the wire) and has since been fixed by
-// introducing models.GridCodeInfo; see TestFixtureRoundTrip's
-// "SiteInfo decodes the nested grid_code object from a real gateway" case.
-func TestKnownFixtureMismatches(t *testing.T) {
-	t.Parallel()
-
-	type testCase struct {
-		target      any
-		name        string
-		fixture     string
-		wantErrText string
-	}
-
-	for _, tc := range []testCase{
-		{
-			name:        "MetersAggregates.Timeout cannot decode the real numeric timeout",
-			fixture:     "api.meters.aggregates.json",
-			target:      &models.MetersAggregates{},
-			wantErrText: "timeout",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := json.Unmarshal(readFixture(t, tc.fixture), tc.target)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErrText)
 		})
 	}
 }

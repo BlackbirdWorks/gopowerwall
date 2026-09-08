@@ -189,7 +189,11 @@ func newDisconnectedPowerwall(t *testing.T) *gopowerwall.Powerwall {
 		gopowerwall.WithTimeout(200*time.Millisecond),
 		gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
 	)
-	require.NoError(t, err)
+	// The connection is deliberately expected to fail here (that's the
+	// point of this helper); New still returns a usable, disconnected
+	// *Powerwall alongside the wrapped ConnectError.
+	require.Error(t, err)
+	require.NotNil(t, pw)
 
 	return pw
 }

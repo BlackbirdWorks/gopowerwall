@@ -28,7 +28,11 @@ func TestApplyReserveCloudModeWarnsAboveCap(t *testing.T) {
 		gopowerwall.WithCloudMode(true),
 		gopowerwall.WithAuthPath(t.TempDir()),
 	)
-	require.NoError(t, err)
+	// No auth file exists in this fresh temp dir, so the connection
+	// attempt fails; New still returns a usable *Powerwall that reports
+	// IsCloud() from its configuration alone, before any connection
+	// attempt.
+	require.Error(t, err)
 	require.True(t, pw.IsCloud())
 	require.False(t, pw.IsConnected())
 
@@ -47,7 +51,7 @@ func TestApplyReserveLocalModeSkipsCapCheck(t *testing.T) {
 		gopowerwall.WithPassword("test"),
 		gopowerwall.WithCloudMode(false),
 	)
-	require.NoError(t, err)
+	require.Error(t, err)
 	assert.False(t, pw.IsCloud())
 	assert.False(t, pw.IsFleetAPI())
 

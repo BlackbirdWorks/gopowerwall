@@ -81,9 +81,10 @@ func connectExampleGateway(ctx context.Context) (*httptest.Server, *gopowerwall.
 }
 
 // ExampleNew connects to a Powerwall gateway in local mode and checks that
-// the connection actually succeeded - New itself never returns a connection
-// failure as an error, so [gopowerwall.Powerwall.IsConnected] is the check
-// that matters.
+// the connection actually succeeded. [gopowerwall.New] returns a non-nil
+// *Powerwall even when the initial connection attempt fails (wrapping that
+// failure as a [gopowerwall.ConnectError] instead), so
+// [gopowerwall.Powerwall.IsConnected] remains the check that matters here.
 func ExampleNew() {
 	srv := newExampleGateway()
 	defer srv.Close()
@@ -126,9 +127,9 @@ func ExamplePowerwall_Power() {
 }
 
 // ExamplePowerwall_Level reads the battery's state-of-charge percentage,
-// both raw and rescaled, and shows the trap in Level's signature: a nil
-// result means the value could not be retrieved at all, with the
-// underlying error discarded, so it must be checked before dereferencing.
+// both raw and rescaled, via the (T, error) idiom every accessor in this
+// package now follows: a non-nil error means the value could not be
+// retrieved, and it must be checked before the value is used.
 func ExamplePowerwall_Level() {
 	ctx := context.Background()
 
@@ -136,21 +137,21 @@ func ExamplePowerwall_Level() {
 	defer srv.Close()
 	defer pw.Close(ctx)
 
-	level := pw.Level(ctx)
-	if level == nil {
-		fmt.Println("battery level unavailable")
+	level, err := pw.Level(ctx)
+	if err != nil {
+		fmt.Println("battery level unavailable:", err)
 
 		return
 	}
-	fmt.Printf("battery level: %.0f%%\n", *level)
+	fmt.Printf("battery level: %.0f%%\n", level)
 
-	scaled := pw.Level(ctx, true)
-	if scaled == nil {
-		fmt.Println("scaled battery level unavailable")
+	scaled, err := pw.LevelScaled(ctx)
+	if err != nil {
+		fmt.Println("scaled battery level unavailable:", err)
 
 		return
 	}
-	fmt.Printf("scaled battery level: %.2f%%\n", *scaled)
+	fmt.Printf("scaled battery level: %.2f%%\n", scaled)
 	// Output:
 	// battery level: 42%
 	// scaled battery level: 38.95%

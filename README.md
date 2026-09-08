@@ -256,8 +256,12 @@ func main() {
 	}
 
 	fmt.Println("mode:", pw.Mode())
-	fmt.Println("battery level:", *pw.Level(ctx, true))
-	fmt.Println("grid status:", pw.GridStatus(ctx))
+	if level, err := pw.LevelScaled(ctx); err == nil {
+		fmt.Println("battery level:", level)
+	}
+	if gridStatus, err := pw.GridStatusString(ctx); err == nil {
+		fmt.Println("grid status:", gridStatus)
+	}
 	fmt.Printf("power: %+v\n", pw.Power(ctx))
 }
 ```

@@ -9,9 +9,12 @@ together; see the per-mode pages for what each backend actually talks to.
 ```
 cmd/gopowerwall, cmd/proxy   entry points: flag parsing, process wiring
         |
-     commands/               kong command structs; translate flags into gopowerwall.Option values
+     commands/               kong command structs; translate flags into gopowerwall.Option values,
+                              then a thin presentation layer over facade calls (no derivation)
         |
-     gopowerwall (root)      the Powerwall facade: mode selection, typed accessors, Poll/Post
+     gopowerwall (root)      the Powerwall facade: mode selection, typed accessors, Poll/Post,
+                              AND all derived computation - aggregation, corrections, composite
+                              views (Aggregates, Snapshot, PODView, FrequencyView)
         |
      backend/{local,tedapi,cloud,fleetapi}
                               one package per connection mode; own HTTP/protobuf handling,
@@ -20,8 +23,9 @@ cmd/gopowerwall, cmd/proxy   entry points: flag parsing, process wiring
      net/http, proto/*        stdlib HTTP clients and vendored TEDAPI protobuf bindings
 
 proxy/                        a second, independent consumer of the same gopowerwall.Powerwall
-                              facade; translates HTTP requests into facade calls and back into
-                              pypowerwall-shaped JSON
+                              facade; thin by design - routing, HTTP concerns, caching, and the
+                              parity serialization that maps the facade's idiomatic Go types onto
+                              pypowerwall's exact JSON field names and CSV column order
 ```
 
 `cmd/gopowerwall/cli.go` declares the ten-subcommand kong grammar and hands control to
@@ -30,19 +34,57 @@ proxy/                        a second, independent consumer of the same gopower
 via `ConnectionFlags.BuildPowerwall` (`commands/connection.go`), which maps CLI flags onto
 `gopowerwall.Option` functions and calls `gopowerwall.New`.
 
-`gopowerwall.Powerwall` (`powerwall.go`) is the facade. It holds at most one active backend
-client (`local`, `tedapi`, `cloud`, or `fleetapi` — never more than one, selected by
-`ConnectionMode`) behind a `sync.RWMutex`, and every exported method switches on
-`p.mode` to route the call to whichever backend is live. Typed accessors like
-`SystemStatus`, `SOE`, `GridStatusResponse`, `Operation`, and `SiteInfo` all go through
-`PollRaw` and `json.Unmarshal` into a `models.*` struct; untyped accessors like `Poll`,
-`Site`, `Solar`, `Status` return `any` the way pypowerwall's own dynamic responses do.
+### The client owns the logic; every consumer is thin
+
+`gopowerwall.Powerwall` (`powerwall.go`) is the facade, and it is where *all* gateway
+access and derived computation lives - not just mode selection and raw polling. It holds
+at most one active backend client (`local`, `tedapi`, `cloud`, or `fleetapi` — never more
+than one, selected by `ConnectionMode`) behind a `sync.RWMutex`, and every exported method
+switches on `p.mode` to route the call to whichever backend is live.
+
+Three layers of accessor sit on top of that routing:
+
+1. **Typed field accessors** - `SystemStatus`, `SOE`, `GridStatusResponse`, `Operation`,
+   `SiteInfo`, `Status`, and the per-channel `Site`/`Solar`/`Battery`/`Load` (and their
+   `Grid`/`Home` aliases) all decode straight into a `models.*` struct or scalar via
+   `(T, error)`. A handful (`Power`, `Temps`, `Alerts`, `Strings`, `BatteryBlocks`)
+   intentionally degrade to a documented zero value instead of an error, since a caller
+   who checks `IsConnected()` first already has that signal.
+2. **Reading accessors for a sensor's full detail** - `SiteReading`/`SolarReading`/
+   `BatteryReading`/`LoadReading` (and `GridReading`/`HomeReading`) return the sensor's
+   entire `models.MeterReading`, not just its `instant_power` scalar.
+3. **Derived views** - `Aggregates`, `Snapshot`, `PODView`, and `FrequencyView` are where
+   the computation that used to live in `proxy/routes.go` now lives: aggregating meter
+   readings, applying the site-zero-threshold and negative-solar corrections
+   (`AggregatesOption`), composing power + state-of-charge + grid status into one
+   `models.Snapshot`, and deriving per-battery-block and per-inverter views from
+   `SystemStatus`/`Vitals`. These are genuine Go SDK methods, not proxy internals -
+   anything that wants "corrected site power" or "the composite dashboard view" calls one
+   of these directly instead of re-deriving it.
+
+Endpoints without a typed accessor yet remain reachable through the lower-level `Poll`,
+`PollRaw`, and `PollJSON`, which return `any`/`[]byte`/`string` respectively.
 
 `proxy.Server` (`proxy/server.go`) is a second, independent consumer of the same facade —
 it is not part of the `cmd`→`commands` call chain. `proxy.NewServer` either accepts an
 existing `*gopowerwall.Powerwall` or builds its own from `proxy.Config`, then dispatches
 incoming HTTP requests (`ServeHTTP` → `handleGet`/`handlePost` in `proxy/routes.go` and
-`proxy/control.go`) to facade methods, shaping the results back into pypowerwall's JSON.
+`proxy/control.go`) to facade methods. Because the facade already returns typed, corrected
+results, everything left in `proxy/routes.go` is routing, caching
+(`cachedRouteHandler`/`safePWCall`), and **parity serialization**: converting a
+`models.Snapshot`/`models.PODView`/`models.MetersAggregates` (or a `(T, error)` pair, via
+the small `orNil` helper in `proxy/parity.go`) into pypowerwall's exact JSON field names,
+null-vs-zero conventions, and CSV column order. That mapping belongs in the proxy
+specifically because it is a wire-compatibility detail, not business logic - keeping it
+there is what lets the facade's own types stay idiomatic Go instead of being shaped by a
+Python project's field names. `commands/get.go`'s `collectMetrics` follows the same
+pattern: it calls the same typed/derived facade methods proxy/routes.go does and only adds
+presentation (the CLI's text/JSON/CSV formatting), not computation.
+
+A Prometheus (or any other metrics) exporter fits into this the same way: call
+`Snapshot`/`Aggregates`/`PODView`/`FrequencyView`/`Vitals` for the numbers, and write a
+handler that turns each field into a `prometheus.Gauge`/`Counter` update. It needs zero
+derivation logic of its own - the same property that makes `proxy/routes.go` thin today.
 
 ### The `client` package is not currently wired into any backend
 

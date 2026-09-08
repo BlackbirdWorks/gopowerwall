@@ -2,6 +2,7 @@ package fleetapi_test
 
 import (
 	"encoding/json"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,38 @@ import (
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/fleetapi"
 )
+
+// recordedRequest captures the parts of an inbound HTTP request the write-path
+// tests below need to assert on: method, path, bearer token, and decoded JSON
+// body.
+type recordedRequest struct {
+	body   map[string]any
+	auth   string
+	method string
+	path   string
+}
+
+// recordRequest reads and JSON-decodes r's body (if any) into a
+// recordedRequest, so a test handler can both answer the request and let the
+// test assert on exactly what was sent.
+func recordRequest(t *testing.T, r *http.Request) recordedRequest {
+	t.Helper()
+
+	b, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+
+	var body map[string]any
+	if len(b) > 0 {
+		require.NoError(t, json.Unmarshal(b, &body))
+	}
+
+	return recordedRequest{
+		method: r.Method,
+		path:   r.URL.Path,
+		auth:   r.Header.Get("Authorization"),
+		body:   body,
+	}
+}
 
 const (
 	testCacheTTL = time.Minute
@@ -39,7 +72,11 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 func writeConfigFile(t *testing.T, dir string, extra map[string]any) {
 	t.Helper()
 
-	data := map[string]any{"access_token": "tok-abc", "refresh_token": "rt-abc", "client_id": "test-client"}
+	data := map[string]any{
+		"access_token":  "tok-abc",
+		"refresh_token": "rt-abc",
+		"client_id":     "test-client",
+	}
 	maps.Copy(data, extra)
 	b, err := json.Marshal(data)
 	require.NoError(t, err)
@@ -116,7 +153,14 @@ func TestFleetAPIAuthenticate(t *testing.T) {
 			name: "malformed config JSON",
 			setup: func(t *testing.T, dir string) {
 				t.Helper()
-				require.NoError(t, os.WriteFile(filepath.Join(dir, fleetapi.ConfigFile), []byte("{not-json"), 0o600))
+				require.NoError(
+					t,
+					os.WriteFile(
+						filepath.Join(dir, fleetapi.ConfigFile),
+						[]byte("{not-json"),
+						0o600,
+					),
+				)
 			},
 			wantErr: true,
 		},
@@ -213,14 +257,206 @@ func TestFleetAPIKnownStubEndpoints(t *testing.T) {
 	}
 }
 
-func TestFleetAPIPostOperation(t *testing.T) {
+// fleetAPIOperationPaths returns the three site-scoped URL paths the
+// postAPIOperation write path can hit: backup reserve, operation mode, and
+// site info.
+func fleetAPIOperationPaths() (string, string, string) {
+	base := "/api/1/energy_sites/" + testSiteID
+
+	return base + "/backup", base + "/operation", base + "/site_info"
+}
+
+// TestFleetAPIPostAPIOperation exercises postAPIOperation's real HTTP calls:
+// backup_reserve_percent goes to ".../backup" as {"backup_reserve_percent": <int>},
+// real_mode goes to ".../operation" as {"default_real_mode": "<mode>"}, and
+// both are sent independently when both fields are present in the payload -
+// this is the fix for the parity gap where cloud/FleetAPI writes previously
+// never reached Tesla at all (docs/parity-matrix.md §4).
+func TestFleetAPIPostAPIOperation(t *testing.T) {
 	t.Parallel()
 
-	f := fleetapi.New(testEmail, testCacheTTL, testTimeout, testSiteID, t.TempDir())
+	backupPath, operationPath, _ := fleetAPIOperationPaths()
 
-	res, err := f.Post(t.Context(), "/api/operation", map[string]any{"real_mode": "backup"}, "", false, false)
+	type testCase struct {
+		wantErrIs      error
+		payload        map[string]any
+		wantBackupBody map[string]any
+		wantOpBody     map[string]any
+		name           string
+		backupStatus   int
+		opStatus       int
+	}
+
+	cases := []testCase{
+		{
+			name:           "backup_reserve_percent only",
+			payload:        map[string]any{"backup_reserve_percent": 42.0},
+			wantBackupBody: map[string]any{"backup_reserve_percent": float64(42)},
+		},
+		{
+			name:       "real_mode only",
+			payload:    map[string]any{"real_mode": "backup"},
+			wantOpBody: map[string]any{"default_real_mode": "backup"},
+		},
+		{
+			name: "both fields sent as two independent requests",
+			payload: map[string]any{
+				"backup_reserve_percent": 80.0,
+				"real_mode":              "self_consumption",
+			},
+			wantBackupBody: map[string]any{"backup_reserve_percent": float64(80)},
+			wantOpBody:     map[string]any{"default_real_mode": "self_consumption"},
+		},
+		{
+			name:         "backup 401 maps to ErrLogin",
+			payload:      map[string]any{"backup_reserve_percent": 10.0},
+			backupStatus: http.StatusUnauthorized,
+			wantErrIs:    backend.ErrLogin,
+		},
+		{
+			name:         "backup 403 maps to ErrLogin",
+			payload:      map[string]any{"backup_reserve_percent": 10.0},
+			backupStatus: http.StatusForbidden,
+			wantErrIs:    backend.ErrLogin,
+		},
+		{
+			name:      "operation 404 maps to ErrNotFound",
+			payload:   map[string]any{"real_mode": "backup"},
+			opStatus:  http.StatusNotFound,
+			wantErrIs: backend.ErrNotFound,
+		},
+		{
+			name:         "backup 429 maps to ErrRateLimited",
+			payload:      map[string]any{"backup_reserve_percent": 10.0},
+			backupStatus: http.StatusTooManyRequests,
+			wantErrIs:    backend.ErrRateLimited,
+		},
+		{
+			name:      "operation 503 maps to ErrRateLimited",
+			payload:   map[string]any{"real_mode": "backup"},
+			opStatus:  http.StatusServiceUnavailable,
+			wantErrIs: backend.ErrRateLimited,
+		},
+		{
+			name:         "backup 500 maps to ErrUnexpectedStatus",
+			payload:      map[string]any{"backup_reserve_percent": 10.0},
+			backupStatus: http.StatusInternalServerError,
+			wantErrIs:    backend.ErrUnexpectedStatus,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var backupReq, opReq *recordedRequest
+
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case backupPath:
+					rec := recordRequest(t, r)
+					backupReq = &rec
+					if tc.backupStatus != 0 {
+						w.WriteHeader(tc.backupStatus)
+
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+				case operationPath:
+					rec := recordRequest(t, r)
+					opReq = &rec
+					if tc.opStatus != 0 {
+						w.WriteHeader(tc.opStatus)
+
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}
+			srv := newTestServer(t, handler)
+			f := newAuthenticatedBackend(t, srv)
+
+			res, err := f.Post(t.Context(), "/api/operation", tc.payload, "", false, false)
+
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, map[string]any{"status": "success"}, res)
+			}
+
+			if tc.wantBackupBody != nil {
+				require.NotNil(t, backupReq, "expected a request to %s", backupPath)
+				assert.Equal(t, http.MethodPost, backupReq.method)
+				assert.Equal(t, "Bearer tok-abc", backupReq.auth)
+				assert.Equal(t, tc.wantBackupBody, backupReq.body)
+			}
+
+			if tc.wantOpBody != nil {
+				require.NotNil(t, opReq, "expected a request to %s", operationPath)
+				assert.Equal(t, http.MethodPost, opReq.method)
+				assert.Equal(t, "Bearer tok-abc", opReq.auth)
+				assert.Equal(t, tc.wantOpBody, opReq.body)
+			}
+		})
+	}
+}
+
+// TestFleetAPIPostAPIOperationInvalidatesCache confirms a successful write
+// clears the cached SITE_CONFIG entry (which backs "/api/operation" reads
+// and GetGridCharging/GetGridExport), so a subsequent read is not served
+// stale data.
+func TestFleetAPIPostAPIOperationInvalidatesCache(t *testing.T) {
+	t.Parallel()
+
+	backupPath, operationPath, siteInfoPath := fleetAPIOperationPaths()
+
+	var siteInfoCalls int
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case siteInfoPath:
+			siteInfoCalls++
+			_, _ = w.Write(
+				[]byte(
+					`{"response":{"default_real_mode":"self_consumption","backup_reserve_percent":20}}`,
+				),
+			)
+		case backupPath, operationPath:
+			_ = recordRequest(t, r)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	srv := newTestServer(t, handler)
+	f := newAuthenticatedBackend(t, srv)
+
+	_, err := f.Poll(t.Context(), "/api/operation", false, false, false)
 	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"status": "success"}, res)
+	_, err = f.Poll(t.Context(), "/api/operation", false, false, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, siteInfoCalls, "second read should be served from cache")
+
+	_, err = f.Post(
+		t.Context(),
+		"/api/operation",
+		map[string]any{"real_mode": "backup"},
+		"",
+		false,
+		false,
+	)
+	require.NoError(t, err)
+
+	_, err = f.Poll(t.Context(), "/api/operation", false, false, false)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		2,
+		siteInfoCalls,
+		"the write should have invalidated the cached SITE_CONFIG entry",
+	)
 }
 
 func TestFleetAPIVitalsAndTimeRemaining(t *testing.T) {
@@ -238,18 +474,213 @@ func TestFleetAPIVitalsAndTimeRemaining(t *testing.T) {
 	assert.InDelta(t, 0.0, *remaining, 0.001)
 }
 
-func TestFleetAPISetGridChargingAndExport(t *testing.T) {
+// gridImportExportPath returns the URL path shared by SetGridCharging and
+// SetGridExport - both POST to the same Tesla endpoint with different body
+// fields, per docs/parity-matrix.md §4.
+func gridImportExportPath() string {
+	return "/api/1/energy_sites/" + testSiteID + "/grid_import_export"
+}
+
+// TestFleetAPISetGridCharging exercises SetGridCharging's real HTTP call:
+// POST .../grid_import_export with
+// {"disallow_charge_from_grid_with_solar_installed": <bool>} - note the
+// field name Tesla actually reads is the "disallow" flag, not a
+// "grid_charging" toggle; mode is forwarded to it verbatim.
+func TestFleetAPISetGridCharging(t *testing.T) {
 	t.Parallel()
 
-	f := fleetapi.New(testEmail, testCacheTTL, testTimeout, testSiteID, t.TempDir())
+	gridPath := gridImportExportPath()
 
-	res, err := f.SetGridCharging(t.Context(), true)
-	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"status": "success"}, res)
+	type testCase struct {
+		wantErrIs error
+		name      string
+		mode      bool
+		status    int
+	}
 
-	res, err = f.SetGridExport(t.Context(), "battery_ok")
+	cases := []testCase{
+		{name: "enabling charging sends true", mode: true},
+		{name: "disabling charging sends false", mode: false},
+		{
+			name:      "401 maps to ErrLogin",
+			mode:      true,
+			status:    http.StatusUnauthorized,
+			wantErrIs: backend.ErrLogin,
+		},
+		{
+			name:      "404 maps to ErrNotFound",
+			mode:      true,
+			status:    http.StatusNotFound,
+			wantErrIs: backend.ErrNotFound,
+		},
+		{
+			name: "429 maps to ErrRateLimited", mode: true,
+			status: http.StatusTooManyRequests, wantErrIs: backend.ErrRateLimited,
+		},
+		{
+			name: "500 maps to ErrUnexpectedStatus", mode: true,
+			status: http.StatusInternalServerError, wantErrIs: backend.ErrUnexpectedStatus,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var req *recordedRequest
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, gridPath, r.URL.Path)
+				rec := recordRequest(t, r)
+				req = &rec
+				if tc.status != 0 {
+					w.WriteHeader(tc.status)
+
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}
+			srv := newTestServer(t, handler)
+			f := newAuthenticatedBackend(t, srv)
+
+			res, err := f.SetGridCharging(t.Context(), tc.mode)
+
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, map[string]any{"status": "success"}, res)
+			}
+
+			require.NotNil(t, req)
+			assert.Equal(t, http.MethodPost, req.method)
+			assert.Equal(t, "Bearer tok-abc", req.auth)
+			assert.Equal(
+				t,
+				map[string]any{"disallow_charge_from_grid_with_solar_installed": tc.mode},
+				req.body,
+			)
+		})
+	}
+}
+
+// TestFleetAPISetGridExport exercises SetGridExport's real HTTP call: POST
+// .../grid_import_export with {"customer_preferred_export_rule": "<mode>"}.
+func TestFleetAPISetGridExport(t *testing.T) {
+	t.Parallel()
+
+	gridPath := gridImportExportPath()
+
+	type testCase struct {
+		wantErrIs error
+		name      string
+		mode      string
+		status    int
+	}
+
+	cases := []testCase{
+		{name: "battery_ok mode", mode: "battery_ok"},
+		{name: "pv_only mode", mode: "pv_only"},
+		{
+			name:      "401 maps to ErrLogin",
+			mode:      "battery_ok",
+			status:    http.StatusUnauthorized,
+			wantErrIs: backend.ErrLogin,
+		},
+		{
+			name:      "404 maps to ErrNotFound",
+			mode:      "battery_ok",
+			status:    http.StatusNotFound,
+			wantErrIs: backend.ErrNotFound,
+		},
+		{
+			name: "503 maps to ErrRateLimited", mode: "battery_ok",
+			status: http.StatusServiceUnavailable, wantErrIs: backend.ErrRateLimited,
+		},
+		{
+			name: "500 maps to ErrUnexpectedStatus", mode: "battery_ok",
+			status: http.StatusInternalServerError, wantErrIs: backend.ErrUnexpectedStatus,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var req *recordedRequest
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, gridPath, r.URL.Path)
+				rec := recordRequest(t, r)
+				req = &rec
+				if tc.status != 0 {
+					w.WriteHeader(tc.status)
+
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}
+			srv := newTestServer(t, handler)
+			f := newAuthenticatedBackend(t, srv)
+
+			res, err := f.SetGridExport(t.Context(), tc.mode)
+
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, map[string]any{"status": "success"}, res)
+			}
+
+			require.NotNil(t, req)
+			assert.Equal(t, http.MethodPost, req.method)
+			assert.Equal(t, "Bearer tok-abc", req.auth)
+			assert.Equal(t, map[string]any{"customer_preferred_export_rule": tc.mode}, req.body)
+		})
+	}
+}
+
+// TestFleetAPIGridImportExportInvalidatesCache confirms both SetGridCharging
+// and SetGridExport clear the cached SITE_CONFIG entry that GetGridCharging
+// and GetGridExport read through, so a re-read after a write is not served
+// stale data.
+func TestFleetAPIGridImportExportInvalidatesCache(t *testing.T) {
+	t.Parallel()
+
+	gridPath := gridImportExportPath()
+	_, _, siteInfoPath := fleetAPIOperationPaths()
+
+	var siteInfoCalls int
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case siteInfoPath:
+			siteInfoCalls++
+			_, _ = w.Write([]byte(`{"response":{"grid_charging":false}}`))
+		case gridPath:
+			_ = recordRequest(t, r)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	srv := newTestServer(t, handler)
+	f := newAuthenticatedBackend(t, srv)
+
+	_, err := f.GetGridCharging(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"status": "success"}, res)
+	_, err = f.GetGridCharging(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, siteInfoCalls, "second read should be served from cache")
+
+	_, err = f.SetGridCharging(t.Context(), true)
+	require.NoError(t, err)
+
+	_, err = f.GetGridCharging(t.Context())
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		2,
+		siteInfoCalls,
+		"SetGridCharging should have invalidated the cached SITE_CONFIG entry",
+	)
 }
 
 func TestFleetAPIClose(t *testing.T) {
@@ -330,7 +761,9 @@ func TestFleetAPIOperation(t *testing.T) {
 
 		handler := func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "/api/1/energy_sites/"+testSiteID+"/site_info", r.URL.Path)
-			_, _ = w.Write([]byte(`{"response":{"default_real_mode":"backup","backup_reserve_percent":55}}`))
+			_, _ = w.Write(
+				[]byte(`{"response":{"default_real_mode":"backup","backup_reserve_percent":55}}`),
+			)
 		}
 		srv := newTestServer(t, handler)
 		f := newAuthenticatedBackend(t, srv)
@@ -365,7 +798,9 @@ func TestFleetAPISiteInfo(t *testing.T) {
 	t.Parallel()
 
 	handler := func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"response":{"site_name":"FleetHouse","installation_time_zone":"UTC"}}`))
+		_, _ = w.Write(
+			[]byte(`{"response":{"site_name":"FleetHouse","installation_time_zone":"UTC"}}`),
+		)
 	}
 	srv := newTestServer(t, handler)
 	f := newAuthenticatedBackend(t, srv)
@@ -386,7 +821,11 @@ func TestFleetAPISiteInfoDefaults(t *testing.T) {
 
 	res, err := f.Poll(t.Context(), "/api/site_info", false, false, false)
 	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"site_name": "Powerwall", "timezone": "America/Los_Angeles"}, res)
+	assert.Equal(
+		t,
+		map[string]any{"site_name": "Powerwall", "timezone": "America/Los_Angeles"},
+		res,
+	)
 }
 
 func TestFleetAPIStatus(t *testing.T) {
@@ -396,7 +835,11 @@ func TestFleetAPIStatus(t *testing.T) {
 		t.Parallel()
 
 		handler := func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"response":{"id":"fleet-din","version":"2.0.0","installation_date":"2024-02-02"}}`))
+			_, _ = w.Write(
+				[]byte(
+					`{"response":{"id":"fleet-din","version":"2.0.0","installation_date":"2024-02-02"}}`,
+				),
+			)
 		}
 		srv := newTestServer(t, handler)
 		f := newAuthenticatedBackend(t, srv)
@@ -585,7 +1028,11 @@ func TestFleetAPIPowerAndFetchPower(t *testing.T) {
 	t.Parallel()
 
 	handler := func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"response":{"solar_power":5,"battery_power":6,"load_power":7,"grid_power":8}}`))
+		_, _ = w.Write(
+			[]byte(
+				`{"response":{"solar_power":5,"battery_power":6,"load_power":7,"grid_power":8}}`,
+			),
+		)
 	}
 	srv := newTestServer(t, handler)
 	f := newAuthenticatedBackend(t, srv)
@@ -648,55 +1095,58 @@ func (l *localRedirectTransport) RoundTrip(req *http.Request) (*http.Response, e
 //
 //nolint:paralleltest // subtest redirects the process-global http.DefaultTransport; must run sequentially
 func TestFleetAPIAuthenticateRefresh(t *testing.T) {
-	t.Run("refreshes an empty access token exactly once and persists it with 0600", func(t *testing.T) {
-		var tokenCalls int
-		handler := func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/oauth2/v3/token":
-				tokenCalls++
-				assert.NoError(t, r.ParseForm())
-				assert.Equal(t, "refresh_token", r.PostForm.Get("grant_type"))
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"access_token":  "at-fresh",
-					"refresh_token": "rt-abc",
-					"token_type":    "Bearer",
-					"expires_in":    28800,
-				})
-			case "/api/1/energy_sites/" + testSiteID + "/live_status":
-				assert.Equal(t, "Bearer at-fresh", r.Header.Get("Authorization"))
-				_, _ = w.Write([]byte(`{"response":{}}`))
-			default:
-				w.WriteHeader(http.StatusNotFound)
+	t.Run(
+		"refreshes an empty access token exactly once and persists it with 0600",
+		func(t *testing.T) {
+			var tokenCalls int
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/oauth2/v3/token":
+					tokenCalls++
+					assert.NoError(t, r.ParseForm())
+					assert.Equal(t, "refresh_token", r.PostForm.Get("grant_type"))
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"access_token":  "at-fresh",
+						"refresh_token": "rt-abc",
+						"token_type":    "Bearer",
+						"expires_in":    28800,
+					})
+				case "/api/1/energy_sites/" + testSiteID + "/live_status":
+					assert.Equal(t, "Bearer at-fresh", r.Header.Get("Authorization"))
+					_, _ = w.Write([]byte(`{"response":{}}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
 			}
-		}
-		srv := newTestServer(t, handler)
-		withRedirectedDefaultTransport(t, srv.Listener.Addr().String())
+			srv := newTestServer(t, handler)
+			withRedirectedDefaultTransport(t, srv.Listener.Addr().String())
 
-		dir := t.TempDir()
-		writeConfigFile(t, dir, map[string]any{"access_token": "", "fleet_api_url": srv.URL})
-		f := fleetapi.New(testEmail, testCacheTTL, testTimeout, testSiteID, dir)
+			dir := t.TempDir()
+			writeConfigFile(t, dir, map[string]any{"access_token": "", "fleet_api_url": srv.URL})
+			f := fleetapi.New(testEmail, testCacheTTL, testTimeout, testSiteID, dir)
 
-		require.NoError(t, f.Authenticate(t.Context()))
+			require.NoError(t, f.Authenticate(t.Context()))
 
-		_, err := f.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
-		require.NoError(t, err)
-		assert.Equal(t, 1, tokenCalls, "the token endpoint should be hit exactly once")
+			_, err := f.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
+			require.NoError(t, err)
+			assert.Equal(t, 1, tokenCalls, "the token endpoint should be hit exactly once")
 
-		cfgPath := filepath.Join(dir, fleetapi.ConfigFile)
-		info, statErr := os.Stat(cfgPath)
-		require.NoError(t, statErr)
-		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+			cfgPath := filepath.Join(dir, fleetapi.ConfigFile)
+			info, statErr := os.Stat(cfgPath)
+			require.NoError(t, statErr)
+			assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 
-		b, readErr := os.ReadFile(cfgPath)
-		require.NoError(t, readErr)
-		var cfgData map[string]any
-		require.NoError(t, json.Unmarshal(b, &cfgData))
-		assert.Equal(t, "at-fresh", cfgData["access_token"])
+			b, readErr := os.ReadFile(cfgPath)
+			require.NoError(t, readErr)
+			var cfgData map[string]any
+			require.NoError(t, json.Unmarshal(b, &cfgData))
+			assert.Equal(t, "at-fresh", cfgData["access_token"])
 
-		// A second call should reuse the now-valid cached token.
-		_, err = f.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
-		require.NoError(t, err)
-		assert.Equal(t, 1, tokenCalls, "a valid cached token must not be refreshed again")
-	})
+			// A second call should reuse the now-valid cached token.
+			_, err = f.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
+			require.NoError(t, err)
+			assert.Equal(t, 1, tokenCalls, "a valid cached token must not be refreshed again")
+		},
+	)
 }

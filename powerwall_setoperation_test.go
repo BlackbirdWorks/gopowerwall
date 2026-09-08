@@ -254,9 +254,9 @@ func TestGetReserveForcedBypassesCacheAndScales(t *testing.T) {
 	require.NoError(t, err)
 	gw.setState(50, "self_consumption")
 
-	got := pw.GetReserveForced(t.Context())
-	require.NotNil(t, got)
-	assert.InDelta(t, calc.ScaleBatteryLevel(50), *got, 0.001)
+	got, err := pw.GetReserveForced(t.Context())
+	require.NoError(t, err)
+	assert.InDelta(t, calc.ScaleBatteryLevel(50), got, 0.001)
 }
 
 // TestSetOperationNonLocalModeSkipsBackfill guards the critical subtlety of
@@ -289,7 +289,11 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 					gopowerwall.WithCloudMode(true),
 					gopowerwall.WithAuthPath(t.TempDir()),
 				)
-				require.NoError(t, err)
+				// No auth file exists in this fresh temp dir, so the
+				// connection attempt itself fails; New still returns a
+				// usable, disconnected *Powerwall alongside the wrapped
+				// ConnectError.
+				require.Error(t, err)
 				require.False(t, pw.IsLocal())
 
 				return pw
@@ -304,7 +308,7 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 					gopowerwall.WithFleetAPI(true),
 					gopowerwall.WithAuthPath(t.TempDir()),
 				)
-				require.NoError(t, err)
+				require.Error(t, err)
 				require.False(t, pw.IsLocal())
 
 				return pw

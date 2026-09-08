@@ -58,8 +58,16 @@ func main() {
 	}
 
 	fmt.Println("mode:", pw.Mode()) // "local"
-	fmt.Println("battery level:", *pw.Level(ctx, true))
-	fmt.Println("grid status:", pw.GridStatus(ctx))
+	level, err := pw.LevelScaled(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("battery level:", level)
+	gridStatus, err := pw.GridStatusString(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("grid status:", gridStatus)
 	fmt.Printf("power: %+v\n", pw.Power(ctx))
 
 	// Typed accessors decode straight into models.* structs instead of any/map[string]any.
@@ -71,18 +79,20 @@ func main() {
 }
 ```
 
-`New` attempts a connection synchronously; a failed connection is not a returned error —
-check `pw.IsConnected()` afterward, matching pypowerwall's own "connect and check" pattern.
-Every data-fetching method takes `ctx` as its first argument, so callers control
-cancellation, timeouts, and (via [`pkgs/logger`](../pkgs/logger)) how much gets logged for
-that call.
+`New` attempts a connection synchronously; a failed connection still returns a usable,
+non-nil `*Powerwall`, now paired with a `*gopowerwall.ConnectError` rather than a silently
+discarded failure. Most callers can ignore that error entirely and just check
+`pw.IsConnected()` afterward, matching pypowerwall's own "connect and check" pattern; use
+`errors.As` against the error if you want to know *why* the connection failed. Every
+data-fetching method takes `ctx` as its first argument, so callers control cancellation,
+timeouts, and (via [`pkgs/logger`](../pkgs/logger)) how much gets logged for that call.
 
 ### Reading and writing settings
 
 ```go
 // Read
-reserve := pw.GetReserve(ctx, false) // *float64, nil if unavailable
-mode := pw.GetMode(ctx)              // *string
+reserve, err := pw.GetReserve(ctx) // (float64, error)
+mode, err := pw.GetMode(ctx)       // (string, error)
 
 // Write (local mode requires no extra scope; cloud/fleetapi cap reserve at 80%)
 if _, err := pw.SetReserve(ctx, 20); err != nil {

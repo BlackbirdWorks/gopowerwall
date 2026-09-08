@@ -58,23 +58,42 @@ func (c *GetCmd) Run(cmdCtx *Context) error {
 	}
 }
 
+// orNil converts a (value, error) pair from a gopowerwall client accessor
+// into an any that is nil on error, so printText/printCSV/printJSON below -
+// unchanged since before the client's API redesign - keep rendering
+// "unavailable" fields as "N/A" via formatMetricValue's existing nil check
+// rather than needing their own per-field error handling.
+func orNil[T any](v T, err error) any {
+	if err != nil {
+		return nil
+	}
+
+	return v
+}
+
 func collectMetrics(ctx context.Context, pw *gopowerwall.Powerwall) map[string]any {
+	gridStatus, gridStatusErr := pw.GridStatusString(ctx)
+	if gridStatusErr != nil {
+		gridStatus = "Unknown"
+	}
+	timeRemaining, timeRemainingErr := pw.GetTimeRemaining(ctx)
+
 	return map[string]any{
-		"site":             pw.SiteName(ctx),
-		"site_id":          pw.SiteName(ctx),
-		"din":              pw.Din(ctx),
-		"firmware":         pw.Version(ctx),
-		"mode":             pw.GetMode(ctx),
-		"reserve":          pw.GetReserve(ctx, false),
-		"soc":              pw.Level(ctx, true),
-		"grid_status":      pw.GridStatus(ctx, gopowerwall.GridStatusString),
-		"grid":             pw.Grid(ctx),
-		"home":             pw.Home(ctx),
-		"battery":          pw.Battery(ctx),
-		"solar":            pw.Solar(ctx),
-		"grid_charging":    pw.GetGridCharging(ctx),
-		"grid_export_mode": pw.GetGridExport(ctx),
-		"time_remaining":   pw.GetTimeRemaining(ctx),
+		"site":             orNil(pw.SiteName(ctx)),
+		"site_id":          orNil(pw.SiteName(ctx)),
+		"din":              orNil(pw.Din(ctx)),
+		"firmware":         orNil(pw.Version(ctx)),
+		"mode":             orNil(pw.GetMode(ctx)),
+		"reserve":          orNil(pw.GetReserve(ctx)),
+		"soc":              orNil(pw.LevelScaled(ctx)),
+		"grid_status":      gridStatus,
+		"grid":             orNil(pw.Grid(ctx)),
+		"home":             orNil(pw.Home(ctx)),
+		"battery":          orNil(pw.Battery(ctx)),
+		"solar":            orNil(pw.Solar(ctx)),
+		"grid_charging":    orNil(pw.GetGridCharging(ctx)),
+		"grid_export_mode": orNil(pw.GetGridExport(ctx)),
+		"time_remaining":   orNil(timeRemaining.Hours(), timeRemainingErr),
 	}
 }
 

@@ -127,8 +127,8 @@ func (s *Server) dispatchControl(ctx context.Context, w http.ResponseWriter, act
 
 func (s *Server) handleControlReserve(ctx context.Context, w http.ResponseWriter, value, mode string) {
 	if value == "" {
-		res := s.PW.GetReserve(ctx, false, false)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyReserve: res})
+		res, err := s.PW.GetReserve(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyReserve: orNil(res, err)})
 
 		return
 	}
@@ -173,8 +173,8 @@ func (s *Server) handleControlReserve(ctx context.Context, w http.ResponseWriter
 
 func (s *Server) handleControlMode(ctx context.Context, w http.ResponseWriter, value, levelStr string) {
 	if value == "" {
-		res := s.PW.GetMode(ctx)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyMode: res})
+		res, err := s.PW.GetMode(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyMode: orNil(res, err)})
 
 		return
 	}
@@ -219,8 +219,8 @@ func (s *Server) handleControlMode(ctx context.Context, w http.ResponseWriter, v
 
 func (s *Server) handleControlGridCharging(ctx context.Context, w http.ResponseWriter, value string) {
 	if value == "" {
-		gc := s.PW.GetGridCharging(ctx)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyGridCharging: gc})
+		gc, err := s.PW.GetGridCharging(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyGridCharging: orNil(gc, err)})
 
 		return
 	}
@@ -246,8 +246,8 @@ func (s *Server) handleControlGridCharging(ctx context.Context, w http.ResponseW
 
 func (s *Server) handleControlGridExport(ctx context.Context, w http.ResponseWriter, value string) {
 	if value == "" {
-		ge := s.PW.GetGridExport(ctx)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyGridExport: ge})
+		ge, err := s.PW.GetGridExport(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyGridExport: orNil(ge, err)})
 
 		return
 	}

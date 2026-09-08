@@ -101,19 +101,3 @@ func CoerceTEDAPIApiVersion(s string) TEDAPIApiVersion {
 // in Watts for the site (grid) meter, solar, battery, and load channels, as
 // returned by [Powerwall.Power].
 type PowerData = models.PowerSummary
-
-// GridStatusOutput selects the return format of [Powerwall.GridStatus].
-type GridStatusOutput string
-
-const (
-	// GridStatusString requests GridStatus return a human-readable string,
-	// either "Connected" or "Transition" - the default when no
-	// GridStatusOutput is passed to GridStatus.
-	GridStatusString GridStatusOutput = "string"
-	// GridStatusJSON requests GridStatus return the grid status encoded as a
-	// JSON string (or "{}" if the value could not be retrieved).
-	GridStatusJSON GridStatusOutput = "json"
-	// GridStatusNumeric requests GridStatus return 1 when the grid is
-	// connected and 0 otherwise, matching pypowerwall's numeric output mode.
-	GridStatusNumeric GridStatusOutput = "numeric"
-)

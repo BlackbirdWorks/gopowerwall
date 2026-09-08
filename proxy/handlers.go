@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
 
@@ -51,25 +50,25 @@ func (s *Server) respond(ctx context.Context, w http.ResponseWriter, reqPath, co
 func (s *Server) lookupPWFacingSensor(ctx context.Context, sub string) (any, bool) {
 	switch sub {
 	case "level":
-		return map[string]any{"level": s.PW.Level(ctx, false)}, true
+		return map[string]any{"level": orNil(s.PW.Level(ctx))}, true
 	case "power":
 		return s.PW.Power(ctx), true
 	case "site":
-		return s.PW.Site(ctx, true), true
+		return orNil(s.PW.SiteReading(ctx)), true
 	case "solar":
-		return s.PW.Solar(ctx, true), true
+		return orNil(s.PW.SolarReading(ctx)), true
 	case "battery":
-		return s.PW.Battery(ctx, true), true
+		return orNil(s.PW.BatteryReading(ctx)), true
 	case "battery_blocks":
 		return s.PW.BatteryBlocks(ctx), true
 	case "load":
-		return s.PW.Load(ctx, true), true
+		return orNil(s.PW.LoadReading(ctx)), true
 	case "grid":
-		return s.PW.Grid(ctx, true), true
+		return orNil(s.PW.GridReading(ctx)), true
 	case "home":
-		return s.PW.Home(ctx, true), true
+		return orNil(s.PW.HomeReading(ctx)), true
 	case "aggregates":
-		return s.PW.Poll(ctx, "/api/meters/aggregates"), true
+		return orNil(s.PW.Aggregates(ctx)), true
 	default:
 		return nil, false
 	}
@@ -84,21 +83,26 @@ func (s *Server) lookupPWFacingSystem(ctx context.Context, sub string) (any, boo
 	case "temps":
 		return s.PW.Temps(ctx), true
 	case "strings":
-		return s.PW.Strings(ctx, false), true
+		return s.PW.Strings(ctx), true
 	case "din":
-		return map[string]any{"din": s.PW.Din(ctx)}, true
+		return map[string]any{"din": orNil(s.PW.Din(ctx))}, true
 	case keyUptime:
-		return map[string]any{keyUptime: s.PW.Uptime(ctx)}, true
+		return map[string]any{keyUptime: orNil(s.PW.Uptime(ctx))}, true
 	case keyVersion:
-		return map[string]any{keyVersion: s.PW.Version(ctx)}, true
+		return map[string]any{keyVersion: orNil(s.PW.Version(ctx))}, true
 	case keyStatus:
-		return s.PW.Status(ctx), true
+		return orNil(s.PW.Status(ctx)), true
 	case "system_status":
 		res, _ := s.PW.SystemStatus(ctx)
 
 		return res, true
 	case "grid_status":
-		return s.PW.GridStatus(ctx, gopowerwall.GridStatusString), true
+		gs, err := s.PW.GridStatusString(ctx)
+		if err != nil {
+			gs = "Unknown"
+		}
+
+		return gs, true
 	default:
 		return nil, false
 	}
@@ -107,17 +111,19 @@ func (s *Server) lookupPWFacingSystem(ctx context.Context, sub string) (any, boo
 func (s *Server) lookupPWFacingControl(ctx context.Context, sub string) (any, bool) {
 	switch sub {
 	case keySiteName:
-		return map[string]any{keySiteName: s.PW.SiteName(ctx)}, true
+		return map[string]any{keySiteName: orNil(s.PW.SiteName(ctx))}, true
 	case "alerts":
-		return map[string]any{"alerts": s.PW.Alerts(ctx, false)}, true
+		return map[string]any{"alerts": s.PW.Alerts(ctx)}, true
 	case "is_connected":
 		return map[string]any{"is_connected": s.PW.IsConnected()}, true
 	case "get_reserve":
-		return map[string]any{keyReserve: s.PW.GetReserve(ctx, false)}, true
+		return map[string]any{keyReserve: orNil(s.PW.GetReserve(ctx))}, true
 	case "get_mode":
-		return map[string]any{keyMode: s.PW.GetMode(ctx)}, true
+		return map[string]any{keyMode: orNil(s.PW.GetMode(ctx))}, true
 	case "get_time_remaining":
-		return map[string]any{"time_remaining": s.PW.GetTimeRemaining(ctx)}, true
+		tr, err := s.PW.GetTimeRemaining(ctx)
+
+		return map[string]any{"time_remaining": orNil(tr.Hours(), err)}, true
 	default:
 		return nil, false
 	}
@@ -144,16 +150,10 @@ func (s *Server) handlePWFacing(ctx context.Context, w http.ResponseWriter, reqP
 
 func (s *Server) renderIndexHTML(ctx context.Context, content []byte) []byte {
 	htmlStr := string(content)
-	status := s.PW.Status(ctx)
-	ver := ""
-	hash := ""
-	if statusMap, okStatus := status.(map[string]any); okStatus && statusMap != nil {
-		if v, okV := statusMap[keyVersion].(string); okV {
-			ver = v
-		}
-		if h, okH := statusMap["git_hash"].(string); okH {
-			hash = h
-		}
+	ver, hash := "", ""
+	if st, err := s.PW.Status(ctx); err == nil {
+		ver = st.Version
+		hash = st.GitHash
 	}
 	htmlStr = strings.ReplaceAll(htmlStr, "{VERSION}", ver)
 	htmlStr = strings.ReplaceAll(htmlStr, "{HASH}", hash)
@@ -267,6 +267,8 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
+	siteName, siteNameErr := s.PW.SiteName(ctx)
+
 	stats := map[string]any{
 		"pypowerwall": fmt.Sprintf("%s Proxy %s", version.Version, Build),
 		"mode":        s.PW.Mode(),
@@ -280,7 +282,7 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 		"clear":       clearTS,
 		"uptime":      uptime,
 		"mem":         m.Alloc / kiloByte,
-		keySiteName:   s.PW.SiteName(ctx),
+		keySiteName:   orNil(siteName, siteNameErr),
 		"cloudmode":   s.PW.IsCloud(),
 		"fleetapi":    s.PW.IsFleetAPI(),
 		"tedapi":      s.PW.IsTEDAPI(),

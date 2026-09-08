@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
@@ -16,7 +17,6 @@ import (
 
 var (
 	errNoData       = errors.New("no data")
-	errInvalidJSON  = errors.New("invalid json")
 	errNoSOE        = errors.New("no soe")
 	errNoLevel      = errors.New("no level")
 	errNoGridStatus = errors.New("no grid status")
@@ -25,93 +25,28 @@ var (
 	errNoResponse   = errors.New("no response")
 )
 
-func (s *Server) generateAggregates(ctx context.Context) (string, error) {
-	raw, ok := s.safePWCall(ctx, "/aggregates", func() (any, error) {
-		res := s.PW.Poll(ctx, "/api/meters/aggregates")
-		if res == nil {
-			return nil, errNoData
-		}
+// aggregatesOptions builds the [gopowerwall.AggregatesOption] values
+// carrying this server's configured corrections, so every route deriving
+// power figures from meter data (aggregates, CSV, JSON) applies the same
+// site-zero threshold and negative-solar correction.
+func (s *Server) aggregatesOptions() []gopowerwall.AggregatesOption {
+	return []gopowerwall.AggregatesOption{
+		gopowerwall.WithSiteZeroThreshold(float64(s.Config.SiteZeroThreshold)),
+		gopowerwall.WithNegativeSolarCorrection(!s.Config.NegSolar),
+	}
+}
 
-		return res, nil
+func (s *Server) generateAggregates(ctx context.Context) (string, error) {
+	agg, ok := s.safePWCall(ctx, "/aggregates", func() (any, error) {
+		return s.PW.Aggregates(ctx, s.aggregatesOptions()...)
 	})
-	if !ok || raw == nil {
+	if !ok {
 		return "", errNoData
 	}
-
-	var agg map[string]any
-	if m, isMap := raw.(map[string]any); isMap {
-		agg = m
-	} else if str, isStr := raw.(string); isStr {
-		_ = json.Unmarshal([]byte(str), &agg)
-	}
-	if agg == nil {
-		return "", errInvalidJSON
-	}
-
-	s.applySiteZeroThreshold(ctx, agg)
-	s.applyNegativeSolarCorrection(ctx, agg)
 
 	b, err := json.Marshal(agg)
 
 	return string(b), err
-}
-
-func (s *Server) applySiteZeroThreshold(_ context.Context, agg map[string]any) {
-	if s.Config.SiteZeroThreshold <= 0 {
-		return
-	}
-	site, ok := agg["site"].(map[string]any)
-	if !ok {
-		return
-	}
-	ip, hasIP := site["instant_power"].(float64)
-	thresh := float64(s.Config.SiteZeroThreshold)
-	if hasIP && ip >= -thresh && ip <= thresh {
-		site["instant_power"] = 0.0
-	}
-}
-
-func (s *Server) applyNegativeSolarCorrection(_ context.Context, agg map[string]any) {
-	if s.Config.NegSolar {
-		return
-	}
-	solar, ok := agg["solar"].(map[string]any)
-	if !ok {
-		return
-	}
-	ip, hasIP := solar["instant_power"].(float64)
-	if !hasIP || ip >= 0 {
-		return
-	}
-
-	if load, hasLoad := agg["load"].(map[string]any); hasLoad {
-		if lip, okL := load["instant_power"].(float64); okL {
-			load["instant_power"] = lip - ip
-		}
-	}
-	solar["instant_power"] = 0.0
-}
-
-func (s *Server) extractCSVMeters(_ context.Context, rawAgg any) (float64, float64, float64, float64) {
-	agg, ok := rawAgg.(map[string]any)
-	if !ok {
-		return 0, 0, 0, 0
-	}
-
-	extractVal := func(key string) float64 {
-		m, okM := agg[key].(map[string]any)
-		if !okM {
-			return 0
-		}
-		v, okV := m["instant_power"].(float64)
-		if !okV {
-			return 0
-		}
-
-		return v
-	}
-
-	return extractVal("site"), extractVal("solar"), extractVal("battery"), extractVal("load")
 }
 
 func (s *Server) formatV2CSVRow(
@@ -123,11 +58,8 @@ func (s *Server) formatV2CSVRow(
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel,GridStatus,Reserve\n")
 	}
-	gridStatus, _ := s.PW.GridStatus(ctx, gopowerwall.GridStatusNumeric).(int)
-	reserve := 0.0
-	if r := s.PW.GetReserve(ctx, false); r != nil {
-		reserve = *r
-	}
+	gridStatus, _ := s.PW.GridStatusNumeric(ctx)
+	reserve, _ := s.PW.GetReserve(ctx)
 	fmt.Fprintf(&sb, "%0.2f,%0.2f,%0.2f,%0.2f,%0.2f,%d,%d\n",
 		grid, home, solar, battery, batLevel, gridStatus, int(reserve))
 
@@ -150,36 +82,14 @@ func (s *Server) formatV1CSVRow(
 }
 
 func (s *Server) generateCSV(ctx context.Context, isV2, includeHeaders bool) (string, error) {
-	rawAgg, _ := s.safePWCall(ctx, "/aggregates", func() (any, error) {
-		res := s.PW.Poll(ctx, "/api/meters/aggregates")
-		if res == nil {
-			return nil, errNoData
-		}
-
-		return res, nil
-	})
-
-	grid, solar, battery, home := s.extractCSVMeters(ctx, rawAgg)
-
-	if !s.Config.NegSolar && solar < 0 {
-		home -= solar
-		solar = 0
-	}
-	thresh := float64(s.Config.SiteZeroThreshold)
-	if s.Config.SiteZeroThreshold > 0 && grid >= -thresh && grid <= thresh {
-		grid = 0
-	}
-
-	batLevel := 0.0
-	if lvl := s.PW.Level(ctx, false); lvl != nil {
-		batLevel = *lvl
-	}
+	snap := s.PW.Snapshot(ctx, s.aggregatesOptions()...)
+	batLevel, _ := s.PW.Level(ctx)
 
 	if isV2 {
-		return s.formatV2CSVRow(ctx, includeHeaders, grid, home, solar, battery, batLevel), nil
+		return s.formatV2CSVRow(ctx, includeHeaders, snap.Grid, snap.Home, snap.Solar, snap.Battery, batLevel), nil
 	}
 
-	return s.formatV1CSVRow(ctx, includeHeaders, grid, home, solar, battery, batLevel), nil
+	return s.formatV1CSVRow(ctx, includeHeaders, snap.Grid, snap.Home, snap.Solar, snap.Battery, batLevel), nil
 }
 
 func (s *Server) generateFreq(ctx context.Context) (string, error) {
@@ -200,34 +110,27 @@ func (s *Server) generateFreq(ctx context.Context) (string, error) {
 		fcv[fmt.Sprintf("PW%d_i_out", pNum)] = block.IOut
 	}
 
-	rawVitals, _ := s.PW.Vitals(ctx)
-	invIdx := 1
-	for device, d := range rawVitals.Devices {
-		if strings.HasPrefix(device, "TEPINV") {
-			fcv[fmt.Sprintf("PW%d_name", invIdx)] = device
-			fcv[fmt.Sprintf("PW%d_PINV_Fout", invIdx)] = d["PINV_Fout"]
-			fcv[fmt.Sprintf("PW%d_PINV_VSplit1", invIdx)] = d["PINV_VSplit1"]
-			fcv[fmt.Sprintf("PW%d_PINV_VSplit2", invIdx)] = d["PINV_VSplit2"]
-			invIdx++
-		}
-		if strings.HasPrefix(device, "TESYNC") || strings.HasPrefix(device, "TEMSA") {
-			for k, v := range d {
-				if strings.HasPrefix(k, "ISLAND") || strings.HasPrefix(k, "METER") {
-					fcv[k] = v
-				}
-			}
-		}
+	freq := s.PW.FrequencyView(ctx)
+	for invIdx, inv := range freq.Inverters {
+		pNum := invIdx + 1
+		fcv[fmt.Sprintf("PW%d_name", pNum)] = inv.Device
+		fcv[fmt.Sprintf("PW%d_PINV_Fout", pNum)] = inv.Fout
+		fcv[fmt.Sprintf("PW%d_PINV_VSplit1", pNum)] = inv.VSplit1
+		fcv[fmt.Sprintf("PW%d_PINV_VSplit2", pNum)] = inv.VSplit2
 	}
-	fcv["grid_status"] = s.PW.GridStatus(ctx, gopowerwall.GridStatusNumeric)
+	maps.Copy(fcv, freq.SyncMeterFields)
+
+	gridStatus, _ := s.PW.GridStatusNumeric(ctx)
+	fcv["grid_status"] = gridStatus
 	b, err := json.Marshal(fcv)
 
 	return string(b), err
 }
 
 func (s *Server) generatePOD(ctx context.Context) (string, error) {
+	view := s.PW.PODView(ctx)
 	pod := make(map[string]any)
-	rawSys, _ := s.PW.SystemStatus(ctx)
-	for idx, block := range rawSys.BatteryBlocks {
+	for idx, block := range view.Blocks {
 		prefix := fmt.Sprintf("PW%d_", idx+1)
 		pod[prefix+"name"] = nil
 		pod[prefix+"POD_ActiveHeating"] = nil
@@ -260,62 +163,35 @@ func (s *Server) generatePOD(ctx context.Context) (string, error) {
 		pod[prefix+"OpSeqState"] = block.OpSeqState
 		pod[prefix+keyVersion] = block.Version
 	}
-	pod["nominal_full_pack_energy"] = rawSys.NominalFullPackEnergy
-	pod["nominal_energy_remaining"] = rawSys.NominalEnergyRemaining
-	pod["time_remaining_hours"] = s.PW.GetTimeRemaining(ctx)
-	pod["backup_reserve_percent"] = s.PW.GetReserve(ctx, false)
+	pod["nominal_full_pack_energy"] = view.NominalFullPackEnergy
+	pod["nominal_energy_remaining"] = view.NominalEnergyRemaining
+	pod["time_remaining_hours"] = view.TimeRemainingHours
+	pod["backup_reserve_percent"] = view.BackupReservePercent
 	b, err := json.Marshal(pod)
 
 	return string(b), err
 }
 
 func (s *Server) generateJSON(ctx context.Context) (string, error) {
-	pwr := s.PW.Power(ctx)
-	grid := pwr.Grid
-	solar := pwr.Solar
-	battery := pwr.Battery
-	home := pwr.Home
+	snap := s.PW.Snapshot(ctx, s.aggregatesOptions()...)
 
-	if !s.Config.NegSolar && solar < 0 {
-		home -= solar
-		solar = 0
+	gridStatusNumeric := 0
+	if snap.GridConnected {
+		gridStatusNumeric = 1
 	}
-	thresh := float64(s.Config.SiteZeroThreshold)
-	if s.Config.SiteZeroThreshold > 0 && grid >= -thresh && grid <= thresh {
-		grid = 0
-	}
-
-	batLevel := 0.0
-	if lvl := s.PW.Level(ctx, false); lvl != nil {
-		batLevel = *lvl
-	}
-	gridStatus, _ := s.PW.GridStatus(ctx, gopowerwall.GridStatusNumeric).(int)
-	reserve := 0.0
-	if r := s.PW.GetReserve(ctx, false); r != nil {
-		reserve = *r
-	}
-	timeRemaining := 0.0
-	if tr := s.PW.GetTimeRemaining(ctx); tr != nil {
-		timeRemaining = *tr
-	}
-
-	rawSys, _ := s.PW.SystemStatus(ctx)
-	fullEnergy := rawSys.NominalFullPackEnergy
-	energyRemaining := rawSys.NominalEnergyRemaining
-	rawStrings := s.PW.Strings(ctx, false)
 
 	out := map[string]any{
-		"grid":                 grid,
-		"home":                 home,
-		"solar":                solar,
-		"battery":              battery,
-		"soe":                  batLevel,
-		"grid_status":          gridStatus,
-		keyReserve:             reserve,
-		"time_remaining_hours": timeRemaining,
-		"full_pack_energy":     fullEnergy,
-		"energy_remaining":     energyRemaining,
-		"strings":              rawStrings,
+		"grid":                 snap.Grid,
+		"home":                 snap.Home,
+		"solar":                snap.Solar,
+		"battery":              snap.Battery,
+		"soe":                  snap.BatteryLevel,
+		"grid_status":          gridStatusNumeric,
+		keyReserve:             snap.Reserve,
+		"time_remaining_hours": snap.TimeRemaining.Hours(),
+		"full_pack_energy":     snap.FullPackEnergy,
+		"energy_remaining":     snap.EnergyRemaining,
+		"strings":              snap.Strings,
 	}
 	b, err := json.Marshal(out)
 
@@ -346,12 +222,12 @@ func (s *Server) handleCoreAPIRoutes(ctx context.Context, w http.ResponseWriter,
 
 	case "/api/system_status/soe":
 		raw, ok := s.safePWCall(ctx, "/api/system_status/soe", func() (any, error) {
-			lvl := s.PW.Level(ctx, true)
-			if lvl == nil {
+			lvl, err := s.PW.LevelScaled(ctx)
+			if err != nil {
 				return nil, errNoLevel
 			}
 
-			return fmt.Sprintf(`{"percentage": %v}`, *lvl), nil
+			return fmt.Sprintf(`{"percentage": %v}`, lvl), nil
 		})
 		str, _ := raw.(string)
 		s.respond(ctx, w, reqPath, "application/json", str, ok && str != "")
@@ -428,7 +304,7 @@ func (s *Server) handleVitals(ctx context.Context, w http.ResponseWriter, reqPat
 func (s *Server) handleStrings(ctx context.Context, w http.ResponseWriter, reqPath string) {
 	msg, ok := s.cachedRouteHandler(ctx, "/strings", func(ctx context.Context) (string, error) {
 		raw, _ := s.safePWCall(ctx, "/strings", func() (any, error) {
-			v := s.PW.Strings(ctx, true)
+			v := s.PW.Strings(ctx)
 			b, err := json.Marshal(v)
 			if err != nil {
 				return nil, err
@@ -624,8 +500,8 @@ func (s *Server) generatePWAlerts(ctx context.Context) (string, error) {
 }
 
 func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) {
-	ver := s.PW.Version(ctx)
-	if ver == nil || ver == "" {
+	verStr, err := s.PW.Version(ctx)
+	if err != nil || verStr == "" {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			keyVersion: "SolarOnly",
 			"vint":     0,
@@ -633,7 +509,6 @@ func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) 
 
 		return
 	}
-	verStr := fmt.Sprintf("%v", ver)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		keyVersion: verStr,
 		"vint":     version.ParseVersion(verStr),
@@ -660,17 +535,17 @@ func (s *Server) handleTedapiRoute(ctx context.Context, w http.ResponseWriter, r
 func (s *Server) handleControlGetRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
 	switch {
 	case strings.HasPrefix(reqPath, "/control/reserve"):
-		res := s.PW.GetReserve(ctx, false)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyReserve: res})
+		res, err := s.PW.GetReserve(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyReserve: orNil(res, err)})
 	case strings.HasPrefix(reqPath, "/control/mode"):
-		res := s.PW.GetMode(ctx)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyMode: res})
+		res, err := s.PW.GetMode(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyMode: orNil(res, err)})
 	case strings.HasPrefix(reqPath, "/control/grid_charging"):
-		res := s.PW.GetGridCharging(ctx)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyGridCharging: res})
+		res, err := s.PW.GetGridCharging(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyGridCharging: orNil(res, err)})
 	case strings.HasPrefix(reqPath, "/control/grid_export"):
-		res := s.PW.GetGridExport(ctx)
-		_ = json.NewEncoder(w).Encode(map[string]any{keyGridExport: res})
+		res, err := s.PW.GetGridExport(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyGridExport: orNil(res, err)})
 	case strings.HasPrefix(reqPath, "/control/max_backup"):
 		if !s.PW.IsTEDAPI() {
 			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "max_backup requires v1r LAN transport"})

@@ -31,7 +31,9 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		gopowerwall.WithPassword("test"),
 		gopowerwall.WithCloudMode(false),
 	)
-	require.NoError(t, err)
+	var connectErr *gopowerwall.ConnectError
+	require.ErrorAs(t, err, &connectErr)
+	require.NotNil(t, pw)
 	require.False(t, pw.IsConnected())
 
 	type testCase struct {
@@ -48,10 +50,11 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 			},
 		},
 		{
-			name: "Level returns nil",
+			name: "Level returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Level(t.Context()))
+				_, callErr := pw.Level(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
@@ -64,45 +67,51 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 			},
 		},
 		{
-			name: "Site verbose returns nil",
+			name: "SiteReading returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Site(t.Context(), true))
+				_, callErr := pw.SiteReading(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "Solar verbose returns nil",
+			name: "SolarReading returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Solar(t.Context(), true))
+				_, callErr := pw.SolarReading(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "Battery verbose returns nil",
+			name: "BatteryReading returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Battery(t.Context(), true))
+				_, callErr := pw.BatteryReading(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "Load verbose returns nil",
+			name: "LoadReading returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Load(t.Context(), true))
+				_, callErr := pw.LoadReading(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "Grid verbose returns nil",
+			name: "GridReading returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Grid(t.Context(), true))
+				_, callErr := pw.GridReading(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "Home verbose returns nil",
+			name: "HomeReading returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Home(t.Context(), true))
+				_, callErr := pw.HomeReading(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
@@ -123,59 +132,67 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 			},
 		},
 		{
-			name: "Din returns nil",
+			name: "Din returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Din(t.Context()))
+				_, callErr := pw.Din(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "Uptime returns nil",
+			name: "Uptime returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.Uptime(t.Context()))
+				_, callErr := pw.Uptime(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "SiteName returns nil",
+			name: "SiteName returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.SiteName(t.Context()))
+				_, callErr := pw.SiteName(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "GetTimeRemaining returns nil",
+			name: "GetTimeRemaining returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.GetTimeRemaining(t.Context()))
+				_, callErr := pw.GetTimeRemaining(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "GetReserve returns nil",
+			name: "GetReserve returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.GetReserve(t.Context()))
+				_, callErr := pw.GetReserve(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "GetMode returns nil",
+			name: "GetMode returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.GetMode(t.Context()))
+				_, callErr := pw.GetMode(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "GetGridCharging returns nil",
+			name: "GetGridCharging returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.GetGridCharging(t.Context()))
+				_, callErr := pw.GetGridCharging(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 		{
-			name: "GetGridExport returns nil",
+			name: "GetGridExport returns an error",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				assert.Nil(t, pw.GetGridExport(t.Context()))
+				_, callErr := pw.GetGridExport(t.Context())
+				assert.Error(t, callErr)
 			},
 		},
 	} {

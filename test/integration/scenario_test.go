@@ -8,8 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blackbirdworks/gopowerwall"
 )
 
 // requireGridStatus asserts the gateway's grid_status against a freshly
@@ -56,16 +54,24 @@ func TestScenarios(t *testing.T) {
 		requireGridStatus(t, sim, "SystemIslandedActive")
 
 		pwDown := newLocalPowerwall(t, sim)
-		assert.Equal(t, "Transition", pwDown.GridStatus(t.Context(), gopowerwall.GridStatusString))
-		assert.Equal(t, 0, pwDown.GridStatus(t.Context(), gopowerwall.GridStatusNumeric))
+		downStr, err := pwDown.GridStatusString(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, "Transition", downStr)
+		downNum, err := pwDown.GridStatusNumeric(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 0, downNum)
 
 		// Toggle back so later subtests in this file start from "grid up".
 		sim.triggerControl(t, "/test/toggle-grid")
 		requireGridStatus(t, sim, "SystemGridConnected")
 
 		pwUp := newLocalPowerwall(t, sim)
-		assert.Equal(t, "Connected", pwUp.GridStatus(t.Context(), gopowerwall.GridStatusString))
-		assert.Equal(t, 1, pwUp.GridStatus(t.Context(), gopowerwall.GridStatusNumeric))
+		upStr, err := pwUp.GridStatusString(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, "Connected", upStr)
+		upNum, err := pwUp.GridStatusNumeric(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 1, upNum)
 	})
 
 	t.Run("sunny-day-outage: grid down, solar and battery covering load", func(t *testing.T) {
@@ -106,13 +112,13 @@ func TestScenarios(t *testing.T) {
 		// that the *scaled* reading round-trips back to exactly N:
 		//   raw   = 0.95*N + 5       = 0.95*50 + 5 = 52.5
 		//   scale(raw) = (raw-5)/0.95 = 47.5/0.95   = 50
-		raw := pw.Level(t.Context(), false)
-		require.NotNil(t, raw)
-		assert.InDelta(t, 52.5, *raw, 0.001)
+		raw, err := pw.Level(t.Context())
+		require.NoError(t, err)
+		assert.InDelta(t, 52.5, raw, 0.001)
 
-		scaled := pw.Level(t.Context(), true)
-		require.NotNil(t, scaled)
-		assert.InDelta(t, 50.0, *scaled, 0.001)
+		scaled, err := pw.LevelScaled(t.Context())
+		require.NoError(t, err)
+		assert.InDelta(t, 50.0, scaled, 0.001)
 
 		soe, err := pw.SOE(t.Context())
 		require.NoError(t, err)

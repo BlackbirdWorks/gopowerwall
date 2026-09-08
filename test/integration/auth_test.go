@@ -13,6 +13,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/backend/local"
+	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
 
 // newAuthClient builds a PyPowerwallLocal backend directly (rather than
@@ -65,7 +66,7 @@ func TestAuthAgainstRealEnforcement(t *testing.T) {
 
 		data, err := lb.Poll(t.Context(), "/api/status", true, false, false)
 		require.NoError(t, err)
-		assert.Equal(t, "1232100-00-E--TG123456789ABC", gopowerwall.Lookup(data, "din"))
+		assert.Equal(t, "1232100-00-E--TG123456789ABC", lookup.Lookup(data, "din"))
 	})
 
 	t.Run("an unauthenticated request is rejected with backend.ErrLogin", func(t *testing.T) {
@@ -91,7 +92,7 @@ func TestAuthAgainstRealEnforcement(t *testing.T) {
 		// with no session at all.
 		data, err := lb.Poll(t.Context(), "/api/status", true, false, false)
 		require.NoError(t, err)
-		assert.Equal(t, "1232100-00-E--TG123456789ABC", gopowerwall.Lookup(data, "din"))
+		assert.Equal(t, "1232100-00-E--TG123456789ABC", lookup.Lookup(data, "din"))
 	})
 
 	t.Run("raw HTTP: missing/garbage cookies rejected, a real session cookie accepted", func(t *testing.T) {

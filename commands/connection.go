@@ -69,6 +69,19 @@ func (c *ConnectionFlags) WithLogger(ctx context.Context) context.Context {
 }
 
 // BuildPowerwall constructs a Powerwall client based on flags.
+//
+// A non-nil error here always means the flags themselves were invalid -
+// a bad mode combination (see resolveModeOptions) or a [gopowerwall.Config]
+// validation failure. A failed *connection* attempt is deliberately not
+// surfaced as an error: [gopowerwall.New] wraps that case in a
+// [gopowerwall.ConnectError], but every command built on BuildPowerwall
+// already reports "not connected" itself, with its own message, after
+// checking [gopowerwall.Powerwall.IsConnected] - see GetCmd.Run and
+// SetCmd.Run. Propagating New's ConnectError here as well would just
+// duplicate that reporting with a second, differently-worded error, so
+// BuildPowerwall discards it and returns the constructed (but possibly
+// disconnected) *Powerwall with a nil error instead, preserving the
+// existing "build, then check IsConnected" flow.
 func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*gopowerwall.Powerwall, error) {
 	var opts []gopowerwall.Option
 
@@ -103,7 +116,12 @@ func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*gopowerwall.Powe
 	}
 	opts = append(opts, modeOpts...)
 
-	return gopowerwall.New(ctx, opts...)
+	pw, err := gopowerwall.New(ctx, opts...)
+	if _, ok := errors.AsType[*gopowerwall.ConnectError](err); ok {
+		return pw, nil
+	}
+
+	return pw, err
 }
 
 func (c *ConnectionFlags) resolveModeOptions() ([]gopowerwall.Option, error) {

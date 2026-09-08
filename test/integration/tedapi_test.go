@@ -11,6 +11,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/backend/tedapi"
+	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
 
 // TestTEDAPIProtocolCompatibility talks TEDAPI protobuf directly to
@@ -101,7 +102,7 @@ func TestTEDAPIModeDispatchFixed(t *testing.T) {
 
 	data := pw.Poll(t.Context(), "/api/status")
 	require.NotNil(t, data, "pollInternal's ModeTEDAPI case should now dispatch to the tedapi backend")
-	assert.Equal(t, "1232100-00-E--TG123456789ABC", gopowerwall.Lookup(data, "din"))
+	assert.Equal(t, "1232100-00-E--TG123456789ABC", lookup.Lookup(data, "din"))
 
 	vitals, err := pw.Vitals(t.Context())
 	require.NoError(t, err)

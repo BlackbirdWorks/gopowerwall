@@ -1,8 +1,10 @@
 package fleetapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,6 +24,14 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 	"github.com/blackbirdworks/gopowerwall/pkgs/oauthclient"
 )
+
+// errInvalidOperationPayload indicates postAPIOperation received a
+// caller-supplied payload whose backup_reserve_percent or real_mode field
+// was present but not the expected type. This is a programming error on the
+// caller's side (every in-tree caller builds this payload itself - see
+// Powerwall.SetOperation), never a Tesla API response, so the malformed
+// field is never sent as a request.
+var errInvalidOperationPayload = errors.New("invalid operation payload field")
 
 const (
 	// ConfigFile is the filename for cached FleetAPI configuration.
@@ -222,16 +232,64 @@ func (f *PyPowerwallFleetAPI) persistToken(cfgPath string, tok *oauth2.Token) er
 }
 
 // checkStatus maps a non-2xx Tesla API response to a sentinel error, so
-// callers can distinguish an authentication failure from other unexpected
-// responses.
+// callers can distinguish an authentication failure, a rate limit, and a
+// missing resource from other unexpected responses.
 func checkStatus(resp *http.Response) error {
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return backend.ErrLogin
+	case resp.StatusCode == http.StatusNotFound:
+		return backend.ErrNotFound
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable:
+		return backend.ErrRateLimited
 	case resp.StatusCode >= http.StatusBadRequest:
 		return fmt.Errorf("%w: HTTP %d", backend.ErrUnexpectedStatus, resp.StatusCode)
 	default:
 		return nil
+	}
+}
+
+// postJSON POSTs body as JSON to url using f.client, which - once
+// Authenticate has run - attaches and transparently refreshes the caller's
+// OAuth2 bearer token via pkgs/oauthclient. It never sets the Authorization
+// header itself: doing so here would bypass that automatic refresh. A
+// non-2xx response is mapped to a backend sentinel error via checkStatus.
+func (f *PyPowerwallFleetAPI) postJSON(ctx context.Context, url string, body map[string]any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return checkStatus(resp)
+}
+
+// toBackupReservePercent extracts an integer backup reserve percentage from
+// the numeric value Powerwall.SetOperation places under
+// "backup_reserve_percent" in its payload map (always a float64, since
+// SetOperation builds it from a *float64), tolerating int/int64 too for any
+// other caller of Post.
+func toBackupReservePercent(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	default:
+		return 0, false
 	}
 }
 
@@ -385,11 +443,93 @@ func (f *PyPowerwallFleetAPI) getAPIOperation(ctx context.Context, force bool) (
 	}, nil
 }
 
+// postAPIOperation POSTs whichever of backup_reserve_percent / real_mode is
+// present in payload to Tesla's Fleet API - the former to
+// "api/1/energy_sites/{site_id}/backup" as {"backup_reserve_percent": <int>},
+// the latter to "api/1/energy_sites/{site_id}/operation" as
+// {"default_real_mode": "<mode>"} (see docs/parity-matrix.md §4).
+//
+// Tesla applies these as two independent, asynchronous commands, so when
+// both fields are present this sends two separate POSTs rather than
+// merging them into one payload - and always attempts both regardless of
+// whether the first failed, since a failure on one must not silently skip
+// the other. Tesla is also documented to cap backup_reserve_percent at 80%
+// for cloud/FleetAPI accounts; this function does not attempt to detect or
+// pre-empt that cap - it reports success once Tesla has accepted the
+// request, and it is the caller's responsibility to re-poll
+// "/api/operation" (force=true) afterward to learn the value Tesla actually
+// applied, exactly as commands/set.go already does via GetReserveForced.
 func (f *PyPowerwallFleetAPI) postAPIOperation(ctx context.Context, payload any, _ string, _, _ bool) (any, error) {
 	logger.Load(ctx).DebugContext(ctx, "FleetAPI post operation", "payload", payload)
-	f.cache.Invalidate("/api/operation")
+
+	fields, _ := payload.(map[string]any)
+
+	var errs []error
+
+	wroteReserve := f.postBackupReserve(ctx, fields, &errs)
+	wroteMode := f.postOperationMode(ctx, fields, &errs)
+
+	if wroteReserve || wroteMode {
+		f.cache.Invalidate("/api/operation")
+	}
+
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
 
 	return map[string]any{statusKey: statusSuccess}, nil
+}
+
+// postBackupReserve sends the backup_reserve_percent field of fields, if
+// present, to Tesla's backup-reserve endpoint, appending any failure to
+// errs. It reports whether the write succeeded.
+func (f *PyPowerwallFleetAPI) postBackupReserve(ctx context.Context, fields map[string]any, errs *[]error) bool {
+	raw, ok := fields["backup_reserve_percent"]
+	if !ok {
+		return false
+	}
+
+	reserve, convOK := toBackupReservePercent(raw)
+	if !convOK {
+		*errs = append(*errs, fmt.Errorf("%w: backup_reserve_percent", errInvalidOperationPayload))
+
+		return false
+	}
+
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/backup", f.baseURL, f.siteID)
+	if err := f.postJSON(ctx, url, map[string]any{"backup_reserve_percent": reserve}); err != nil {
+		*errs = append(*errs, err)
+
+		return false
+	}
+
+	return true
+}
+
+// postOperationMode sends the real_mode field of fields, if present, to
+// Tesla's operation-mode endpoint, appending any failure to errs. It
+// reports whether the write succeeded.
+func (f *PyPowerwallFleetAPI) postOperationMode(ctx context.Context, fields map[string]any, errs *[]error) bool {
+	raw, ok := fields["real_mode"]
+	if !ok {
+		return false
+	}
+
+	mode, convOK := raw.(string)
+	if !convOK || mode == "" {
+		*errs = append(*errs, fmt.Errorf("%w: real_mode", errInvalidOperationPayload))
+
+		return false
+	}
+
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/operation", f.baseURL, f.siteID)
+	if err := f.postJSON(ctx, url, map[string]any{"default_real_mode": mode}); err != nil {
+		*errs = append(*errs, err)
+
+		return false
+	}
+
+	return true
 }
 
 func (f *PyPowerwallFleetAPI) getAPISiteInfo(ctx context.Context, force bool) (any, error) {
@@ -537,9 +677,25 @@ func (f *PyPowerwallFleetAPI) FetchPower(ctx context.Context, sensor string, ver
 	return p[sensor], nil
 }
 
-// SetGridCharging controls grid charging in FleetAPI mode.
+// SetGridCharging controls grid charging in FleetAPI mode by POSTing to
+// Tesla's "api/1/energy_sites/{site_id}/grid_import_export" endpoint. The
+// field Tesla actually reads is
+// "disallow_charge_from_grid_with_solar_installed" - mode is forwarded to
+// it verbatim, matching pypowerwall_fleetapi.py's own set_grid_charging
+// (see docs/parity-matrix.md §4); this is not a "grid charging enabled"
+// flag under a different name; it is that flag's caller-facing name mapped
+// onto whichever raw field Tesla defines for it.
 func (f *PyPowerwallFleetAPI) SetGridCharging(ctx context.Context, mode bool) (map[string]any, error) {
 	logger.Load(ctx).DebugContext(ctx, "set grid charging", "mode", mode)
+
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/grid_import_export", f.baseURL, f.siteID)
+	if err := f.postJSON(ctx, url, map[string]any{
+		"disallow_charge_from_grid_with_solar_installed": mode,
+	}); err != nil {
+		return nil, err
+	}
+
+	f.cache.Invalidate("SITE_CONFIG")
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
@@ -561,9 +717,22 @@ func (f *PyPowerwallFleetAPI) GetGridCharging(ctx context.Context) (*bool, error
 	return nil, backend.ErrNotFound
 }
 
-// SetGridExport controls grid export in FleetAPI mode.
+// SetGridExport controls grid export in FleetAPI mode by POSTing to
+// Tesla's "api/1/energy_sites/{site_id}/grid_import_export" endpoint with
+// {"customer_preferred_export_rule": mode} (see docs/parity-matrix.md §4).
+// Valid mode values are validated one layer up, by Powerwall.SetGridExport
+// (backend.ErrInvalidGridExportMode) - this method forwards mode verbatim.
 func (f *PyPowerwallFleetAPI) SetGridExport(ctx context.Context, mode string) (map[string]any, error) {
 	logger.Load(ctx).DebugContext(ctx, "set grid export", "mode", mode)
+
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/grid_import_export", f.baseURL, f.siteID)
+	if err := f.postJSON(ctx, url, map[string]any{
+		"customer_preferred_export_rule": mode,
+	}); err != nil {
+		return nil, err
+	}
+
+	f.cache.Invalidate("SITE_CONFIG")
 
 	return map[string]any{statusKey: statusSuccess}, nil
 }
