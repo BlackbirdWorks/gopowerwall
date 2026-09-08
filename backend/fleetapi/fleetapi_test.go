@@ -242,7 +242,10 @@ func TestFleetAPIKnownStubEndpoints(t *testing.T) {
 		{name: "auth toggle supported", api: "/api/auth/toggle/supported"},
 		{name: "system update status", api: "/api/system/update/status"},
 		{name: "solars", api: "/api/solars"},
-		{name: "system status", api: "/api/system_status"},
+		// "/api/system_status" is intentionally not covered here: since the
+		// live-data overlay fix, it requires getSiteData/getSiteConfig to
+		// succeed and returns nil without a reachable site - see
+		// TestFleetAPISystemStatusOverlay for its network-backed coverage.
 	}
 
 	f := fleetapi.New(testEmail, testCacheTTL, testTimeout, testSiteID, t.TempDir())
@@ -459,7 +462,7 @@ func TestFleetAPIPostAPIOperationInvalidatesCache(t *testing.T) {
 	)
 }
 
-func TestFleetAPIVitalsAndTimeRemaining(t *testing.T) {
+func TestFleetAPIVitals(t *testing.T) {
 	t.Parallel()
 
 	f := fleetapi.New(testEmail, testCacheTTL, testTimeout, testSiteID, t.TempDir())
@@ -467,11 +470,76 @@ func TestFleetAPIVitalsAndTimeRemaining(t *testing.T) {
 	vitals, err := f.Vitals(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, vitals)
+}
 
-	remaining, err := f.GetTimeRemaining(t.Context())
-	require.NoError(t, err)
-	require.NotNil(t, remaining)
-	assert.InDelta(t, 0.0, *remaining, 0.001)
+// TestFleetAPIGetTimeRemaining is the regression test for the confirmed
+// hardcoded-0.0 bug (docs/parity-matrix.md §4): GetTimeRemaining used to
+// return a hardcoded 0.0 with no network call whatsoever. It now queries
+// Tesla's "api/1/energy_sites/{site_id}/backup_time_remaining" endpoint and
+// returns the live response.time_remaining_hours value, falling back to
+// 0.0 only when a well-formed response lacks that key - matching upstream's
+// get_time_remaining (pypowerwall_fleetapi.py:372-380).
+func TestFleetAPIGetTimeRemaining(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		wantErrIs  error
+		name       string
+		body       string
+		wantHours  float64
+		httpStatus int
+	}
+
+	cases := []testCase{
+		{
+			name:      "returns the live value from Tesla",
+			body:      `{"response":{"time_remaining_hours":9.863332186566478}}`,
+			wantHours: 9.863332186566478,
+		},
+		{
+			name:      "falls back to 0.0 when time_remaining_hours is absent",
+			body:      `{"response":{}}`,
+			wantHours: 0.0,
+		},
+		{
+			name:       "returns an error when the site is unreachable",
+			httpStatus: http.StatusInternalServerError,
+			wantErrIs:  backend.ErrUnexpectedStatus,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(
+					t,
+					"/api/1/energy_sites/"+testSiteID+"/backup_time_remaining",
+					r.URL.Path,
+				)
+				if tc.httpStatus != 0 {
+					w.WriteHeader(tc.httpStatus)
+
+					return
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}
+			srv := newTestServer(t, handler)
+			f := newAuthenticatedBackend(t, srv)
+
+			remaining, err := f.GetTimeRemaining(t.Context())
+
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, remaining)
+			assert.InDelta(t, tc.wantHours, *remaining, 0.0000001)
+		})
+	}
 }
 
 // gridImportExportPath returns the URL path shared by SetGridCharging and
@@ -483,42 +551,61 @@ func gridImportExportPath() string {
 
 // TestFleetAPISetGridCharging exercises SetGridCharging's real HTTP call:
 // POST .../grid_import_export with
-// {"disallow_charge_from_grid_with_solar_installed": <bool>} - note the
-// field name Tesla actually reads is the "disallow" flag, not a
-// "grid_charging" toggle; mode is forwarded to it verbatim.
+// {"disallow_charge_from_grid_with_solar_installed": <bool>}. This is the
+// regression test for the confirmed field-negation bug
+// (docs/parity-matrix.md §1 item 30): the field Tesla actually reads is a
+// *prohibition* ("disallow..."), not the enable flag the caller-facing
+// "mode" name implies, so upstream negates mode before writing it
+// (fleetapi.py:733-754) and gopowerwall must too. Before the fix,
+// SetGridCharging(ctx, true) - "please enable grid charging" - sent
+// disallow_charge_from_grid_with_solar_installed=true, which *disables* it
+// on real hardware: the exact opposite of the caller's request. Each case
+// below asserts the exact JSON body for both mode=true and mode=false so
+// that inversion can never regress silently again.
 func TestFleetAPISetGridCharging(t *testing.T) {
 	t.Parallel()
 
 	gridPath := gridImportExportPath()
 
 	type testCase struct {
-		wantErrIs error
-		name      string
-		mode      bool
-		status    int
+		wantErrIs    error
+		name         string
+		mode         bool
+		wantDisallow bool
+		status       int
 	}
 
 	cases := []testCase{
-		{name: "enabling charging sends true", mode: true},
-		{name: "disabling charging sends false", mode: false},
 		{
-			name:      "401 maps to ErrLogin",
-			mode:      true,
-			status:    http.StatusUnauthorized,
-			wantErrIs: backend.ErrLogin,
+			name:         "mode=true (enable) sends disallow_charge_from_grid_with_solar_installed=false",
+			mode:         true,
+			wantDisallow: false,
 		},
 		{
-			name:      "404 maps to ErrNotFound",
-			mode:      true,
-			status:    http.StatusNotFound,
-			wantErrIs: backend.ErrNotFound,
+			name:         "mode=false (disable) sends disallow_charge_from_grid_with_solar_installed=true",
+			mode:         false,
+			wantDisallow: true,
 		},
 		{
-			name: "429 maps to ErrRateLimited", mode: true,
+			name:         "401 maps to ErrLogin",
+			mode:         true,
+			wantDisallow: false,
+			status:       http.StatusUnauthorized,
+			wantErrIs:    backend.ErrLogin,
+		},
+		{
+			name:         "404 maps to ErrNotFound",
+			mode:         true,
+			wantDisallow: false,
+			status:       http.StatusNotFound,
+			wantErrIs:    backend.ErrNotFound,
+		},
+		{
+			name: "429 maps to ErrRateLimited", mode: true, wantDisallow: false,
 			status: http.StatusTooManyRequests, wantErrIs: backend.ErrRateLimited,
 		},
 		{
-			name: "500 maps to ErrUnexpectedStatus", mode: true,
+			name: "500 maps to ErrUnexpectedStatus", mode: true, wantDisallow: false,
 			status: http.StatusInternalServerError, wantErrIs: backend.ErrUnexpectedStatus,
 		},
 	}
@@ -556,9 +643,72 @@ func TestFleetAPISetGridCharging(t *testing.T) {
 			assert.Equal(t, "Bearer tok-abc", req.auth)
 			assert.Equal(
 				t,
-				map[string]any{"disallow_charge_from_grid_with_solar_installed": tc.mode},
+				map[string]any{"disallow_charge_from_grid_with_solar_installed": tc.wantDisallow},
 				req.body,
 			)
+		})
+	}
+}
+
+// TestFleetAPISetGridChargingRoundTrip is the companion round-trip
+// regression to TestFleetAPISetGridCharging's exact-body assertion: after
+// SetGridCharging(true) ("enable"), a subsequent GetGridCharging read
+// against a stateful mock of Tesla's site_info must report true, and
+// likewise false after SetGridCharging(false) - proving the negation on
+// the write side and the negation on the read side agree with each other,
+// not just with the wire format in isolation.
+//
+//nolint:paralleltest,tparallel // steps mutate shared mock server state sequentially; must run in order
+func TestFleetAPISetGridChargingRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	type step struct {
+		name        string
+		mode        bool
+		wantEnabled bool
+	}
+
+	steps := []step{
+		{name: "enable", mode: true, wantEnabled: true},
+		{name: "disable", mode: false, wantEnabled: false},
+	}
+
+	gridPath := gridImportExportPath()
+	_, _, siteInfoPath := fleetAPIOperationPaths()
+
+	var disallow bool // Tesla's stored state; starts "enabled" (disallow=false)
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case siteInfoPath:
+			state := "false"
+			if disallow {
+				state = "true"
+			}
+			_, _ = w.Write([]byte(
+				`{"response":{"components":{"disallow_charge_from_grid_with_solar_installed":` +
+					state + `}}}`,
+			))
+		case gridPath:
+			rec := recordRequest(t, r)
+			disallow, _ = rec.body["disallow_charge_from_grid_with_solar_installed"].(bool)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	srv := newTestServer(t, handler)
+	f := newAuthenticatedBackend(t, srv)
+
+	// Steps apply in order against the shared stateful mock above, so they
+	// are not run with t.Parallel().
+	for _, tc := range steps {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := f.SetGridCharging(t.Context(), tc.mode)
+			require.NoError(t, err)
+			got, err := f.GetGridCharging(t.Context())
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, tc.wantEnabled, *got)
 		})
 	}
 }
@@ -653,7 +803,9 @@ func TestFleetAPIGridImportExportInvalidatesCache(t *testing.T) {
 		switch r.URL.Path {
 		case siteInfoPath:
 			siteInfoCalls++
-			_, _ = w.Write([]byte(`{"response":{"grid_charging":false}}`))
+			_, _ = w.Write([]byte(
+				`{"response":{"components":{"disallow_charge_from_grid_with_solar_installed":true}}}`,
+			))
 		case gridPath:
 			_ = recordRequest(t, r)
 			w.WriteHeader(http.StatusOK)
@@ -664,8 +816,10 @@ func TestFleetAPIGridImportExportInvalidatesCache(t *testing.T) {
 	srv := newTestServer(t, handler)
 	f := newAuthenticatedBackend(t, srv)
 
-	_, err := f.GetGridCharging(t.Context())
+	got, err := f.GetGridCharging(t.Context())
 	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.False(t, *got, "disallow=true means grid charging is disabled")
 	_, err = f.GetGridCharging(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, 1, siteInfoCalls, "second read should be served from cache")
@@ -951,25 +1105,186 @@ func TestFleetAPISystemStatusSOE(t *testing.T) {
 	})
 }
 
+// TestFleetAPISystemStatusOverlay is the regression test for the confirmed
+// missing live-data overlay (docs/parity-matrix.md §3.2): getAPISystemStatus
+// used to return stubs.SystemStatusStub() completely unmodified. It now
+// overlays nine live values, matching upstream's get_api_system_status
+// (pypowerwall_fleetapi.py:597-629).
+func TestFleetAPISystemStatusOverlay(t *testing.T) {
+	t.Parallel()
+
+	liveStatusPath := "/api/1/energy_sites/" + testSiteID + "/live_status"
+	siteInfoPath := "/api/1/energy_sites/" + testSiteID + "/site_info"
+	siteStatusPath := "/api/1/energy_sites/" + testSiteID + "/site_status"
+
+	type testCase struct {
+		wantErrIs  error
+		check      func(t *testing.T, m map[string]any)
+		name       string
+		liveStatus string
+		siteInfo   string
+		siteStatus string
+	}
+
+	cases := []testCase{
+		{
+			name: "overlays live data onto the stub",
+			liveStatus: `{"response":{"solar_power":1500,"grid_services_power":25,` +
+				`"island_status":"on_grid","grid_status":"Active"}}`,
+			siteInfo:   `{"response":{"battery_count":2,"nameplate_power":10800}}`,
+			siteStatus: `{"response":{"total_pack_energy":25939,"energy_left":21276.5}}`,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.InDelta(t, 25939.0, m["nominal_full_pack_energy"], 0.001)
+				assert.InDelta(t, 21276.5, m["nominal_energy_remaining"], 0.001)
+				assert.InDelta(t, 10800.0, m["max_charge_power"], 0.001)
+				assert.InDelta(t, 10800.0, m["max_discharge_power"], 0.001)
+				assert.InDelta(t, 10800.0, m["max_apparent_power"], 0.001)
+				assert.InDelta(t, 25.0, m["grid_services_power"], 0.001)
+				assert.Equal(t, "SystemGridConnected", m["system_island_state"])
+				assert.InDelta(t, 2.0, m["available_blocks"], 0.001)
+				assert.InDelta(t, 2.0, m["blocks_controlled"], 0.001)
+				assert.InDelta(t, 1500.0, m["solar_real_power_limit"], 0.001)
+			},
+		},
+		{
+			name:       "reports SystemIslandedActive off-grid",
+			liveStatus: `{"response":{"island_status":"off_grid","grid_status":"Down"}}`,
+			siteInfo:   `{"response":{"battery_count":1,"nameplate_power":5000}}`,
+			siteStatus: `{"response":{"total_pack_energy":13000,"energy_left":6000}}`,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.Equal(t, "SystemIslandedActive", m["system_island_state"])
+			},
+		},
+		{
+			name:      "returns ErrNotFound when live_status/site_info are unreachable",
+			wantErrIs: backend.ErrNotFound,
+		},
+		// This asymmetry - gating on power/config but not on the battery
+		// (site_status) call - is confirmed in upstream itself
+		// (pypowerwall_fleetapi.py:597-629 only checks "power is None or
+		// config is None", unlike the cloud backend's three-way check), so
+		// gopowerwall's FleetAPI overlay must reproduce it rather than
+		// "fixing" it to match the cloud backend. An empty siteStatus
+		// below means "site_status returns 500" (see the handler), while
+		// liveStatus/siteInfo are populated so the overlay still runs.
+		{
+			name:       "still overlays when only site_status is unreachable",
+			liveStatus: `{"response":{"solar_power":42,"island_status":"on_grid"}}`,
+			siteInfo:   `{"response":{"battery_count":3,"nameplate_power":9000}}`,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.Nil(t, m["nominal_full_pack_energy"])
+				assert.Nil(t, m["nominal_energy_remaining"])
+				assert.InDelta(t, 9000.0, m["max_charge_power"], 0.001)
+				assert.InDelta(t, 3.0, m["available_blocks"], 0.001)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case liveStatusPath:
+					if tc.liveStatus == "" {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					_, _ = w.Write([]byte(tc.liveStatus))
+				case siteInfoPath:
+					if tc.siteInfo == "" {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					_, _ = w.Write([]byte(tc.siteInfo))
+				case siteStatusPath:
+					if tc.siteStatus == "" {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					_, _ = w.Write([]byte(tc.siteStatus))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}
+			srv := newTestServer(t, handler)
+			f := newAuthenticatedBackend(t, srv)
+
+			res, err := f.Poll(t.Context(), "/api/system_status", false, false, false)
+
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+				assert.Nil(t, res)
+
+				return
+			}
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
+			tc.check(t, m)
+		})
+	}
+}
+
 func TestFleetAPIGridChargingAndExport(t *testing.T) {
 	t.Parallel()
 
-	t.Run("GetGridCharging returns the configured value", func(t *testing.T) {
-		t.Parallel()
+	// getGridChargingCases is the regression coverage for the confirmed
+	// field-read bug (docs/parity-matrix.md §4): the previous
+	// implementation read a nonexistent top-level "response.grid_charging"
+	// field and so always returned ErrNotFound; the fix reads
+	// "response.components.disallow_charge_from_grid_with_solar_installed"
+	// and negates it, defaulting to "enabled" when the field is absent -
+	// matching fleetapi.py:694-698's "return not state".
+	type getGridChargingCase struct {
+		name        string
+		siteInfo    string
+		wantEnabled bool
+	}
 
-		handler := func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"response":{"grid_charging":true}}`))
-		}
-		srv := newTestServer(t, handler)
-		f := newAuthenticatedBackend(t, srv)
+	getGridChargingCases := []getGridChargingCase{
+		{
+			name:        "disallow=false means grid charging is enabled",
+			siteInfo:    `{"response":{"components":{"disallow_charge_from_grid_with_solar_installed":false}}}`,
+			wantEnabled: true,
+		},
+		{
+			name:        "disallow=true means grid charging is disabled",
+			siteInfo:    `{"response":{"components":{"disallow_charge_from_grid_with_solar_installed":true}}}`,
+			wantEnabled: false,
+		},
+		{
+			name:        "absent field defaults to enabled",
+			siteInfo:    `{"response":{"components":{}}}`,
+			wantEnabled: true,
+		},
+	}
 
-		got, err := f.GetGridCharging(t.Context())
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.True(t, *got)
-	})
+	for _, tc := range getGridChargingCases {
+		t.Run("GetGridCharging/"+tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	t.Run("GetGridCharging returns ErrNotFound when unreachable", func(t *testing.T) {
+			handler := func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.siteInfo))
+			}
+			srv := newTestServer(t, handler)
+			f := newAuthenticatedBackend(t, srv)
+
+			got, err := f.GetGridCharging(t.Context())
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, tc.wantEnabled, *got)
+		})
+	}
+
+	t.Run("GetGridCharging returns an error when unreachable", func(t *testing.T) {
 		t.Parallel()
 
 		handler := func(w http.ResponseWriter, _ *http.Request) {
@@ -982,32 +1297,65 @@ func TestFleetAPIGridChargingAndExport(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("GetGridExport returns the configured value", func(t *testing.T) {
+	// getGridExportCases is the regression coverage for the confirmed
+	// field-read bug found while verifying SetGridExport's neighbor
+	// against upstream: the previous implementation read a nonexistent
+	// top-level "response.customer_preferred_export_rule" field (the real
+	// field lives under "components", like grid charging's disallow flag)
+	// and had neither the non_export_configured special case nor the
+	// "battery_ok" default - matching fleetapi.py:700-707.
+	type getGridExportCase struct {
+		name       string
+		siteInfo   string
+		wantExport string
+	}
+
+	getGridExportCases := []getGridExportCase{
+		{
+			name:       "configured value is read from components",
+			siteInfo:   `{"response":{"components":{"customer_preferred_export_rule":"pv_only"}}}`,
+			wantExport: "pv_only",
+		},
+		{
+			name:       "non_export_configured overrides to never",
+			siteInfo:   `{"response":{"components":{"non_export_configured":true,"customer_preferred_export_rule":"pv_only"}}}`,
+			wantExport: "never",
+		},
+		{
+			name:       "absent field defaults to battery_ok",
+			siteInfo:   `{"response":{"components":{}}}`,
+			wantExport: "battery_ok",
+		},
+	}
+
+	for _, tc := range getGridExportCases {
+		t.Run("GetGridExport/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.siteInfo))
+			}
+			srv := newTestServer(t, handler)
+			f := newAuthenticatedBackend(t, srv)
+
+			got, err := f.GetGridExport(t.Context())
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, tc.wantExport, *got)
+		})
+	}
+
+	t.Run("GetGridExport returns an error when unreachable", func(t *testing.T) {
 		t.Parallel()
 
 		handler := func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"response":{"customer_preferred_export_rule":"pv_only"}}`))
-		}
-		srv := newTestServer(t, handler)
-		f := newAuthenticatedBackend(t, srv)
-
-		got, err := f.GetGridExport(t.Context())
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, "pv_only", *got)
-	})
-
-	t.Run("GetGridExport returns ErrNotFound when the field is absent", func(t *testing.T) {
-		t.Parallel()
-
-		handler := func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"response":{}}`))
+			w.WriteHeader(http.StatusInternalServerError)
 		}
 		srv := newTestServer(t, handler)
 		f := newAuthenticatedBackend(t, srv)
 
 		_, err := f.GetGridExport(t.Context())
-		require.ErrorIs(t, err, backend.ErrNotFound)
+		require.Error(t, err)
 	})
 
 	t.Run("GetGridCharging returns ErrLogin on a 401 response", func(t *testing.T) {

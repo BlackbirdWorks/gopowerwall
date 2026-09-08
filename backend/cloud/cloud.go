@@ -52,6 +52,9 @@ const (
 	statusSuccess = "success"
 	filePerm      = 0o600
 	siteConfigTTL = 59 * time.Second
+
+	gridStatusConnected = "SystemGridConnected"
+	gridStatusIslanded  = "SystemIslandedActive"
 )
 
 // PyPowerwallCloud implements the Tesla Cloud Owner API backend.
@@ -418,16 +421,22 @@ func (c *PyPowerwallCloud) Post(ctx context.Context, api string, payload any, _ 
 	return handler(ctx, payload, "", false, false)
 }
 
-func (c *PyPowerwallCloud) getSiteData(ctx context.Context, force bool) (map[string]any, error) {
+// fetchSiteJSON GETs url and decodes it as JSON, serving from the cache
+// under cacheKey (with an optional custom ttl, like getSiteConfig's shorter
+// siteConfigTTL) when force is false and a fresh entry exists. It is the
+// shared implementation behind getSiteData/getSiteConfig/getSiteBattery/
+// getBackupTimeRemaining, which differ only in cache key, URL, and TTL.
+func (c *PyPowerwallCloud) fetchSiteJSON(
+	ctx context.Context, cacheKey, url string, force bool, ttl ...time.Duration,
+) (map[string]any, error) {
 	if !force {
-		if val, found, _ := c.cache.Get("SITE_DATA"); found {
+		if val, found, _ := c.cache.Get(cacheKey, ttl...); found {
 			if m, ok := val.(map[string]any); ok {
 				return m, nil
 			}
 		}
 	}
 
-	url := fmt.Sprintf("%s/api/1/energy_sites/%s/live_status", TeslaOwnerURL, c.siteID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -448,44 +457,45 @@ func (c *PyPowerwallCloud) getSiteData(ctx context.Context, force bool) (map[str
 		return nil, decodeErr
 	}
 
-	c.cache.Set("SITE_DATA", data)
+	c.cache.Set(cacheKey, data)
 
 	return data, nil
 }
 
+func (c *PyPowerwallCloud) getSiteData(ctx context.Context, force bool) (map[string]any, error) {
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/live_status", TeslaOwnerURL, c.siteID)
+
+	return c.fetchSiteJSON(ctx, "SITE_DATA", url, force)
+}
+
 func (c *PyPowerwallCloud) getSiteConfig(ctx context.Context, force bool) (map[string]any, error) {
-	if !force {
-		if val, found, _ := c.cache.Get("SITE_CONFIG", siteConfigTTL); found {
-			if m, ok := val.(map[string]any); ok {
-				return m, nil
-			}
-		}
-	}
-
 	url := fmt.Sprintf("%s/api/1/energy_sites/%s/site_info", TeslaOwnerURL, c.siteID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
 
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
+	return c.fetchSiteJSON(ctx, "SITE_CONFIG", url, force, siteConfigTTL)
+}
 
-	if statusErr := checkStatus(resp); statusErr != nil {
-		return nil, statusErr
-	}
+// getSiteBattery fetches Tesla's "api/1/energy_sites/{site_id}/site_status"
+// endpoint - upstream's "SITE_SUMMARY" API call (pypowerwall_cloud.py:465-472,
+// get_battery()) - which is the only source for total_pack_energy/energy_left
+// used by getAPISystemStatus's live overlay (see docs/parity-matrix.md §3.2).
+// Cached under the "SITE_SUMMARY" key with the default cache TTL, matching
+// upstream's self.pwcacheexpire.
+func (c *PyPowerwallCloud) getSiteBattery(ctx context.Context, force bool) (map[string]any, error) {
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/site_status", TeslaOwnerURL, c.siteID)
 
-	var data map[string]any
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
-		return nil, decodeErr
-	}
+	return c.fetchSiteJSON(ctx, "SITE_SUMMARY", url, force)
+}
 
-	c.cache.Set("SITE_CONFIG", data)
+// getBackupTimeRemaining fetches Tesla's
+// "api/1/energy_sites/{site_id}/backup_time_remaining" endpoint - upstream's
+// "ENERGY_SITE_BACKUP_TIME_REMAINING" API call
+// (pypowerwall_cloud.py:596-611) - cached under the
+// "BACKUP_TIME_REMAINING" key with the default cache TTL, matching
+// upstream's self.pwcacheexpire.
+func (c *PyPowerwallCloud) getBackupTimeRemaining(ctx context.Context, force bool) (map[string]any, error) {
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/backup_time_remaining", TeslaOwnerURL, c.siteID)
 
-	return data, nil
+	return c.fetchSiteJSON(ctx, "BACKUP_TIME_REMAINING", url, force)
 }
 
 func updateInstantPower(stub map[string]any, key string, power any) {
@@ -681,21 +691,60 @@ func (c *PyPowerwallCloud) getAPIStatus(ctx context.Context, force bool) (any, e
 	}, nil
 }
 
-func (c *PyPowerwallCloud) getAPISystemStatus(_ context.Context, _ bool) (any, error) {
+// getAPISystemStatus overlays nine live, site-specific values onto
+// stubs.SystemStatusStub(), matching upstream's get_api_system_status
+// (pypowerwall_cloud.py:835-874): nominal_full_pack_energy/
+// nominal_energy_remaining (from the site's total_pack_energy/energy_left),
+// max_charge_power/max_discharge_power/max_apparent_power (from
+// nameplate_power), grid_services_power, system_island_state (derived from
+// island_status/grid_status), available_blocks/blocks_controlled (from
+// battery_count), and solar_real_power_limit (from solar_power). Like
+// upstream, it requires all three of getSiteData/getSiteConfig/
+// getSiteBattery to succeed and returns [backend.ErrNotFound] - upstream's
+// None - otherwise, rather than the raw placeholder stub (see
+// docs/parity-matrix.md §3.2).
+func (c *PyPowerwallCloud) getAPISystemStatus(ctx context.Context, force bool) (any, error) {
+	power, _ := c.getSiteData(ctx, force)
+	cfg, _ := c.getSiteConfig(ctx, force)
+	battery, _ := c.getSiteBattery(ctx, force)
+	if power == nil || cfg == nil || battery == nil {
+		return nil, backend.ErrNotFound
+	}
+
+	gridState := gridStatusIslanded
+	rawGridStatus := fmt.Sprintf("%v", lookup.Lookup(power, "response", "grid_status"))
+	onGrid := fmt.Sprintf("%v", lookup.Lookup(power, "response", "island_status")) == "on_grid"
+
+	if onGrid || rawGridStatus == "Active" || rawGridStatus == "Unknown" {
+		gridState = gridStatusConnected
+	}
+
+	nameplatePower := lookup.Lookup(cfg, "response", "nameplate_power")
+	batteryCount := lookup.Lookup(cfg, "response", "battery_count")
+
 	stub := stubs.SystemStatusStub()
-	stub["battery_blocks"] = []any{}
+	stub["nominal_full_pack_energy"] = lookup.Lookup(battery, "response", "total_pack_energy")
+	stub["nominal_energy_remaining"] = lookup.Lookup(battery, "response", "energy_left")
+	stub["max_charge_power"] = nameplatePower
+	stub["max_discharge_power"] = nameplatePower
+	stub["max_apparent_power"] = nameplatePower
+	stub["grid_services_power"] = lookup.Lookup(power, "response", "grid_services_power")
+	stub["system_island_state"] = gridState
+	stub["available_blocks"] = batteryCount
+	stub["blocks_controlled"] = batteryCount
+	stub["solar_real_power_limit"] = lookup.Lookup(power, "response", "solar_power")
 
 	return stub, nil
 }
 
 func (c *PyPowerwallCloud) getAPISystemStatusGridStatus(ctx context.Context, force bool) (any, error) {
 	data, _ := c.getSiteData(ctx, force)
-	statusStr := "SystemGridConnected"
+	statusStr := gridStatusConnected
 	if data != nil {
 		gridStatus := lookup.Lookup(data, "response", "grid_status")
 		if gridStatus != nil && fmt.Sprintf("%v", gridStatus) != "Active" &&
 			fmt.Sprintf("%v", gridStatus) != "Unknown" {
-			statusStr = "SystemIslandedActive"
+			statusStr = gridStatusIslanded
 		}
 	}
 
@@ -726,9 +775,26 @@ func (c *PyPowerwallCloud) Vitals(_ context.Context) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
-// GetTimeRemaining returns the time remaining until Powerwall is depleted.
-// Invariant: get_time_remaining() when unknown returns 0.0 in cloud/fleetapi (DESIGN.md).
-func (c *PyPowerwallCloud) GetTimeRemaining(_ context.Context) (*float64, error) {
+// GetTimeRemaining returns the time remaining until Powerwall is depleted,
+// querying Tesla's "api/1/energy_sites/{site_id}/backup_time_remaining"
+// endpoint for the live response.time_remaining_hours value, matching
+// upstream's get_time_remaining (pypowerwall_cloud.py:596-611). It returns
+// 0.0 only as upstream's narrow fallback for a well-formed response that
+// lacks the time_remaining_hours key; a network failure or non-2xx status
+// is surfaced as an error, unlike upstream's silent None (see
+// docs/parity-matrix.md §4).
+func (c *PyPowerwallCloud) GetTimeRemaining(ctx context.Context) (*float64, error) {
+	data, err := c.getBackupTimeRemaining(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if raw := lookup.Lookup(data, "response", "time_remaining_hours"); raw != nil {
+		hours := getFloat(raw)
+
+		return &hours, nil
+	}
+
 	zero := 0.0
 
 	return &zero, nil
@@ -776,18 +842,21 @@ func (c *PyPowerwallCloud) FetchPower(ctx context.Context, sensor string, verbos
 
 // SetGridCharging controls grid charging in cloud mode by POSTing to
 // Tesla's "api/1/energy_sites/{site_id}/grid_import_export" endpoint. The
-// field Tesla actually reads is
-// "disallow_charge_from_grid_with_solar_installed" - mode is forwarded to
-// it verbatim, matching pypowerwall_cloud.py's own set_grid_charging (see
-// docs/parity-matrix.md §4); this is not a "grid charging enabled" flag
-// under a different name; it is that flag's caller-facing name mapped onto
-// whichever raw field Tesla defines for it.
+// field Tesla actually reads,
+// "disallow_charge_from_grid_with_solar_installed", is phrased as a
+// prohibition, not as the enable flag the caller-facing "mode" name
+// implies: upstream's own set_grid_charging negates the caller's boolean
+// before writing it (pypowerwall_cloud.py:878-891 - "mode = False" when the
+// caller asked to enable, "mode = True" when the caller asked to disable),
+// so gopowerwall negates it too. mode=true ("enable grid charging") sends
+// disallow_charge_from_grid_with_solar_installed=false, and mode=false
+// sends =true (see docs/parity-matrix.md §1 item 30 and §4).
 func (c *PyPowerwallCloud) SetGridCharging(ctx context.Context, mode bool) (map[string]any, error) {
 	logger.Load(ctx).DebugContext(ctx, "set grid charging", "mode", mode)
 
 	url := fmt.Sprintf("%s/api/1/energy_sites/%s/grid_import_export", TeslaOwnerURL, c.siteID)
 	if err := c.postJSON(ctx, url, map[string]any{
-		"disallow_charge_from_grid_with_solar_installed": mode,
+		"disallow_charge_from_grid_with_solar_installed": !mode,
 	}); err != nil {
 		return nil, err
 	}
@@ -797,7 +866,12 @@ func (c *PyPowerwallCloud) SetGridCharging(ctx context.Context, mode bool) (map[
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
-// GetGridCharging returns current grid charging mode.
+// GetGridCharging returns current grid charging mode: the logical negation
+// of "response.components.disallow_charge_from_grid_with_solar_installed"
+// in the site_info response, matching upstream's get_grid_charging
+// (pypowerwall_cloud.py:920-923). The field defaults to "enabled" (true)
+// when absent, exactly as "not state" does in Python when
+// components.get(...) returns None.
 func (c *PyPowerwallCloud) GetGridCharging(ctx context.Context) (*bool, error) {
 	cfg, err := c.getSiteConfig(ctx, false)
 	if err != nil {
@@ -806,12 +880,10 @@ func (c *PyPowerwallCloud) GetGridCharging(ctx context.Context) (*bool, error) {
 	if cfg == nil {
 		return nil, backend.ErrNotFound
 	}
-	val := lookup.Lookup(cfg, "response", "grid_charging")
-	if b, ok := val.(bool); ok {
-		return &b, nil
-	}
+	disallow, _ := lookup.Lookup(cfg, "response", "components", "disallow_charge_from_grid_with_solar_installed").(bool)
+	enabled := !disallow
 
-	return nil, backend.ErrNotFound
+	return &enabled, nil
 }
 
 // SetGridExport controls grid export setting by POSTing to Tesla's
@@ -834,7 +906,17 @@ func (c *PyPowerwallCloud) SetGridExport(ctx context.Context, mode string) (map[
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
-// GetGridExport returns current grid export mode.
+// GetGridExport returns current grid export mode: "never" when
+// "response.components.non_export_configured" is set, else
+// "response.components.customer_preferred_export_rule", defaulting to
+// "battery_ok" when absent - matching upstream's get_grid_export
+// (pypowerwall_cloud.py:926-933). The previous implementation read a
+// nonexistent top-level "response.customer_preferred_export_rule" field -
+// the real field lives under "components", exactly like
+// disallow_charge_from_grid_with_solar_installed (see GetGridCharging) -
+// and had neither the non_export_configured special case nor the
+// "battery_ok" default, reporting ErrNotFound wherever upstream would
+// return a normal string.
 func (c *PyPowerwallCloud) GetGridExport(ctx context.Context) (*string, error) {
 	cfg, err := c.getSiteConfig(ctx, false)
 	if err != nil {
@@ -843,12 +925,21 @@ func (c *PyPowerwallCloud) GetGridExport(ctx context.Context) (*string, error) {
 	if cfg == nil {
 		return nil, backend.ErrNotFound
 	}
-	val := lookup.Lookup(cfg, "response", "customer_preferred_export_rule")
-	if s, ok := val.(string); ok {
-		return &s, nil
+
+	components, _ := lookup.Lookup(cfg, "response", "components").(map[string]any)
+
+	if nonExport, _ := components["non_export_configured"].(bool); nonExport {
+		never := "never"
+
+		return &never, nil
 	}
 
-	return nil, backend.ErrNotFound
+	mode, ok := components["customer_preferred_export_rule"].(string)
+	if !ok || mode == "" {
+		mode = "battery_ok"
+	}
+
+	return &mode, nil
 }
 
 func getFloat(val any) float64 {
