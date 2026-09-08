@@ -23,7 +23,14 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
 
-// Lookup safely traverses nested maps and slices using variadic path keys.
+// Lookup safely traverses nested maps and slices using variadic path keys,
+// returning nil the moment any key is missing or the current value is not a
+// map, instead of panicking. It exists to dig values out of the map[string]any
+// (or []any) payloads that the untyped accessors below - [Powerwall.Poll],
+// [Powerwall.Status], [Powerwall.Site] and its siblings - return; callers
+// using a typed accessor such as [Powerwall.SystemStatus] or
+// [Powerwall.SiteInfo] get a concrete Go struct instead and do not need
+// Lookup at all.
 func Lookup(data any, keys ...string) any {
 	return lookup.Lookup(data, keys...)
 }
@@ -35,7 +42,12 @@ const (
 	reserveThreshold80 = 80.0
 )
 
-// Powerwall represents a Tesla Energy Gateway Powerwall device facade.
+// Powerwall is a facade over a Tesla Energy Gateway, holding at most one
+// active backend connection (local, TEDAPI, cloud, or FleetAPI - see
+// [ConnectionMode]) behind a mutex, and routing every method call to
+// whichever backend is live. Construct one with [New]; it is safe for
+// concurrent use by multiple goroutines. The zero value is not usable -
+// there is no exported way to build a Powerwall other than New.
 type Powerwall struct {
 	config       *Config
 	local        *local.PyPowerwallLocal
@@ -50,7 +62,20 @@ type Powerwall struct {
 	tedapiFlag   bool
 }
 
-// New creates and connects a new Powerwall instance.
+// New builds a [Config] from [DefaultConfig] plus opts, validates it, and
+// attempts to connect - matching pypowerwall's own "construct and connect"
+// pattern rather than Go's usual "construct, then Dial/Connect separately"
+// one.
+//
+// A non-nil error here means only that the [Config] itself was invalid (see
+// [ValidateConfig]): a bad host/port, an invalid email in cloud mode, or an
+// unwritable cache/auth directory. A failed *connection* attempt - wrong
+// password, unreachable host, expired token file - is not returned as an
+// error at all: New logs it and still returns a non-nil *Powerwall with a
+// nil error. Callers must check [Powerwall.IsConnected] afterward to find
+// out whether it actually has a live backend; every data-fetching method on
+// a disconnected Powerwall degrades to a nil/zero-value result rather than
+// panicking, but none of them will return real data either.
 func New(ctx context.Context, opts ...Option) (*Powerwall, error) {
 	cfg := DefaultConfig()
 	for _, opt := range opts {
@@ -115,7 +140,10 @@ func (p *Powerwall) autoSelectMode(ctx context.Context, cfg *Config) {
 	}
 }
 
-// Mode returns the active connection mode.
+// Mode returns the active [ConnectionMode]. This can differ from what the
+// caller configured: [Powerwall.Connect]'s circular fallback may have moved
+// p to a different mode than the one [New] started with, so check Mode
+// rather than assuming it still matches the [Option] values passed to New.
 func (p *Powerwall) Mode() ConnectionMode {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -123,7 +151,10 @@ func (p *Powerwall) Mode() ConnectionMode {
 	return p.mode
 }
 
-// TEDAPIMode returns the active TEDAPI sub-mode.
+// TEDAPIMode returns the active [TEDAPIMode] sub-mode: [TEDAPIOff] unless a
+// TEDAPI client is layered onto the connection, whether as the primary
+// backend ([TEDAPIFull], [TEDAPIV1r]) or alongside an authenticated local
+// session ([TEDAPIHybrid]).
 func (p *Powerwall) TEDAPIMode() TEDAPIMode {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -260,7 +291,16 @@ func (p *Powerwall) connectCloud(ctx context.Context) bool {
 	return false
 }
 
-// Connect attempts connection with circular fallback (Local -> FleetAPI -> Cloud -> Local).
+// Connect (re)establishes the backend connection for p's current
+// [ConnectionMode], with circular fallback across modes: Local -> FleetAPI
+// -> Cloud -> Local, up to three attempts total. It returns true as soon as
+// any mode connects, and updates [Powerwall.Mode] to whichever mode that
+// was - which may not be the mode p started with. If retry is true, Connect
+// sleeps 30 seconds before its last attempt rather than failing immediately.
+// [New] calls this once during construction; call it again to retry after a
+// connection has dropped or after changing credentials on the underlying
+// [Config] is not supported, so a fresh [New] is normally the simpler path
+// for that case.
 func (p *Powerwall) Connect(ctx context.Context, retry bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -310,7 +350,9 @@ func (p *Powerwall) Connect(ctx context.Context, retry bool) bool {
 	return false
 }
 
-// IsConnected returns whether the active backend is connected.
+// IsConnected reports whether p currently holds a live backend client. This
+// is the check callers must make after [New], since a failed connection
+// attempt there does not surface as an error.
 func (p *Powerwall) IsConnected() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -318,7 +360,9 @@ func (p *Powerwall) IsConnected() bool {
 	return p.local != nil || p.tedapi != nil || p.cloud != nil || p.fleetapi != nil
 }
 
-// IsLocal returns true if connected locally.
+// IsLocal reports whether [Powerwall.Mode] is [ModeLocal]. Note this checks
+// the configured mode, not [Powerwall.IsConnected] - it can be true even
+// while disconnected.
 func (p *Powerwall) IsLocal() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -326,7 +370,9 @@ func (p *Powerwall) IsLocal() bool {
 	return p.mode == ModeLocal
 }
 
-// IsCloud returns true if connected via Tesla Cloud.
+// IsCloud reports whether [Powerwall.Mode] is [ModeCloud]. Like
+// [Powerwall.IsLocal], this checks the configured mode rather than
+// [Powerwall.IsConnected].
 func (p *Powerwall) IsCloud() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -334,7 +380,9 @@ func (p *Powerwall) IsCloud() bool {
 	return p.mode == ModeCloud
 }
 
-// IsFleetAPI returns true if connected via FleetAPI.
+// IsFleetAPI reports whether [Powerwall.Mode] is [ModeFleetAPI]. Like
+// [Powerwall.IsLocal], this checks the configured mode rather than
+// [Powerwall.IsConnected].
 func (p *Powerwall) IsFleetAPI() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -342,7 +390,9 @@ func (p *Powerwall) IsFleetAPI() bool {
 	return p.mode == ModeFleetAPI
 }
 
-// IsTEDAPI returns true if TEDAPI mode is active.
+// IsTEDAPI reports whether [Powerwall.TEDAPIMode] is anything other than
+// [TEDAPIOff] - true for a pure TEDAPI/v1r connection as well as a hybrid
+// TEDAPI-over-local one.
 func (p *Powerwall) IsTEDAPI() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -350,7 +400,12 @@ func (p *Powerwall) IsTEDAPI() bool {
 	return p.tedapiMode != TEDAPIOff
 }
 
-// Close disconnects and releases active backend resources.
+// Close releases the active backend's resources and clears it, leaving p
+// disconnected ([Powerwall.IsConnected] false afterward). It always returns
+// nil; the return value exists so Powerwall satisfies patterns expecting an
+// io.Closer-shaped Close, not because closing can currently fail. Close does
+// not stop a New from being usable again - call [Powerwall.Connect] to
+// reconnect the same instance.
 func (p *Powerwall) Close(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -373,7 +428,8 @@ func (p *Powerwall) Close(ctx context.Context) error {
 	return nil
 }
 
-// PollOption allows customizing Poll behavior.
+// PollOption customizes a single call to [Powerwall.Poll], [Powerwall.PollRaw],
+// or [Powerwall.PollJSON]. Build one with [WithForce] or [WithRaw].
 type PollOption func(*pollConfig)
 
 type pollConfig struct {
@@ -382,12 +438,18 @@ type pollConfig struct {
 	raw       bool
 }
 
-// WithForce forces cache bypass on Poll.
+// WithForce sets whether a poll bypasses [Config.PWCacheExpire]'s cache and
+// re-fetches from the backend even if a cached value is still fresh. The
+// default, when this option is omitted, is false (use the cache).
 func WithForce(force bool) PollOption {
 	return func(c *pollConfig) { c.force = force }
 }
 
-// WithRaw requests raw byte stream on Poll.
+// WithRaw sets whether a poll returns the backend's raw, undecoded response
+// body instead of a parsed value. [Powerwall.PollRaw] always behaves as
+// though this is true regardless of what is passed here; it is meaningful
+// only on [Powerwall.Poll] and [Powerwall.PollJSON]. The default, when this
+// option is omitted, is false.
 func WithRaw(raw bool) PollOption {
 	return func(c *pollConfig) { c.raw = raw }
 }
@@ -420,7 +482,16 @@ func (p *Powerwall) pollInternal(ctx context.Context, api string, force, recursi
 	return nil, ErrNoClient
 }
 
-// Poll queries the Powerwall Gateway API endpoint.
+// Poll queries the gateway API endpoint named by api (e.g.
+// "/api/system_status/soe") and returns its decoded response, or nil if the
+// call failed for any reason - no client for the active [ConnectionMode],
+// network error, non-2xx status, or a JSON decode failure. The error itself
+// is discarded; there is no way to distinguish "unreachable" from "not
+// found" from this return value alone. The dynamic type of a non-nil result
+// is normally map[string]any for a JSON object endpoint (traverse it with
+// [Lookup]), but is backend- and endpoint-dependent - callers that need a
+// guaranteed shape should prefer a typed accessor such as
+// [Powerwall.SystemStatus] or [Powerwall.SiteInfo] where one exists.
 func (p *Powerwall) Poll(ctx context.Context, api string, opts ...PollOption) any {
 	cfg := &pollConfig{}
 	for _, opt := range opts {
@@ -435,7 +506,11 @@ func (p *Powerwall) Poll(ctx context.Context, api string, opts ...PollOption) an
 	return val
 }
 
-// PollRaw queries the endpoint and returns raw bytes.
+// PollRaw queries api like [Powerwall.Poll] but returns the response body
+// undecoded, or nil on any failure (including one where the endpoint
+// responded but with a body that was not itself a []byte, which should not
+// happen for a real backend but is not distinguished from a network error
+// here). The underlying error is discarded either way.
 func (p *Powerwall) PollRaw(ctx context.Context, api string, opts ...PollOption) []byte {
 	cfg := &pollConfig{raw: true}
 	for _, opt := range opts {
@@ -454,7 +529,13 @@ func (p *Powerwall) PollRaw(ctx context.Context, api string, opts ...PollOption)
 	return nil
 }
 
-// PollJSON queries the endpoint and returns a JSON string.
+// PollJSON queries api like [Powerwall.Poll] but re-encodes the result as a
+// JSON string, returning "" if the underlying poll failed or the result
+// could not be marshalled. An empty string is therefore ambiguous between
+// "no data" and "the gateway returned literally an empty response" -
+// callers that need to tell those apart should use [Powerwall.PollRaw]
+// instead and check for a nil/empty byte slice explicitly alongside their
+// own error handling.
 func (p *Powerwall) PollJSON(ctx context.Context, api string, opts ...PollOption) string {
 	res := p.Poll(ctx, api, opts...)
 	if res == nil {
@@ -474,7 +555,15 @@ func (p *Powerwall) PollJSON(ctx context.Context, api string, opts ...PollOption
 	return string(b)
 }
 
-// Post sends a command payload to the Powerwall API endpoint.
+// Post sends payload to the gateway control endpoint named by api,
+// returning the decoded response or nil if the call failed - no client for
+// the active mode, network error, non-2xx status, or decode failure, with
+// the underlying error discarded just as in [Powerwall.Poll]. din, if
+// given, is the gateway's device identification number required by some
+// control endpoints; only din[0] is ever used, so passing more than one
+// value has no additional effect. Most callers should prefer a typed
+// method such as [Powerwall.SetReserve] or [Powerwall.SetMode] instead of
+// calling Post directly.
 func (p *Powerwall) Post(ctx context.Context, api string, payload any, din ...string) any {
 	dinStr := ""
 	if len(din) > 0 {
@@ -517,7 +606,15 @@ func (p *Powerwall) Post(ctx context.Context, api string, payload any, din ...st
 	return res
 }
 
-// Level returns battery state of charge percentage.
+// Level returns the battery's state-of-charge percentage, or nil if the
+// value could not be retrieved - no connection, a network error, or a
+// missing/unexpected field in the gateway's response are all reported the
+// same way, with the underlying cause discarded. scale, if given, only its
+// first element is read: false (the default when omitted) returns the raw
+// percentage as the gateway reports it; true rescales it with
+// [github.com/blackbirdworks/gopowerwall/pkgs/calc.ScaleBatteryLevel] to
+// account for the reserved capacity Tesla does not expose, matching
+// pypowerwall's "scale" behavior and the gopowerwall CLI's default display.
 func (p *Powerwall) Level(ctx context.Context, scale ...bool) *float64 {
 	doScale := false
 	if len(scale) > 0 {
@@ -549,7 +646,13 @@ func (p *Powerwall) Level(ctx context.Context, scale ...bool) *float64 {
 	return &val
 }
 
-// Power returns instant power metrics across all sensors in a strongly-typed PowerSummary.
+// Power returns instant power, in Watts, for the site (grid), solar,
+// battery, and load channels as a [models.PowerSummary]. Unlike most
+// accessors on Powerwall, Power never returns nil or an error to the
+// caller: if the active backend has no client or the underlying poll
+// fails, it returns a zero-value PowerSummary (all fields 0) rather than
+// distinguishing "no data" from "genuinely zero power" - check
+// [Powerwall.IsConnected] first if that distinction matters.
 func (p *Powerwall) Power(ctx context.Context) models.PowerSummary {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -594,32 +697,53 @@ func (p *Powerwall) Power(ctx context.Context) models.PowerSummary {
 	}
 }
 
-// Site returns site power in Watts or meter reading.
+// Site returns site (grid) meter power. verbose, if given, only its first
+// element is read: false (the default when omitted) returns a plain
+// float64 in Watts - the instant_power field, via [Powerwall.Power]'s
+// zero-on-failure PowerSummary.Site; true instead returns the sensor's
+// entire reading (voltage, current, cumulative energy, and so on) via
+// [Lookup] against "/api/meters/aggregates" - whatever map[string]any (or
+// nil, on failure) the gateway's JSON decodes to for that sensor, not a
+// fixed Go type. Prefer [Powerwall.Power] when only the Watts figure is
+// needed, since it returns a typed
+// [github.com/blackbirdworks/gopowerwall/models.PowerSummary] rather than
+// any.
 func (p *Powerwall) Site(ctx context.Context, verbose ...bool) any {
 	return p.fetchSensor(ctx, "site", verbose...)
 }
 
-// Solar returns solar power in Watts or meter reading.
+// Solar returns solar power. See [Powerwall.Site] for the meaning of
+// verbose and the any return's dynamic type in each case.
 func (p *Powerwall) Solar(ctx context.Context, verbose ...bool) any {
 	return p.fetchSensor(ctx, "solar", verbose...)
 }
 
-// Battery returns battery power in Watts or meter reading.
+// Battery returns battery power (negative while charging, matching
+// pypowerwall's sign convention). See [Powerwall.Site] for the meaning of
+// verbose and the any return's dynamic type in each case.
 func (p *Powerwall) Battery(ctx context.Context, verbose ...bool) any {
 	return p.fetchSensor(ctx, "battery", verbose...)
 }
 
-// Load returns load power in Watts or meter reading.
+// Load returns home load power. See [Powerwall.Site] for the meaning of
+// verbose and the any return's dynamic type in each case.
 func (p *Powerwall) Load(ctx context.Context, verbose ...bool) any {
 	return p.fetchSensor(ctx, "load", verbose...)
 }
 
-// Grid returns grid power in Watts.
+// Grid is an alias for [Powerwall.Site]: the site meter reading is the grid
+// reading. See Site for the meaning of verbose and the any return's dynamic
+// type in each case.
 func (p *Powerwall) Grid(ctx context.Context, verbose ...bool) any { return p.Site(ctx, verbose...) }
 
-// Home returns home load power in Watts.
+// Home is an alias for [Powerwall.Load]: home load is what Load reports.
+// See [Powerwall.Site] for the meaning of verbose and the any return's
+// dynamic type in each case.
 func (p *Powerwall) Home(ctx context.Context, verbose ...bool) any { return p.Load(ctx, verbose...) }
 
+// fetchSensor dispatches Site/Solar/Battery/Load: verbose[0] (false if
+// absent) selects between the sensor's full reading from
+// "/api/meters/aggregates" and just its instant_power figure from Power.
 func (p *Powerwall) fetchSensor(ctx context.Context, sensor string, verbose ...bool) any {
 	isVerbose := false
 	if len(verbose) > 0 {
@@ -650,7 +774,9 @@ func (p *Powerwall) fetchSensor(ctx context.Context, sensor string, verbose ...b
 	return 0.0
 }
 
-// SiteName returns the site name.
+// SiteName returns the configured site name, or nil if it could not be
+// retrieved - no connection, a network error, or a missing field are all
+// reported the same way, with the underlying cause discarded.
 func (p *Powerwall) SiteName(ctx context.Context) *string {
 	data := p.Poll(ctx, "/api/site_info/site_name")
 	if data == nil {
@@ -665,7 +791,13 @@ func (p *Powerwall) SiteName(ctx context.Context) *string {
 	return &s
 }
 
-// Status returns gateway status.
+// Status returns the gateway's "/api/status" response, or nil if it could
+// not be retrieved. With no param, the dynamic type of a non-nil result is
+// map[string]any (the full decoded status document); with param[0] set to
+// a field name (e.g. "version", "din"), Status instead returns just that
+// field via [Lookup] - any type the field's JSON value decodes to, or nil
+// if the field is absent. Only param[0] is read; passing more than one
+// value has no additional effect.
 func (p *Powerwall) Status(ctx context.Context, param ...string) any {
 	data := p.Poll(ctx, "/api/status")
 	if data == nil {
@@ -678,7 +810,15 @@ func (p *Powerwall) Status(ctx context.Context, param ...string) any {
 	return data
 }
 
-// Version returns firmware version.
+// Version returns the gateway firmware version, or nil if it could not be
+// retrieved. intValue, if given, only its first element is read: false (the
+// default when omitted) returns the version as a string; true instead
+// returns an int from
+// [github.com/blackbirdworks/gopowerwall/pkgs/version.ParseVersion] -
+// major*10000 + minor*100 + patch from the string's leading dotted-numeric
+// run (e.g. "23.44.10" becomes 234410), or 0 if no such run is found.
+// Callers should type-assert the result to string or int depending on
+// which intValue they passed.
 func (p *Powerwall) Version(ctx context.Context, intValue ...bool) any {
 	s := p.Status(ctx, "version")
 	if s == nil {
@@ -692,7 +832,10 @@ func (p *Powerwall) Version(ctx context.Context, intValue ...bool) any {
 	return strVal
 }
 
-// Uptime returns gateway uptime string.
+// Uptime returns the gateway's reported uptime in seconds, formatted as a
+// string, or nil if it could not be retrieved - no connection, a network
+// error, or a missing field are all reported the same way, with the
+// underlying cause discarded.
 func (p *Powerwall) Uptime(ctx context.Context) *string {
 	s := p.Status(ctx, "up_time_seconds")
 	if s == nil {
@@ -703,7 +846,10 @@ func (p *Powerwall) Uptime(ctx context.Context) *string {
 	return &strVal
 }
 
-// Din returns gateway DIN.
+// Din returns the gateway's device identification number, or nil if it
+// could not be retrieved - no connection, a network error, or a missing
+// field are all reported the same way, with the underlying cause
+// discarded.
 func (p *Powerwall) Din(ctx context.Context) *string {
 	s := p.Status(ctx, "din")
 	if s == nil {
@@ -714,7 +860,15 @@ func (p *Powerwall) Din(ctx context.Context) *string {
 	return &strVal
 }
 
-// Vitals returns full device vitals.
+// Vitals returns per-device vitals keyed by device name (e.g. "TETHC--1",
+// "PVAC--2"), each device's own fields keyed by field name (e.g.
+// "THC_AmbientTemp", "PVAC_Vsolar0"). Only [ModeLocal], [ModeTEDAPI], and
+// [ModeV1r] support this; cloud and FleetAPI connections silently return an
+// empty [models.VitalsData] with a nil error, since Tesla's cloud APIs do
+// not expose per-device vitals - a nil error does not mean the site
+// genuinely has no devices, so check [Powerwall.Mode] first if that
+// distinction matters. An error is returned only when the active backend
+// does have a client but that client's own Vitals call failed.
 func (p *Powerwall) Vitals(ctx context.Context) (models.VitalsData, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -751,7 +905,12 @@ func (p *Powerwall) Vitals(ctx context.Context) (models.VitalsData, error) {
 	return models.VitalsData{Devices: devices}, nil
 }
 
-// Temps returns temperatures of Powerwalls from vitals TETHC devices.
+// Temps returns each Powerwall's ambient temperature in Celsius, keyed by
+// device name, read from the "THC_AmbientTemp" field of every device whose
+// name starts with "TETHC" in [Powerwall.Vitals]. It returns an empty
+// [models.PowerwallTemps] - never an error - if Vitals fails or the site
+// has no TETHC devices; the two cases are not distinguishable from the
+// result.
 func (p *Powerwall) Temps(ctx context.Context) models.PowerwallTemps {
 	temps := make(map[string]float64)
 	vitals, err := p.Vitals(ctx)
@@ -770,7 +929,14 @@ func (p *Powerwall) Temps(ctx context.Context) models.PowerwallTemps {
 	return models.PowerwallTemps{Temps: temps}
 }
 
-// Alerts returns active system and device alerts.
+// Alerts returns the sorted, de-duplicated union of every device's alert
+// list from [Powerwall.Vitals] plus a synthesized grid-status alert
+// ("GridServicesActive" or the raw grid status string). It accepts a
+// variadic bool for signature parity with pypowerwall's alerts(), but the
+// parameter is ignored entirely - there is no way to filter or otherwise
+// change Alerts' behavior by passing one. Errors from the underlying Vitals
+// and Poll calls are silently discarded; a disconnected Powerwall returns
+// an empty (but non-nil) [models.AlertsList] rather than an error.
 func (p *Powerwall) Alerts(ctx context.Context, _ ...bool) models.AlertsList {
 	alertSet := make(map[string]struct{})
 
@@ -810,7 +976,16 @@ func (p *Powerwall) Alerts(ctx context.Context, _ ...bool) models.AlertsList {
 	return models.AlertsList{Alerts: list}
 }
 
-// Strings returns solar string measurements.
+// Strings returns per-solar-string measurements (voltage, current, power),
+// keyed by "<PVAC device name>_<label>" (label is one of A/B/C/D) so that a
+// site with more than one PVAC inverter keeps each device's four strings
+// distinct rather than colliding. It accepts a variadic bool for signature
+// parity with pypowerwall's strings(), but the parameter is ignored
+// entirely - there is no way to change Strings' behavior by passing one.
+// Only [ModeLocal], [ModeTEDAPI], and [ModeV1r] populate this (see
+// [Powerwall.Vitals]); other modes, and any failure of the underlying
+// Vitals call, silently return an empty (but non-nil)
+// [models.SolarStrings].
 func (p *Powerwall) Strings(ctx context.Context, _ ...bool) models.SolarStrings {
 	strMap := make(map[string]models.StringMetric)
 	vitals, _ := p.Vitals(ctx)
@@ -842,7 +1017,11 @@ func (p *Powerwall) Strings(ctx context.Context, _ ...bool) models.SolarStrings 
 	return models.SolarStrings{Strings: strMap}
 }
 
-// BatteryBlocks returns battery module data.
+// BatteryBlocks returns per-battery-module data from "/api/system_status",
+// keyed by package serial number. It never returns an error: a
+// disconnected Powerwall, a poll failure, a missing "battery_blocks" field,
+// or a block with an empty serial number (silently dropped rather than
+// added under an empty key) all just shrink or empty the returned map.
 func (p *Powerwall) BatteryBlocks(ctx context.Context) map[string]models.BatteryBlock {
 	res := make(map[string]models.BatteryBlock)
 	sys := p.Poll(ctx, "/api/system_status")
@@ -869,7 +1048,12 @@ func (p *Powerwall) BatteryBlocks(ctx context.Context) map[string]models.Battery
 	return res
 }
 
-// SystemStatus returns full system status.
+// SystemStatus returns the full decoded "/api/system_status" response as a
+// [models.SystemStatus]. It returns [ErrNotFound] if the underlying poll
+// produced no data (which also covers "no connection" and any network
+// failure, since [Powerwall.PollRaw] does not distinguish those from a
+// genuine 404), or a wrapped JSON error if the response could not be
+// decoded into the struct.
 func (p *Powerwall) SystemStatus(ctx context.Context) (models.SystemStatus, error) {
 	raw := p.PollRaw(ctx, "/api/system_status")
 	if len(raw) == 0 {
@@ -883,7 +1067,12 @@ func (p *Powerwall) SystemStatus(ctx context.Context) (models.SystemStatus, erro
 	return res, nil
 }
 
-// SOE returns state of energy percentage.
+// SOE returns the decoded "/api/system_status/soe" response (state-of-energy
+// percentage) as a [models.SOE]. Like [Powerwall.SystemStatus], it returns
+// [ErrNotFound] for "no data" (which includes "no connection") and a
+// wrapped JSON error on a decode failure. Prefer this over
+// [Powerwall.Level] when an error return is more useful than a nil
+// *float64.
 func (p *Powerwall) SOE(ctx context.Context) (models.SOE, error) {
 	raw := p.PollRaw(ctx, "/api/system_status/soe")
 	if len(raw) == 0 {
@@ -897,7 +1086,17 @@ func (p *Powerwall) SOE(ctx context.Context) (models.SOE, error) {
 	return res, nil
 }
 
-// GridStatus returns grid status formatted according to outputType.
+// GridStatus reports whether the site is connected to the grid, formatted
+// according to outputType (only outputType[0] is read; the default when
+// omitted is [GridStatusString]). The dynamic type of the result depends on
+// which GridStatusOutput was requested: [GridStatusString] (default) and
+// [GridStatusJSON] both return a string ("Connected"/"Transition", or a
+// JSON-encoded [models.GridStatusResponse]/"{}" on failure);
+// [GridStatusNumeric] returns an int, 1 or 0. If the underlying
+// [Powerwall.GridStatusResponse] call fails, GridStatus reports "Unknown"
+// (or "{}" for JSON) rather than surfacing the error - use
+// GridStatusResponse directly when the failure needs to be distinguished
+// from a genuine "Transition" state.
 func (p *Powerwall) GridStatus(ctx context.Context, outputType ...GridStatusOutput) any {
 	t := GridStatusString
 	if len(outputType) > 0 {
@@ -933,7 +1132,11 @@ func (p *Powerwall) GridStatus(ctx context.Context, outputType ...GridStatusOutp
 	}
 }
 
-// GridStatusResponse returns strongly-typed grid status.
+// GridStatusResponse returns the decoded "/api/system_status/grid_status"
+// response as a [models.GridStatusResponse]. Like [Powerwall.SystemStatus],
+// it returns [ErrNotFound] for "no data" (which includes "no connection")
+// and a wrapped JSON error on a decode failure. [Powerwall.GridStatus]
+// builds its formatted output on top of this call.
 func (p *Powerwall) GridStatusResponse(ctx context.Context) (models.GridStatusResponse, error) {
 	raw := p.PollRaw(ctx, "/api/system_status/grid_status")
 	if len(raw) == 0 {
@@ -947,7 +1150,11 @@ func (p *Powerwall) GridStatusResponse(ctx context.Context) (models.GridStatusRe
 	return res, nil
 }
 
-// Operation returns active mode and backup reserve percentage.
+// Operation returns the decoded "/api/operation" response - the current
+// real mode and backup reserve percentage - as a [models.Operation], using
+// the poll cache. Like [Powerwall.SystemStatus], it returns [ErrNotFound]
+// for "no data" (which includes "no connection") and a wrapped JSON error
+// on a decode failure.
 func (p *Powerwall) Operation(ctx context.Context) (models.Operation, error) {
 	return p.readOperation(ctx, false)
 }
@@ -973,7 +1180,11 @@ func (p *Powerwall) readOperation(ctx context.Context, force bool) (models.Opera
 	return res, nil
 }
 
-// SiteInfo returns site configuration parameters.
+// SiteInfo returns the decoded "/api/site_info" response - site
+// configuration parameters such as timezone, grid code, and nominal system
+// energy/power - as a [models.SiteInfo]. Like [Powerwall.SystemStatus], it
+// returns [ErrNotFound] for "no data" (which includes "no connection") and
+// a wrapped JSON error on a decode failure.
 func (p *Powerwall) SiteInfo(ctx context.Context) (models.SiteInfo, error) {
 	raw := p.PollRaw(ctx, "/api/site_info")
 	if len(raw) == 0 {
@@ -987,7 +1198,15 @@ func (p *Powerwall) SiteInfo(ctx context.Context) (models.SiteInfo, error) {
 	return res, nil
 }
 
-// GetReserve returns current backup reserve percentage.
+// GetReserve returns the current backup reserve percentage, or nil if it
+// could not be retrieved - this wraps [Powerwall.Operation], so "no
+// connection" and any error from that call both collapse to nil, with the
+// underlying error discarded. scale, if given, only its first element is
+// read: false (the default when omitted) returns the raw percentage; true
+// rescales it with
+// [github.com/blackbirdworks/gopowerwall/pkgs/calc.ScaleBatteryLevel], the
+// same scaling [Powerwall.Level] applies. GetReserve uses the poll cache;
+// see [Powerwall.GetReserveForced] for an uncached read.
 func (p *Powerwall) GetReserve(ctx context.Context, scale ...bool) *float64 {
 	op, err := p.Operation(ctx)
 	if err != nil {
@@ -1001,10 +1220,12 @@ func (p *Powerwall) GetReserve(ctx context.Context, scale ...bool) *float64 {
 	return &val
 }
 
-// GetReserveForced returns the current backup reserve percentage (scaled),
-// bypassing the poll cache. Callers use this right after a reserve write to
-// confirm the value Tesla actually applied, since cloud/FleetAPI silently cap
-// the requested reserve (e.g. to 80%) rather than rejecting the write.
+// GetReserveForced returns the current backup reserve percentage (always
+// scaled, unlike [Powerwall.GetReserve]), bypassing the poll cache, or nil
+// if it could not be retrieved with the underlying error discarded.
+// Callers use this right after a reserve write to confirm the value Tesla
+// actually applied, since cloud/FleetAPI silently cap the requested reserve
+// (e.g. to 80%) rather than rejecting the write.
 func (p *Powerwall) GetReserveForced(ctx context.Context) *float64 {
 	op, err := p.readOperation(ctx, true)
 	if err != nil {
@@ -1015,7 +1236,11 @@ func (p *Powerwall) GetReserveForced(ctx context.Context) *float64 {
 	return &val
 }
 
-// GetMode returns current real mode.
+// GetMode returns the current real operating mode (e.g.
+// "self_consumption"), or nil if it could not be retrieved or was empty -
+// "no connection", an error from the underlying [Powerwall.Operation] call,
+// and "the gateway reported an empty mode string" are all reported the
+// same way, with any underlying error discarded.
 func (p *Powerwall) GetMode(ctx context.Context) *string {
 	op, err := p.Operation(ctx)
 	if err != nil || op.RealMode == "" {
@@ -1025,12 +1250,20 @@ func (p *Powerwall) GetMode(ctx context.Context) *string {
 	return &op.RealMode
 }
 
-// SetReserve sets the battery reserve level (0-100).
+// SetReserve sets the battery backup reserve to level, a percentage in
+// [0, 100]. It is a thin wrapper over [Powerwall.SetOperation] with mode
+// left nil; see SetOperation's doc comment for the local-mode back-fill
+// behavior this triggers and for what the returned [models.Operation]
+// actually contains.
 func (p *Powerwall) SetReserve(ctx context.Context, level float64) (models.Operation, error) {
 	return p.SetOperation(ctx, &level, nil)
 }
 
-// SetMode sets the battery operation mode.
+// SetMode sets the battery's real operating mode (e.g.
+// "self_consumption"). It is a thin wrapper over [Powerwall.SetOperation]
+// with level left nil; see SetOperation's doc comment for the local-mode
+// back-fill behavior this triggers and for what the returned
+// [models.Operation] actually contains.
 func (p *Powerwall) SetMode(ctx context.Context, mode string) (models.Operation, error) {
 	return p.SetOperation(ctx, nil, &mode)
 }
@@ -1069,7 +1302,16 @@ func (p *Powerwall) backfillLocalOperation(
 	return level, mode, nil
 }
 
-// SetOperation sets battery reserve percentage and/or operation mode.
+// SetOperation sets the battery's backup reserve percentage and/or
+// operating mode; pass nil for whichever of level/mode should be left
+// unchanged. It returns [backend.ErrReserveOutOfRange] if level is outside
+// [0, 100] without attempting the write. On success, the returned
+// [models.Operation] simply echoes back the level/mode values SetOperation
+// sent (after any local-mode back-fill) - it is not a fresh read-back
+// confirming what the gateway actually applied; call
+// [Powerwall.GetReserveForced] or [Powerwall.Operation] afterward if that
+// confirmation matters (notably, cloud/FleetAPI silently cap the requested
+// reserve rather than rejecting an out-of-range write of their own).
 //
 // The local gateway's /api/operation endpoint is a full overwrite: any field
 // omitted from the POST body is reset by the gateway rather than left
@@ -1120,7 +1362,10 @@ func (p *Powerwall) SetOperation(ctx context.Context, level *float64, mode *stri
 	return result, nil
 }
 
-// GetTimeRemaining returns backup time remaining in hours.
+// GetTimeRemaining returns estimated backup time remaining in hours, or nil
+// if it could not be retrieved - no client for the active mode or an error
+// from the backend's own call are both reported the same way, with the
+// underlying error discarded.
 func (p *Powerwall) GetTimeRemaining(ctx context.Context) *float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1157,7 +1402,13 @@ func (p *Powerwall) GetTimeRemaining(ctx context.Context) *float64 {
 	return nil
 }
 
-// SetGridCharging enables or disables grid charging.
+// SetGridCharging enables or disables charging the battery from the grid.
+// Only [ModeCloud] and [ModeFleetAPI] support this; other modes return
+// [ErrUnsupported]. On both success and backend failure the returned
+// [models.Operation] simply echoes mode back in its GridCharging field - it
+// is not a read-back of what the gateway actually applied, so a non-nil
+// error must still be checked even though the result value looks
+// "correct".
 func (p *Powerwall) SetGridCharging(ctx context.Context, mode bool) (models.Operation, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1182,7 +1433,11 @@ func (p *Powerwall) SetGridCharging(ctx context.Context, mode bool) (models.Oper
 	return models.Operation{}, ErrUnsupported
 }
 
-// GetGridCharging returns the current grid charging setting.
+// GetGridCharging returns whether charging the battery from the grid is
+// currently enabled, or nil if it could not be retrieved. Only [ModeCloud]
+// and [ModeFleetAPI] support this; other modes, as well as any error from
+// the backend's own call, are both reported as nil with the underlying
+// error discarded.
 func (p *Powerwall) GetGridCharging(ctx context.Context) *bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1207,7 +1462,15 @@ func (p *Powerwall) GetGridCharging(ctx context.Context) *bool {
 	return nil
 }
 
-// SetGridExport sets grid export mode.
+// SetGridExport sets the grid export mode, which must be one of
+// "battery_ok", "pv_only", or "never" - any other value returns
+// [backend.ErrInvalidGridExportMode] without attempting the write. Only
+// [ModeCloud] and [ModeFleetAPI] support this; other modes return
+// [ErrUnsupported]. On both success and backend failure the returned
+// [models.Operation] simply echoes mode back in its GridExport field - it
+// is not a read-back of what the gateway actually applied, so a non-nil
+// error must still be checked even though the result value looks
+// "correct".
 func (p *Powerwall) SetGridExport(ctx context.Context, mode string) (models.Operation, error) {
 	if mode != "battery_ok" && mode != "pv_only" && mode != "never" {
 		return models.Operation{}, fmt.Errorf(
@@ -1240,7 +1503,11 @@ func (p *Powerwall) SetGridExport(ctx context.Context, mode string) (models.Oper
 	return models.Operation{}, ErrUnsupported
 }
 
-// GetGridExport returns current grid export mode.
+// GetGridExport returns the current grid export mode ("battery_ok",
+// "pv_only", or "never"), or nil if it could not be retrieved. Only
+// [ModeCloud] and [ModeFleetAPI] support this; other modes, as well as any
+// error from the backend's own call, are both reported as nil with the
+// underlying error discarded.
 func (p *Powerwall) GetGridExport(ctx context.Context) *string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1265,7 +1532,12 @@ func (p *Powerwall) GetGridExport(ctx context.Context) *string {
 	return nil
 }
 
-// ScheduleMaxBackup schedules a maximum backup event.
+// ScheduleMaxBackup schedules a maximum backup event lasting
+// durationSeconds (only durationSeconds[0] is read; the default when
+// omitted is 3600, one hour). Only a TEDAPI-based connection ([ModeTEDAPI]
+// or [ModeV1r]) supports this; other modes return [ErrUnsupported]. The
+// returned [models.Operation] is always the zero value even on success -
+// it carries no information about the scheduled event.
 func (p *Powerwall) ScheduleMaxBackup(ctx context.Context, durationSeconds ...int) (models.Operation, error) {
 	dur := defaultBackupDur
 	if len(durationSeconds) > 0 {
@@ -1284,7 +1556,11 @@ func (p *Powerwall) ScheduleMaxBackup(ctx context.Context, durationSeconds ...in
 	return models.Operation{}, ErrUnsupported
 }
 
-// CancelMaxBackup cancels a scheduled maximum backup event.
+// CancelMaxBackup cancels a previously scheduled maximum backup event
+// ([Powerwall.ScheduleMaxBackup]). Only a TEDAPI-based connection
+// ([ModeTEDAPI] or [ModeV1r]) supports this; other modes return
+// [ErrUnsupported]. The returned [models.Operation] is always the zero
+// value even on success.
 func (p *Powerwall) CancelMaxBackup(ctx context.Context) (models.Operation, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1298,7 +1574,10 @@ func (p *Powerwall) CancelMaxBackup(ctx context.Context) (models.Operation, erro
 	return models.Operation{}, ErrUnsupported
 }
 
-// GetBackupEvents queries backup event history.
+// GetBackupEvents returns the gateway's backup event history as a
+// map[string]any decoded from the TEDAPI response - there is no typed model
+// for this data yet. Only a TEDAPI-based connection ([ModeTEDAPI] or
+// [ModeV1r]) supports this; other modes return [ErrUnsupported].
 func (p *Powerwall) GetBackupEvents(ctx context.Context) (map[string]any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1310,7 +1589,13 @@ func (p *Powerwall) GetBackupEvents(ctx context.Context) (map[string]any, error)
 	return nil, ErrUnsupported
 }
 
-// GoOffGrid disconnects system from the grid.
+// GoOffGrid disconnects the system from the grid, deliberately taking the
+// site off-grid. confirm must be true or GoOffGrid refuses the request with
+// [ErrOffGridConfirm] rather than acting on it - this guard exists because
+// the operation is disruptive and hard to reverse instantly. Only a
+// TEDAPI-based connection ([ModeTEDAPI] or [ModeV1r]) supports this; other
+// modes return [ErrUnsupported]. The returned [models.Operation] is always
+// the zero value even on success.
 func (p *Powerwall) GoOffGrid(ctx context.Context, confirm bool) (models.Operation, error) {
 	if !confirm {
 		return models.Operation{}, ErrOffGridConfirm
@@ -1328,7 +1613,10 @@ func (p *Powerwall) GoOffGrid(ctx context.Context, confirm bool) (models.Operati
 	return models.Operation{}, ErrUnsupported
 }
 
-// ReconnectGrid reconnects system to the grid.
+// ReconnectGrid reconnects the system to the grid after
+// [Powerwall.GoOffGrid]. Only a TEDAPI-based connection ([ModeTEDAPI] or
+// [ModeV1r]) supports this; other modes return [ErrUnsupported]. The
+// returned [models.Operation] is always the zero value even on success.
 func (p *Powerwall) ReconnectGrid(ctx context.Context) (models.Operation, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1342,7 +1630,10 @@ func (p *Powerwall) ReconnectGrid(ctx context.Context) (models.Operation, error)
 	return models.Operation{}, ErrUnsupported
 }
 
-// GetFileStoreConfig returns TEDAPI configuration if active.
+// GetFileStoreConfig returns the TEDAPI FileStore configuration as a
+// map[string]any - there is no typed model for this data yet. Only a
+// TEDAPI-based connection ([ModeTEDAPI] or [ModeV1r]) supports this; other
+// modes return [ErrUnsupported].
 func (p *Powerwall) GetFileStoreConfig(ctx context.Context) (map[string]any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -1354,7 +1645,11 @@ func (p *Powerwall) GetFileStoreConfig(ctx context.Context) (map[string]any, err
 	return nil, ErrUnsupported
 }
 
-// LookupFloat retrieves a float from an untyped map.
+// LookupFloat retrieves m[key] as a float64, returning 0.0 if the key is
+// absent or its value is neither a float64 nor an int - a missing key and a
+// genuinely zero-valued field are therefore indistinguishable in the
+// result. It exists to decode numeric fields out of the map[string]any
+// device data [Powerwall.Vitals] returns.
 func LookupFloat(m map[string]any, key string) float64 {
 	if v, ok := m[key]; ok {
 		switch num := v.(type) {

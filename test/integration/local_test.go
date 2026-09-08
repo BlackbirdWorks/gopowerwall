@@ -124,24 +124,30 @@ func TestLocalModeReadSurface(t *testing.T) {
 			},
 		},
 		{
-			// BUG (parity mismatch): the simulator's real, recorded
-			// /api/site_info response - reproduced byte-for-byte by
+			// Regression test: the simulator's real, recorded /api/site_info
+			// response - reproduced byte-for-byte by
 			// proxy/web/bogus/api.site_info.json in this repo - nests
 			// grid_code as an object:
 			//   "grid_code":{"grid_code":"...","grid_voltage_setting":240,...}
-			// but models.SiteInfo declares GridCode as a plain `string`.
-			// json.Unmarshal therefore fails on every real gateway's
-			// /api/site_info response, and Powerwall.SiteInfo always
-			// returns an error rather than populated site info. This test
-			// documents the current (broken) behavior; see this suite's
-			// integration report for the fix (GridCode should be a struct
-			// mirroring the nested grid_code object).
-			name: "SiteInfo fails to unmarshal the simulator's real response shape",
+			// models.SiteInfo.GridCode used to be typed as a plain `string`,
+			// so json.Unmarshal failed on every real gateway's /api/site_info
+			// response and Powerwall.SiteInfo always returned an error
+			// rather than populated site info. GridCode is now
+			// models.GridCodeInfo, mirroring the nested object, so the call
+			// succeeds and the nested fields decode correctly.
+			name: "SiteInfo decodes the simulator's real grid_code object",
 			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
 				t.Helper()
-				_, err := pw.SiteInfo(t.Context())
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "grid_code")
+				info, err := pw.SiteInfo(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, "Tesla Energy Gateway", info.SiteName)
+				assert.Equal(t, "60Hz_240V_s_UL1741SA:2019_California", info.GridCode.GridCode)
+				assert.InDelta(t, 240.0, info.GridCode.GridVoltageSetting, 0.001)
+				assert.InDelta(t, 60.0, info.GridCode.GridFreqSetting, 0.001)
+				assert.Equal(t, "Split", info.GridCode.GridPhaseSetting)
+				assert.Equal(t, "United States", info.GridCode.Country)
+				assert.Equal(t, "California", info.GridCode.State)
+				assert.Equal(t, "Southern California Edison", info.GridCode.Utility)
 			},
 		},
 		{

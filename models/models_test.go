@@ -129,6 +129,25 @@ func TestFixtureRoundTrip(t *testing.T) {
 			},
 		},
 		{
+			name:    "SiteInfo decodes the nested grid_code object from a real gateway",
+			fixture: "api.site_info.json",
+			verify: func(t *testing.T, raw []byte) {
+				t.Helper()
+
+				var si models.SiteInfo
+				require.NoError(t, json.Unmarshal(raw, &si))
+				assert.Equal(t, "Tesla Energy Gateway", si.SiteName)
+				assert.InDelta(t, 27.0, si.MaxSystemEnergyKWH, 0.001)
+				assert.Equal(t, "60Hz_240V_s_UL1741SA:2019_California", si.GridCode.GridCode)
+				assert.InDelta(t, 240.0, si.GridCode.GridVoltageSetting, 0.001)
+				assert.InDelta(t, 60.0, si.GridCode.GridFreqSetting, 0.001)
+				assert.Equal(t, "Split", si.GridCode.GridPhaseSetting)
+				assert.Equal(t, "United States", si.GridCode.Country)
+				assert.Equal(t, "California", si.GridCode.State)
+				assert.Equal(t, "Southern California Edison", si.GridCode.Utility)
+			},
+		},
+		{
 			name:    "SystemStatus decodes /api/system_status nested battery blocks",
 			fixture: "api.system_status.json",
 			verify: func(t *testing.T, raw []byte) {
@@ -170,14 +189,9 @@ func TestFixtureRoundTrip(t *testing.T) {
 	}
 }
 
-// TestKnownFixtureMismatches is a bug report in test form. Two DTOs disagree
+// TestKnownFixtureMismatches is a bug report in test form. One DTO disagrees
 // with the shape of a real recorded gateway response:
 //
-//   - models.SiteInfo.GridCode is typed string, but /api/site_info nests a
-//     full grid-code descriptor object under "grid_code" (see
-//     proxy/web/bogus/api.site_info.json). Powerwall.SiteInfo(ctx) always
-//     fails to unmarshal against a real gateway as a result, returning an
-//     error on every call.
 //   - models.MeterReading.Timeout is typed bool, but /api/meters/aggregates
 //     reports a numeric duration in nanoseconds (e.g. 1500000000). This is
 //     latent rather than actively broken today: MetersAggregates is only
@@ -185,9 +199,12 @@ func TestFixtureRoundTrip(t *testing.T) {
 //     production currently unmarshals a live payload into it. It would fail
 //     the same way the moment it is wired up.
 //
-// Per project convention these are reported here rather than silently
-// patched; fixing them is a product decision (SiteInfo.GridCode would need
-// to become a struct, which is a breaking change to an exported type).
+// Per project convention this is reported here rather than silently patched.
+//
+// models.SiteInfo.GridCode previously had the same class of problem (typed
+// string against a nested object on the wire) and has since been fixed by
+// introducing models.GridCodeInfo; see TestFixtureRoundTrip's
+// "SiteInfo decodes the nested grid_code object from a real gateway" case.
 func TestKnownFixtureMismatches(t *testing.T) {
 	t.Parallel()
 
@@ -199,12 +216,6 @@ func TestKnownFixtureMismatches(t *testing.T) {
 	}
 
 	for _, tc := range []testCase{
-		{
-			name:        "SiteInfo.GridCode cannot decode the real grid_code object",
-			fixture:     "api.site_info.json",
-			target:      &models.SiteInfo{},
-			wantErrText: "grid_code",
-		},
 		{
 			name:        "MetersAggregates.Timeout cannot decode the real numeric timeout",
 			fixture:     "api.meters.aggregates.json",

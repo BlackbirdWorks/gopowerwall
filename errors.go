@@ -45,4 +45,10 @@ var (
 	ErrOperationBackfillFailed = backend.ErrOperationBackfillFailed
 )
 
+// InvalidConfigError is an alias of
+// [github.com/blackbirdworks/gopowerwall/backend.InvalidConfigError],
+// returned by [ValidateConfig] (and so by [New], which calls it) when a
+// [Config] field is malformed - an unparsable host/port, an invalid email in
+// cloud mode, or a cache/auth directory that cannot be created or written
+// to. Use [errors.As] to recover the offending parameter name and message.
 type InvalidConfigError = backend.InvalidConfigError

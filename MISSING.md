@@ -142,6 +142,23 @@ but never reads it back anywhere in `backend/tedapi/*.go` (confirmed by grep for
 that would send a `bearer` token instead. Setting `PW_TEDAPI_AUTH_MODE=bearer` or calling
 `WithTEDAPIAuthMode(gopowerwall.AuthModeBearer)` currently changes nothing observable.
 
+
+## Corrupt recorded fixtures
+
+Four files under `proxy/web/bogus/` are failed captures rather than valid gateway
+responses, inherited from pypowerwall's own fixture directory:
+
+| File | Contents |
+|---|---|
+| `api.meters.readings.json` | 8 bytes, the literal text `TIMEOUT!` |
+| `api.site_info.grid_codes.json` | 8 bytes, the literal text `TIMEOUT!` |
+| `api.system.networks.json` | 8 bytes, the literal text `TIMEOUT!` |
+| `api.solars.brands.json` | 5333 bytes of JSON array truncated mid-string |
+
+Nothing serves them at runtime and no test uses them, so they are inert. They are
+recorded here because they look authoritative and will mislead anyone reaching for
+a fixture. Re-capture them from a real gateway or the simulator before use.
+
 ## Lower-priority housekeeping
 
 - `.golangci.yml` still carries lint-exclusion rules for `pkgs/lockmetrics/lockmetrics.go`,
