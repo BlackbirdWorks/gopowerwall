@@ -26,6 +26,25 @@ type Entry struct {
 	IsNegative bool
 }
 
+// rawKeyPrefix namespaces the raw (undecoded) representation of an endpoint
+// so it never collides with a parsed/decoded representation cached under the
+// bare endpoint key. The NUL byte cannot appear in an HTTP path or in the
+// literal cache keys backends use (e.g. "SITE_CONFIG"), so it cannot collide
+// with a real key.
+const rawKeyPrefix = "raw\x00"
+
+// RawKey derives the cache key that stores the raw (undecoded) representation
+// of key, keeping it distinct from any parsed representation cached under the
+// bare key. A backend that caches both a raw and a parsed reading of the same
+// endpoint must use RawKey(api) for the raw one and api itself for the
+// parsed one - never the same key for both - otherwise a type assertion on
+// the cached value can fail depending on which representation was cached
+// most recently. See backend/local for the caller-side handling this
+// requires for negative caching to stay consistent across both keyspaces.
+func RawKey(key string) string {
+	return rawKeyPrefix + key
+}
+
 // ResponseCache wraps ttlcache.Cache for backend HTTP and TEDAPI response caching with negative TTL and cooldown.
 type ResponseCache struct {
 	cache        *ttlcache.Cache[string, *Entry]
@@ -94,16 +113,18 @@ func (c *ResponseCache) SetNegative(key string, ttl time.Duration) {
 	}, ttl)
 }
 
-// Invalidate clears cache entries mapped to a write endpoint.
+// Invalidate clears cache entries mapped to a write endpoint. Both the
+// parsed keyspace (the bare key) and the raw keyspace ([RawKey] of it) are
+// cleared for every affected key, so a write leaves no stale representation
+// behind regardless of which one a subsequent read asks for.
 func (c *ResponseCache) Invalidate(api string) {
 	keys, ok := WriteOpReadOpCacheMap[api]
 	if !ok {
-		c.cache.Delete(api)
-
-		return
+		keys = []string{api}
 	}
 	for _, k := range keys {
 		c.cache.Delete(k)
+		c.cache.Delete(RawKey(k))
 	}
 }
 

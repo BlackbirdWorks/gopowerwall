@@ -11,10 +11,12 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -302,19 +304,53 @@ func TestV1rGetDin(t *testing.T) {
 func TestV1rBuildTLVPayload(t *testing.T) {
 	t.Parallel()
 
-	v := newV1r(t, "127.0.0.1:1")
-	inner := []byte{0xAA, 0xBB}
-	got := v.BuildTLVPayload("DIN1", 0x01020304, inner)
-
-	want := []byte{
-		0x00, 0x01, 0x07, // signature type = RSA(7)
-		0x01, 0x01, 0x07, // domain = ENERGY_DEVICE(7)
-		0x02, 0x04, 'D', 'I', 'N', '1', // personalization = din
-		0x04, 0x04, 0x01, 0x02, 0x03, 0x04, // expires at, big-endian
-		0xFF,       // end tag
-		0xAA, 0xBB, // inner payload appended
+	type testCase struct {
+		name    string
+		din     string
+		wantErr error
+		inner   []byte
+		want    []byte
 	}
-	assert.Equal(t, want, got)
+
+	cases := []testCase{
+		{
+			name:  "a normal din encodes a valid TLV payload",
+			din:   "DIN1",
+			inner: []byte{0xAA, 0xBB},
+			want: []byte{
+				0x00, 0x01, 0x07, // signature type = RSA(7)
+				0x01, 0x01, 0x07, // domain = ENERGY_DEVICE(7)
+				0x02, 0x04, 'D', 'I', 'N', '1', // personalization = din
+				0x04, 0x04, 0x01, 0x02, 0x03, 0x04, // expires at, big-endian
+				0xFF,       // end tag
+				0xAA, 0xBB, // inner payload appended
+			},
+		},
+		{
+			name:    "a din over the single-byte length prefix is rejected",
+			din:     strings.Repeat("D", 256),
+			inner:   []byte{0xAA},
+			wantErr: backend.ErrDinTooLong,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			v := newV1r(t, "127.0.0.1:1")
+			got, err := v.BuildTLVPayload(tc.din, 0x01020304, tc.inner)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, got)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestV1rSignProducesAVerifiableSignature(t *testing.T) {
@@ -503,6 +539,76 @@ func TestV1rPostV1r(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.Canceled)
 	})
+}
+
+// TestV1rScheduleMaxBackupValidatesDuration is a regression test for a
+// go/incorrect-integer-conversion CodeQL finding: ScheduleMaxBackup narrowed
+// its int durationSeconds argument into a uint32 wire field with no range
+// check, so a negative value would wrap to roughly 4.29 billion seconds and
+// a value above math.MaxUint32 would silently truncate - either way
+// scheduling a wildly wrong backup event on real hardware.
+//
+// The host is deliberately unreachable ("127.0.0.1:1"): every case reaches
+// the network and fails, so an out-of-range case is distinguished from an
+// in-range one only by whether ErrInvalidBackupDuration was the cause. That
+// proves validation runs (and rejects, or lets through) before any network
+// call or uint32 conversion is attempted.
+func TestV1rScheduleMaxBackupValidatesDuration(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name            string
+		durationSeconds int
+		wantValidateErr bool
+	}
+
+	cases := []testCase{
+		{
+			name:            "negative duration is rejected",
+			durationSeconds: -1,
+			wantValidateErr: true,
+		},
+		{
+			name:            "zero is within range",
+			durationSeconds: 0,
+			wantValidateErr: false,
+		},
+		{
+			name:            "a normal duration is within range",
+			durationSeconds: 3600,
+			wantValidateErr: false,
+		},
+		{
+			name:            "the maximum representable duration is the boundary and is accepted",
+			durationSeconds: math.MaxUint32,
+			wantValidateErr: false,
+		},
+		{
+			name:            "one past the maximum is rejected",
+			durationSeconds: math.MaxUint32 + 1,
+			wantValidateErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			v := newV1r(t, "127.0.0.1:1")
+			_, err := v.ScheduleMaxBackup(t.Context(), tc.durationSeconds)
+			require.Error(t, err, "127.0.0.1:1 is unreachable, every case must fail somehow")
+
+			if tc.wantValidateErr {
+				assert.ErrorIs(t, err, backend.ErrInvalidBackupDuration)
+
+				return
+			}
+			assert.NotErrorIs(
+				t, err, backend.ErrInvalidBackupDuration,
+				"an in-range duration must not be rejected by validation",
+			)
+		})
+	}
 }
 
 func TestV1rScheduleAndCancelMaxBackup(t *testing.T) {

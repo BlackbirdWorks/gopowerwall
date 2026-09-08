@@ -426,3 +426,91 @@ func TestPureTEDAPIAndV1rModesReportTheirOwnConnectionMode(t *testing.T) {
 		})
 	}
 }
+
+// TestSOEAndGridStatusResponseSurviveEarlierParsedPoll is the regression
+// test for the local-mode response cache conflating raw and parsed reads of
+// the same endpoint under one cache key. SOE and GridStatusResponse both
+// fetch their endpoint via PollRaw, which requires a []byte back from the
+// cache; before the fix, an earlier *parsed* Poll of the same endpoint left
+// a map[string]any cached under the bare endpoint key, so PollRaw's
+// val.([]byte) type assertion failed, PollRaw returned nil, and SOE /
+// GridStatusResponse both reported ErrNotFound even though the gateway
+// served the data correctly. That is exactly the failure the CI integration
+// suite caught against the real pwsimulator emulator.
+func TestSOEAndGridStatusResponseSurviveEarlierParsedPoll(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		run  func(t *testing.T, pw *gopowerwall.Powerwall)
+		name string
+		api  string
+		body string
+	}
+
+	for _, tc := range []testCase{
+		{
+			name: "SOE succeeds after an earlier parsed Poll of the same endpoint",
+			api:  "/api/system_status/soe",
+			body: `{"percentage": 20.109166592431226}`,
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+
+				soe, err := pw.SOE(t.Context())
+				require.NoError(t, err)
+				assert.InDelta(t, 20.109166592431226, soe.Percentage, 0.0000001)
+			},
+		},
+		{
+			name: "GridStatusResponse succeeds after an earlier parsed Poll of the same endpoint",
+			api:  "/api/system_status/grid_status",
+			body: `{"grid_status":"SystemGridConnected","grid_services_active":false}`,
+			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+				t.Helper()
+
+				status, err := pw.GridStatusResponse(t.Context())
+				require.NoError(t, err)
+				assert.Equal(t, "SystemGridConnected", status.GridStatus)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					http.SetCookie(w, &http.Cookie{Name: "AuthCookie", Value: "cookie-value"})
+					http.SetCookie(w, &http.Cookie{Name: "UserRecord", Value: "user-value"})
+					w.WriteHeader(http.StatusOK)
+				case tc.api:
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(tc.body))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			pw, err := gopowerwall.New(
+				t.Context(),
+				gopowerwall.WithHost(server.Listener.Addr().String()),
+				gopowerwall.WithPassword("password"),
+				gopowerwall.WithCloudMode(false),
+				gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
+			)
+			require.NoError(t, err)
+			require.True(t, pw.IsConnected())
+
+			// Poll the endpoint parsed first. This is what left a
+			// map[string]any cached under the bare endpoint key before the
+			// fix, so the raw poll SOE/GridStatusResponse rely on could no
+			// longer find its []byte value there.
+			parsed := pw.Poll(t.Context(), tc.api)
+			require.NotNil(t, parsed)
+			_, ok := parsed.(map[string]any)
+			require.True(t, ok)
+
+			tc.run(t, pw)
+		})
+	}
+}

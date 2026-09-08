@@ -47,6 +47,18 @@ const (
 	minBackupSeconds = 60
 	tzChicago        = "America/Chicago"
 	keyTimezone      = "timezone"
+
+	// maxBackupSeconds is the upper bound accepted by ScheduleMaxBackup,
+	// enforced before the value is narrowed into the protobuf
+	// DurationSeconds field, which is uint32. This is the type's own
+	// limit (math.MaxUint32), not a documented upstream limit: neither
+	// pypowerwall's schedule_max_backup nor docs/parity-matrix.md states a
+	// tighter maximum, so rather than inventing a "sane" cutoff (e.g. 24
+	// hours) that could reject a legitimate request we don't have grounds
+	// for rejecting, this uses the widest value that can round-trip
+	// through the wire field and lets the gateway itself be the authority
+	// on what backup duration makes physical sense.
+	maxBackupSeconds = math.MaxUint32
 )
 
 // TEDAPIv1r implements RSA-signed transport for Powerwall 3 LAN TEDAPI (/tedapi/v1r).
@@ -215,8 +227,19 @@ func (v *TEDAPIv1r) GetDin(ctx context.Context) (string, error) {
 	return din, nil
 }
 
-// BuildTLVPayload builds the binary TLV payload for RSA signing.
-func (v *TEDAPIv1r) BuildTLVPayload(din string, expiresAt uint32, innerBytes []byte) []byte {
+// BuildTLVPayload builds the binary TLV payload for RSA signing. It returns
+// backend.ErrDinTooLong if din is too long for the single-byte length prefix
+// used by tag 2 (TAG_PERSONALIZATION): din is not a compile-time constant,
+// it comes from GetDin, which reads it verbatim off the network (over a
+// connection that skips certificate verification, see
+// docs/tls-verification.md), so its length is not something this function
+// can assume rather than check.
+func (v *TEDAPIv1r) BuildTLVPayload(din string, expiresAt uint32, innerBytes []byte) ([]byte, error) {
+	dinLen := len(din)
+	if dinLen > math.MaxUint8 {
+		return nil, fmt.Errorf("%w: din is %d bytes, maximum is %d", backend.ErrDinTooLong, dinLen, math.MaxUint8)
+	}
+
 	var buf bytes.Buffer
 
 	// Tag 0: TAG_SIGNATURE_TYPE = RSA (7)
@@ -231,8 +254,7 @@ func (v *TEDAPIv1r) BuildTLVPayload(din string, expiresAt uint32, innerBytes []b
 
 	// Tag 2: TAG_PERSONALIZATION = din
 	buf.WriteByte(tagPersonalization)
-	//nolint:gosec // DIN string length is bounded by gateway protocol (< 32 chars).
-	buf.WriteByte(uint8(len(din)))
+	buf.WriteByte(uint8(dinLen))
 	buf.WriteString(din)
 
 	// Tag 4: TAG_EXPIRES_AT = 4-byte big-endian uint32
@@ -248,7 +270,7 @@ func (v *TEDAPIv1r) BuildTLVPayload(din string, expiresAt uint32, innerBytes []b
 	// Append inner payload
 	buf.Write(innerBytes)
 
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 // Sign signs the TLV payload using RSA PKCS#1 v1.5 with SHA-512.
@@ -272,9 +294,19 @@ func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din strin
 		Uuid: []byte(strconv.FormatInt(time.Now().UnixNano(), 10)),
 	}
 
-	//nolint:gosec // Unix timestamp is within 32-bit uint expiration range.
+	// Reviewed narrowing conversion (not a CodeQL finding, checked as part
+	// of hardening the sibling conversion below): time.Now().Unix() is not
+	// user input, and uint32 cannot hold a value this large until the
+	// Unix epoch itself overflows uint32 in the year 2106. This waiver
+	// stays legitimate for the working life of this code.
+	//nolint:gosec // Unix timestamp is within 32-bit uint expiration range until year 2106.
 	expiresAt := uint32(time.Now().Unix()) + expirationOffset
-	tlvPayload := v.BuildTLVPayload(din, expiresAt, envelopeBytes)
+
+	tlvPayload, err := v.BuildTLVPayload(din, expiresAt, envelopeBytes)
+	if err != nil {
+		return nil, err
+	}
+
 	sig, err := v.Sign(tlvPayload)
 	if err != nil {
 		return nil, fmt.Errorf("v1r sign error: %w", err)
@@ -300,35 +332,15 @@ func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din strin
 	}
 
 	url := fmt.Sprintf("https://%s/tedapi/v1r", v.host)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBytes))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	resp, err := v.client.Do(req)
+	resp, err := v.doPost(ctx, url, wireBytes)
 	if err != nil {
 		return nil, fmt.Errorf("v1r post error: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		logger.Load(ctx).WarnContext(ctx, "v1r auth error, attempting re-login", "status", resp.StatusCode)
-		if loginErr := v.Login(ctx); loginErr == nil {
-			// Retry once
-			req2, _ := http.NewRequestWithContext(
-				ctx,
-				http.MethodPost,
-				url,
-				bytes.NewReader(wireBytes),
-			)
-			req2.Header.Set("Content-Type", "application/octet-stream")
-			resp2, err2 := v.client.Do(req2)
-			if err2 == nil {
-				defer resp2.Body.Close()
-				resp = resp2
-			}
-		}
+	if retryResp := v.retryAfterReAuth(ctx, resp, url, wireBytes); retryResp != nil {
+		defer retryResp.Body.Close()
+		resp = retryResp
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -356,6 +368,46 @@ func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din strin
 	}
 
 	return respMsg.GetProtobufMessageAsBytes(), nil
+}
+
+// doPost issues a single signed POST of wireBytes to url.
+func (v *TEDAPIv1r) doPost(ctx context.Context, url string, wireBytes []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	return v.client.Do(req)
+}
+
+// retryAfterReAuth re-POSTs wireBytes once after a fresh login when resp
+// indicates the bearer token was rejected (401/403), returning the new
+// response for the caller to use (and close) in place of resp. It returns
+// nil - leaving resp as the caller's response to use - when no retry was
+// attempted, or when the login or the retry itself failed; PostV1r's own
+// status check then reports the (still unauthorized) failure from resp.
+func (v *TEDAPIv1r) retryAfterReAuth(
+	ctx context.Context,
+	resp *http.Response,
+	url string,
+	wireBytes []byte,
+) *http.Response {
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		return nil
+	}
+
+	logger.Load(ctx).WarnContext(ctx, "v1r auth error, attempting re-login", "status", resp.StatusCode)
+	if err := v.Login(ctx); err != nil {
+		return nil
+	}
+
+	retryResp, err := v.doPost(ctx, url, wireBytes)
+	if err != nil {
+		return nil
+	}
+
+	return retryResp
 }
 
 // SendTEGMessage sends a TEGMessages command via v1r and parses the response envelope.
@@ -399,8 +451,39 @@ func (v *TEDAPIv1r) SendTEGMessage(
 	return &respEnv, nil
 }
 
+// validateBackupDuration rejects a duration that cannot round-trip through
+// the wire protocol's uint32 DurationSeconds field: negative values would
+// wrap to roughly 4.29 billion seconds when narrowed with uint32(...), and
+// values above maxBackupSeconds would silently truncate. Both are rejected
+// here, before any conversion is attempted, rather than clamped or masked.
+func validateBackupDuration(durationSeconds int) error {
+	if durationSeconds < 0 {
+		return fmt.Errorf(
+			"%w: duration must not be negative, got %d seconds",
+			backend.ErrInvalidBackupDuration, durationSeconds,
+		)
+	}
+	if int64(durationSeconds) > maxBackupSeconds {
+		return fmt.Errorf(
+			"%w: duration must not exceed %d seconds, got %d",
+			backend.ErrInvalidBackupDuration, int64(maxBackupSeconds), durationSeconds,
+		)
+	}
+
+	return nil
+}
+
 // ScheduleMaxBackup schedules a manual backup event (storm watch / max backup) via v1r TEGMessages.
+// It returns backend.ErrInvalidBackupDuration, wrapped, if durationSeconds is
+// negative or larger than [maxBackupSeconds] - this is validated before any
+// conversion, so an out-of-range value is rejected rather than silently
+// wrapped or truncated when narrowed into the wire protocol's uint32
+// DurationSeconds field.
 func (v *TEDAPIv1r) ScheduleMaxBackup(ctx context.Context, durationSeconds int) (bool, error) {
+	if err := validateBackupDuration(durationSeconds); err != nil {
+		return false, err
+	}
+
 	din, err := v.GetDin(ctx)
 	if err != nil {
 		return false, err

@@ -545,6 +545,114 @@ func TestPollRawAndNonJSON(t *testing.T) {
 	})
 }
 
+// TestPollRawAndParsedCacheIsolation is the regression test for the cache
+// conflating raw and parsed reads of the same endpoint under one key. A
+// parsed poll cached a map[string]any under the bare endpoint key; a raw
+// poll of the same endpoint then read that same key back and tried to
+// assert it to []byte, which failed and silently returned nil. This
+// exercises both orderings against a single *PyPowerwallLocal so a fresh
+// per-test cache cannot mask the bug the way the existing unit tests did.
+func TestPollRawAndParsedCacheIsolation(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		run  func(t *testing.T, b *local.PyPowerwallLocal)
+		name string
+	}
+
+	body := []byte(`{"percentage":42}`)
+
+	for _, tc := range []testCase{
+		{
+			name: "a parsed poll followed by a raw poll still returns raw bytes",
+			run: func(t *testing.T, b *local.PyPowerwallLocal) {
+				t.Helper()
+
+				parsed, err := b.Poll(t.Context(), "/api/system_status/soe", false, false, false)
+				require.NoError(t, err)
+				_, ok := parsed.(map[string]any)
+				require.True(t, ok, "parsed poll should decode a map")
+
+				raw, err := b.Poll(t.Context(), "/api/system_status/soe", false, false, true)
+				require.NoError(t, err)
+				data, ok := raw.([]byte)
+				require.True(t, ok, "raw poll after a parsed poll must return bytes, not the cached parsed value")
+				assert.Equal(t, body, data)
+			},
+		},
+		{
+			name: "a raw poll followed by a parsed poll still returns a decoded map",
+			run: func(t *testing.T, b *local.PyPowerwallLocal) {
+				t.Helper()
+
+				raw, err := b.Poll(t.Context(), "/api/system_status/soe", false, false, true)
+				require.NoError(t, err)
+				_, ok := raw.([]byte)
+				require.True(t, ok, "raw poll should return bytes")
+
+				parsed, err := b.Poll(t.Context(), "/api/system_status/soe", false, false, false)
+				require.NoError(t, err)
+				m, ok := parsed.(map[string]any)
+				require.True(t, ok, "parsed poll after a raw poll must return a decoded map, not the cached raw bytes")
+				assert.InDelta(t, float64(42), m["percentage"], 0)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			}
+			host := hostOf(newTLSServer(t, handler))
+			b := newBackend(host, models.AuthModeCookie, "")
+
+			tc.run(t, b)
+		})
+	}
+}
+
+// TestPollNegativeCacheSharedAcrossRepresentations verifies that a negative
+// result (404) is a property of the endpoint, not of the representation
+// requested: recording it while polling raw must suppress a later parsed
+// poll of the same endpoint, and vice versa, even though the two
+// representations are cached under distinct keys.
+func TestPollNegativeCacheSharedAcrossRepresentations(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name      string
+		firstRaw  bool
+		secondRaw bool
+	}
+
+	for _, tc := range []testCase{
+		{name: "a 404 on a raw poll suppresses a later parsed poll", firstRaw: true, secondRaw: false},
+		{name: "a 404 on a parsed poll suppresses a later raw poll", firstRaw: false, secondRaw: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls atomic.Int32
+			handler := func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusNotFound)
+			}
+			host := hostOf(newTLSServer(t, handler))
+			b := newBackend(host, models.AuthModeCookie, "")
+
+			_, err := b.Poll(t.Context(), "/api/custom", false, false, tc.firstRaw)
+			require.ErrorIs(t, err, backend.ErrNotFound)
+
+			_, err = b.Poll(t.Context(), "/api/custom", false, false, tc.secondRaw)
+			require.ErrorIs(t, err, backend.ErrNotFound)
+			assert.Equal(t, int32(singleCall), calls.Load(),
+				"a negative result recorded for one representation must suppress a poll of the other")
+		})
+	}
+}
+
 func TestPollVitalsAPIDisabling(t *testing.T) {
 	t.Parallel()
 

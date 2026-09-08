@@ -53,6 +53,16 @@ var (
 
 	// ErrEmptyResponse indicates an empty response from the gateway.
 	ErrEmptyResponse = errors.New("empty response from gateway")
+
+	// ErrInvalidBackupDuration indicates a ScheduleMaxBackup duration that
+	// cannot be safely represented in the gateway's uint32 DurationSeconds
+	// field: either negative, or larger than the field can hold.
+	ErrInvalidBackupDuration = errors.New("invalid max backup duration")
+
+	// ErrDinTooLong indicates a gateway DIN longer than the v1r TLV
+	// encoding's single-byte length prefix (tag 2, TAG_PERSONALIZATION)
+	// can represent.
+	ErrDinTooLong = errors.New("din too long for v1r TLV encoding")
 )
 
 // InvalidConfigError provides details about an invalid configuration parameter.

@@ -27,14 +27,15 @@ import (
 )
 
 const (
-	cookieAuth   = "AuthCookie"
-	cookieUser   = "UserRecord"
-	filePerm     = 0o600
-	negCacheTTL  = 600 * time.Second
-	cooldownTTL  = 300 * time.Second
-	headerAuth   = "Authorization"
-	headerBearer = "Bearer "
-	bearerParts  = 2
+	cookieAuth       = "AuthCookie"
+	cookieUser       = "UserRecord"
+	filePerm         = 0o600
+	negCacheTTL      = 600 * time.Second
+	cooldownTTL      = 300 * time.Second
+	headerAuth       = "Authorization"
+	headerBearer     = "Bearer "
+	bearerParts      = 2
+	apiDevicesVitals = "/api/devices/vitals"
 )
 
 // PyPowerwallLocal implements the gateway REST backend.
@@ -313,10 +314,10 @@ func (l *PyPowerwallLocal) handleHTTPStatus(
 	switch {
 	case statusCode == http.StatusNotFound:
 		logger.Load(ctx).ErrorContext(ctx, "Powerwall API not found", "url", url, "status", statusCode)
-		if api == "/api/devices/vitals" {
+		if api == apiDevicesVitals {
 			l.vitalsAPI = false
 		}
-		l.cache.SetNegative(api, negCacheTTL)
+		l.setEndpointNegative(api, negCacheTTL)
 
 		return nil, true, backend.ErrNotFound
 	case statusCode == http.StatusTooManyRequests:
@@ -329,7 +330,7 @@ func (l *PyPowerwallLocal) handleHTTPStatus(
 		logger.Load(ctx).ErrorContext(ctx, "Powerwall API unavailable, activating cooldown",
 			"url", url, "status", statusCode, "cooldown", cooldownTTL)
 		l.cache.SetCooldown(cooldownTTL)
-		l.cache.SetNegative(api, cooldownTTL)
+		l.setEndpointNegative(api, cooldownTTL)
 
 		return nil, true, backend.ErrRateLimited
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
@@ -344,7 +345,7 @@ func (l *PyPowerwallLocal) handleHTTPStatus(
 				return res, true, pollErr
 			}
 		}
-		l.cache.SetNegative(api, negCacheTTL)
+		l.setEndpointNegative(api, negCacheTTL)
 
 		return nil, true, backend.ErrLogin
 	case statusCode >= http.StatusBadRequest:
@@ -356,10 +357,39 @@ func (l *PyPowerwallLocal) handleHTTPStatus(
 	}
 }
 
-// Poll queries the Powerwall Gateway API and caches the response.
+// setEndpointNegative records a negative cache entry for api under both the
+// raw and parsed keyspaces. Whether an endpoint is missing, rate limited, or
+// requires re-authentication is a property of the endpoint itself, not of
+// the representation a caller asked for, so a negative result observed on a
+// raw poll must suppress a subsequent parsed poll of the same endpoint, and
+// vice versa. Caching the two representations under distinct keys (see
+// [cache.RawKey]) means that sharing has to be done explicitly here rather
+// than falling out of the key scheme automatically.
+func (l *PyPowerwallLocal) setEndpointNegative(api string, ttl time.Duration) {
+	l.cache.SetNegative(api, ttl)
+	l.cache.SetNegative(cache.RawKey(api), ttl)
+}
+
+// Poll queries the Powerwall Gateway API and caches the response. Raw and
+// parsed reads of the same api are cached under distinct keys (see
+// [cache.RawKey]) so that a parsed poll can never hand a raw caller a
+// map[string]any (or vice versa) - see the [PyPowerwallLocal.setEndpointNegative]
+// doc for how negative results stay consistent across the two keyspaces
+// regardless.
 func (l *PyPowerwallLocal) Poll(ctx context.Context, api string, force, recursive, raw bool) (any, error) {
+	// /api/devices/vitals is always served as a raw protobuf payload - decide
+	// this before computing the cache key below so the lookup, the eventual
+	// fetch, and the resulting cache write all agree on the same keyspace.
+	if api == apiDevicesVitals {
+		raw = true
+	}
+
 	if !force {
-		val, found, isNegative := l.cache.Get(api)
+		key := api
+		if raw {
+			key = cache.RawKey(api)
+		}
+		val, found, isNegative := l.cache.Get(key)
 		if found {
 			if isNegative {
 				logger.Load(ctx).DebugContext(ctx, "returning cached negative result", "api", api)
@@ -378,11 +408,8 @@ func (l *PyPowerwallLocal) Poll(ctx context.Context, api string, force, recursiv
 		return nil, backend.ErrRateLimited
 	}
 
-	if api == "/api/devices/vitals" {
-		if !l.vitalsAPI {
-			return nil, backend.ErrNotFound
-		}
-		raw = true
+	if api == apiDevicesVitals && !l.vitalsAPI {
+		return nil, backend.ErrNotFound
 	}
 
 	url := fmt.Sprintf("https://%s%s", l.host, api)
@@ -412,7 +439,7 @@ func (l *PyPowerwallLocal) Poll(ctx context.Context, api string, force, recursiv
 	}
 
 	if raw {
-		l.cache.Set(api, data)
+		l.cache.Set(cache.RawKey(api), data)
 
 		return data, nil
 	}
@@ -582,7 +609,7 @@ func (l *PyPowerwallLocal) Vitals(ctx context.Context) (map[string]any, error) {
 		return tedapi.Vitals(ctx)
 	}
 
-	raw, err := l.Poll(ctx, "/api/devices/vitals", false, false, true)
+	raw, err := l.Poll(ctx, apiDevicesVitals, false, false, true)
 	if err != nil {
 		return nil, err
 	}
