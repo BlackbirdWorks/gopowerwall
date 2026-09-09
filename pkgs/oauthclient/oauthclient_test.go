@@ -66,6 +66,33 @@ func TestTokenFromFields(t *testing.T) {
 			fields:    map[string]any{},
 			wantErrIs: oauthclient.ErrMissingRefreshToken,
 		},
+		{
+			name: "nested sso map from pypowerwall auth format",
+			fields: map[string]any{
+				"url": "https://auth.tesla.com/",
+				"sso": map[string]any{
+					"access_token":  "sso-at",
+					"refresh_token": "sso-rt",
+					"token_type":    "Bearer",
+					"expires_in":    int64(3600),
+				},
+			},
+			wantAccess: "sso-at",
+			wantExpiry: true,
+		},
+		{
+			name: "nested token map from fleetapi config format",
+			fields: map[string]any{
+				"client_id": "cid",
+				"token": map[string]any{
+					"access_token":  "tok-at",
+					"refresh_token": "tok-rt",
+					"expires_at":    int(1800000000),
+				},
+			},
+			wantAccess: "tok-at",
+			wantExpiry: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -121,6 +148,28 @@ func TestMergeToken(t *testing.T) {
 			fields: map[string]any{"refresh_token": "keep-me"},
 			tok:    &oauth2.Token{AccessToken: "at"},
 			want:   map[string]any{"access_token": "at", "refresh_token": "keep-me"},
+		},
+		{
+			name: "updates nested sso map in place",
+			fields: map[string]any{
+				"url": "https://auth.tesla.com/",
+				"sso": map[string]any{
+					"access_token":  "old-at",
+					"refresh_token": "old-rt",
+				},
+			},
+			tok: &oauth2.Token{AccessToken: "new-at", RefreshToken: "new-rt", Expiry: expiry},
+			want: map[string]any{
+				"url":           "https://auth.tesla.com/",
+				"access_token":  "new-at",
+				"refresh_token": "new-rt",
+				"expires_at":    expiry.Unix(),
+				"sso": map[string]any{
+					"access_token":  "new-at",
+					"refresh_token": "new-rt",
+					"expires_at":    expiry.Unix(),
+				},
+			},
 		},
 	}
 

@@ -90,6 +90,9 @@ func getEnvBool(key string, defaultVal bool) bool {
 // DefaultConfig loads Config from environment variables.
 func DefaultConfig() Config {
 	authPath := getEnv("PW_AUTH_PATH", "")
+	if authPath == "" {
+		authPath = getEnv("PW_AUTHPATH", "")
+	}
 	cf := ".powerwall"
 	if authPath != "" {
 		cf = authPath + "/.powerwall"

@@ -15,6 +15,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/cloud"
+	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 )
 
 // recordedRequest captures the parts of an inbound HTTP request the
@@ -167,6 +168,27 @@ func TestCloudAuthenticate(t *testing.T) {
 			setup: func(t *testing.T, dir string) {
 				t.Helper()
 				writeAuthFile(t, dir, testEmail, "tok-1")
+				writeSiteFile(t, dir)
+			},
+		},
+		{
+			name:  "success with nested sso auth file and cached site id",
+			email: testEmail,
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				data := map[string]any{
+					testEmail: map[string]any{
+						"url": "https://auth.tesla.com/",
+						"sso": map[string]any{
+							"access_token":  "tok-sso",
+							"refresh_token": "r1-sso",
+							"token_type":    "Bearer",
+						},
+					},
+				}
+				b, err := json.Marshal(data)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(filepath.Join(dir, cloud.AuthFile), b, 0o600))
 				writeSiteFile(t, dir)
 			},
 		},
@@ -911,7 +933,7 @@ func TestCloudNetworkBackedBehavior(t *testing.T) {
 		require.NoError(t, err)
 		m, ok := res.(map[string]any)
 		require.True(t, ok)
-		assert.InDelta(t, 66.6, m["percentage"], 0.001)
+		assert.InDelta(t, calc.UnscaleBatteryLevel(66.6), m["percentage"], 0.001)
 	})
 
 	t.Run("getAPISystemStatusSOE defaults to 100 when the site is unreachable", func(t *testing.T) {
