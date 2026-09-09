@@ -62,6 +62,14 @@ func TestDefaultConfigAuthPathAffectsCacheFile(t *testing.T) {
 	assert.Equal(t, "/tmp/pw-auth/.powerwall", cfg.CacheFile)
 }
 
+func TestDefaultConfigAuthPathFallback(t *testing.T) {
+	t.Setenv("PW_AUTHPATH", "/tmp/pw-authpath")
+
+	cfg := proxy.DefaultConfig()
+	assert.Equal(t, "/tmp/pw-authpath", cfg.AuthPath)
+	assert.Equal(t, "/tmp/pw-authpath/.powerwall", cfg.CacheFile)
+}
+
 func TestDefaultConfigEnvOverrides(t *testing.T) {
 	type testCase struct {
 		check  func(t *testing.T, cfg proxy.Config)
