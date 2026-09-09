@@ -7,9 +7,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 var (
@@ -65,7 +65,7 @@ func (c *SetCmd) Run(cmdCtx *Context) error {
 	return c.applyGridExport(ctx, pw, w)
 }
 
-func (c *SetCmd) applyMode(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
+func (c *SetCmd) applyMode(ctx context.Context, pw *powerwall.Powerwall, w io.Writer) error {
 	if c.Mode == "" {
 		return nil
 	}
@@ -85,7 +85,7 @@ func (c *SetCmd) applyMode(ctx context.Context, pw *gopowerwall.Powerwall, w io.
 	return nil
 }
 
-func (c *SetCmd) applyReserve(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) {
+func (c *SetCmd) applyReserve(ctx context.Context, pw *powerwall.Powerwall, w io.Writer) {
 	if c.Reserve == -1 {
 		return
 	}
@@ -107,7 +107,7 @@ func (c *SetCmd) applyReserve(ctx context.Context, pw *gopowerwall.Powerwall, w 
 	}
 }
 
-func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
+func (c *SetCmd) applyCurrent(ctx context.Context, pw *powerwall.Powerwall, w io.Writer) error {
 	if !c.Current {
 		return nil
 	}
@@ -134,7 +134,7 @@ func (c *SetCmd) applyCurrent(ctx context.Context, pw *gopowerwall.Powerwall, w 
 	return nil
 }
 
-func (c *SetCmd) applyGridCharging(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
+func (c *SetCmd) applyGridCharging(ctx context.Context, pw *powerwall.Powerwall, w io.Writer) error {
 	if c.GridCharging == "" {
 		return nil
 	}
@@ -150,7 +150,7 @@ func (c *SetCmd) applyGridCharging(ctx context.Context, pw *gopowerwall.Powerwal
 	return nil
 }
 
-func (c *SetCmd) applyGridExport(ctx context.Context, pw *gopowerwall.Powerwall, w io.Writer) error {
+func (c *SetCmd) applyGridExport(ctx context.Context, pw *powerwall.Powerwall, w io.Writer) error {
 	if c.GridExport == "" {
 		return nil
 	}

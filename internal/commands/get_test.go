@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall/commands"
+	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestGetCmdConnected drives GetCmd.Run against a fake local gateway for

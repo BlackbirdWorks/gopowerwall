@@ -1,4 +1,4 @@
-package gopowerwall
+package powerwall
 
 import "github.com/blackbirdworks/gopowerwall/models"
 

@@ -1,4 +1,4 @@
-package gopowerwall_test
+package powerwall_test
 
 import (
 	"encoding/json"
@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // operationGateway is a fake local gateway that serves cookie login and
@@ -122,18 +122,18 @@ func (g *operationGateway) handler() http.HandlerFunc {
 
 // newOperationTestPowerwall connects a Powerwall in local mode against a fake
 // gateway driven by the given operationGateway.
-func newOperationTestPowerwall(t *testing.T, gw *operationGateway) *gopowerwall.Powerwall {
+func newOperationTestPowerwall(t *testing.T, gw *operationGateway) *powerwall.Powerwall {
 	t.Helper()
 
 	server := httptest.NewTLSServer(gw.handler())
 	t.Cleanup(server.Close)
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost(server.Listener.Addr().String()),
-		gopowerwall.WithPassword("password"),
-		gopowerwall.WithCloudMode(false),
-		gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
+		powerwall.WithHost(server.Listener.Addr().String()),
+		powerwall.WithPassword("password"),
+		powerwall.WithCloudMode(false),
+		powerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
 	)
 	require.NoError(t, err)
 	require.True(t, pw.IsConnected())
@@ -234,7 +234,7 @@ func TestSetOperationLocalModeBackfillReadFailureRefusesPartialWrite(t *testing.
 	gw.setFailGet(true)
 
 	_, err := pw.SetReserve(t.Context(), 40)
-	require.ErrorIs(t, err, gopowerwall.ErrOperationBackfillFailed)
+	require.ErrorIs(t, err, powerwall.ErrOperationBackfillFailed)
 	assert.Empty(t, gw.recordedPosts(), "a failed backfill read must not fall back to a partial write")
 }
 
@@ -275,19 +275,19 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 	t.Parallel()
 
 	type testCase struct {
-		connect func(t *testing.T) *gopowerwall.Powerwall
+		connect func(t *testing.T) *powerwall.Powerwall
 		name    string
 	}
 
 	for _, tc := range []testCase{
 		{
 			name: "cloud mode",
-			connect: func(t *testing.T) *gopowerwall.Powerwall {
+			connect: func(t *testing.T) *powerwall.Powerwall {
 				t.Helper()
-				pw, err := gopowerwall.New(
+				pw, err := powerwall.New(
 					t.Context(),
-					gopowerwall.WithCloudMode(true),
-					gopowerwall.WithAuthPath(t.TempDir()),
+					powerwall.WithCloudMode(true),
+					powerwall.WithAuthPath(t.TempDir()),
 				)
 				// No auth file exists in this fresh temp dir, so the
 				// connection attempt itself fails; New still returns a
@@ -301,12 +301,12 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 		},
 		{
 			name: "fleetapi mode",
-			connect: func(t *testing.T) *gopowerwall.Powerwall {
+			connect: func(t *testing.T) *powerwall.Powerwall {
 				t.Helper()
-				pw, err := gopowerwall.New(
+				pw, err := powerwall.New(
 					t.Context(),
-					gopowerwall.WithFleetAPI(true),
-					gopowerwall.WithAuthPath(t.TempDir()),
+					powerwall.WithFleetAPI(true),
+					powerwall.WithAuthPath(t.TempDir()),
 				)
 				require.Error(t, err)
 				require.False(t, pw.IsLocal())
@@ -321,8 +321,8 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 			pw := tc.connect(t)
 
 			_, err := pw.SetReserve(t.Context(), 30)
-			require.ErrorIs(t, err, gopowerwall.ErrSetOperationFailed)
-			assert.NotErrorIs(t, err, gopowerwall.ErrOperationBackfillFailed)
+			require.ErrorIs(t, err, powerwall.ErrSetOperationFailed)
+			assert.NotErrorIs(t, err, powerwall.ErrOperationBackfillFailed)
 		})
 	}
 }

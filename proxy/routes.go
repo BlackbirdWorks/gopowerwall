@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 var (
@@ -26,14 +26,14 @@ var (
 	errNoResponse   = errors.New("no response")
 )
 
-// aggregatesOptions builds the [gopowerwall.AggregatesOption] values
+// aggregatesOptions builds the [powerwall.AggregatesOption] values
 // carrying this server's configured corrections, so every route deriving
 // power figures from meter data (aggregates, CSV, JSON) applies the same
 // site-zero threshold and negative-solar correction.
-func (s *Server) aggregatesOptions() []gopowerwall.AggregatesOption {
-	return []gopowerwall.AggregatesOption{
-		gopowerwall.WithSiteZeroThreshold(float64(s.Config.SiteZeroThreshold)),
-		gopowerwall.WithNegativeSolarCorrection(!s.Config.NegSolar),
+func (s *Server) aggregatesOptions() []powerwall.AggregatesOption {
+	return []powerwall.AggregatesOption{
+		powerwall.WithSiteZeroThreshold(float64(s.Config.SiteZeroThreshold)),
+		powerwall.WithNegativeSolarCorrection(!s.Config.NegSolar),
 	}
 }
 
@@ -132,7 +132,7 @@ func (s *Server) generateFreq(ctx context.Context) (string, error) {
 // vitals entry's data, mirroring pypowerwall's own second, independent
 // /pod loop (server.py:2196-2244, "Augment with Vitals Data"): every TEPOD
 // vitals device overwrites the keys the per-block loop seeded, at its own
-// 1-based index derived from [gopowerwall.Powerwall.PODView]'s
+// 1-based index derived from [powerwall.Powerwall.PODView]'s
 // vitals-iteration order rather than the block loop's index - see
 // PODView's own doc comment for why upstream (and this port) trust that
 // ordering to line up instead of matching by DIN.
@@ -340,7 +340,7 @@ func (s *Server) handleVitals(ctx context.Context, w http.ResponseWriter, reqPat
 // serialization so the client can keep idiomatic Go field names
 // (models.StringMetric's own lowercase json tags) for every other caller.
 // The outer map key remains gopowerwall's own "<device>_<label>" scheme
-// (see [gopowerwall.Powerwall.Strings]) rather than upstream's
+// (see [powerwall.Powerwall.Strings]) rather than upstream's
 // letter-plus-rotating-device-index keys, since Go's vitals map does not
 // preserve the PVAC-device iteration order that scheme depends on.
 func solarStringsJSON(ss models.SolarStrings) map[string]any {

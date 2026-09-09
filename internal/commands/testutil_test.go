@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall/commands"
+	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // fixtureDir returns the absolute path to proxy/web/bogus, resolved from
@@ -22,7 +22,7 @@ import (
 func fixtureDir() string {
 	_, thisFile, _, _ := runtime.Caller(0)
 
-	return filepath.Join(filepath.Dir(thisFile), "..", "proxy", "web", "bogus")
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "proxy", "web", "bogus")
 }
 
 // readFixture returns the raw contents of a recorded gateway response under

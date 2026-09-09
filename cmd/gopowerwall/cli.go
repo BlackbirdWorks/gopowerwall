@@ -8,7 +8,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/joho/godotenv"
 
-	"github.com/blackbirdworks/gopowerwall/commands"
+	"github.com/blackbirdworks/gopowerwall/internal/commands"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
 

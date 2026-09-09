@@ -1,4 +1,4 @@
-package gopowerwall
+package powerwall
 
 import (
 	"context"

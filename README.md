@@ -234,16 +234,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 func main() {
 	ctx := context.Background()
 
-	pw, err := gopowerwall.New(ctx,
-		gopowerwall.WithHost("192.168.91.1"),
-		gopowerwall.WithPassword("abcde"),
-		gopowerwall.WithCloudMode(false),
+	pw, err := powerwall.New(ctx,
+		powerwall.WithHost("192.168.91.1"),
+		powerwall.WithPassword("abcde"),
+		powerwall.WithCloudMode(false),
 	)
 	if err != nil {
 		panic(err)

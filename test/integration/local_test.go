@@ -8,22 +8,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // newLocalPowerwall connects a Powerwall to sim in local mode using the
 // credentials pwsimulator's own test.sh authenticates with.
-func newLocalPowerwall(t *testing.T, sim simulator) *gopowerwall.Powerwall {
+func newLocalPowerwall(t *testing.T, sim simulator) *powerwall.Powerwall {
 	t.Helper()
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost(sim.HostPort),
-		gopowerwall.WithPassword(simulatorPassword),
-		gopowerwall.WithEmail(simulatorEmail),
-		gopowerwall.WithTimezone(simulatorTimezone),
-		gopowerwall.WithCloudMode(false),
+		powerwall.WithHost(sim.HostPort),
+		powerwall.WithPassword(simulatorPassword),
+		powerwall.WithEmail(simulatorEmail),
+		powerwall.WithTimezone(simulatorTimezone),
+		powerwall.WithCloudMode(false),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pw.Close(t.Context()) })
@@ -48,14 +48,14 @@ func TestLocalModeReadSurface(t *testing.T) {
 	pw := newLocalPowerwall(t, sim)
 
 	type testCase struct {
-		run  func(t *testing.T, pw *gopowerwall.Powerwall)
+		run  func(t *testing.T, pw *powerwall.Powerwall)
 		name string
 	}
 
 	cases := []testCase{
 		{
 			name: "Poll /api/status returns the gateway identity",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				data := pw.Poll(t.Context(), "/api/status")
 				require.NotNil(t, data)
@@ -65,7 +65,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "Power reports the simulator's static aggregate meters",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				p := pw.Power(t.Context())
 				// stub.py's initial state: agg_solar=6500, agg_home=900,
@@ -80,7 +80,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "Level reports the simulator's static SOE",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				lvl, err := pw.Level(t.Context())
 				require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "SOE returns a strongly-typed percentage",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				soe, err := pw.SOE(t.Context())
 				require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "GridStatus reports connected in every output form",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				str, err := pw.GridStatusString(t.Context())
 				require.NoError(t, err)
@@ -122,10 +122,10 @@ func TestLocalModeReadSurface(t *testing.T) {
 			// found" to PollRaw, so Operation surfaces ErrNotFound - this
 			// documents that gap rather than a gopowerwall defect.
 			name: "Operation is unsupported by the simulator",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, err := pw.Operation(t.Context())
-				assert.ErrorIs(t, err, gopowerwall.ErrNotFound)
+				assert.ErrorIs(t, err, powerwall.ErrNotFound)
 			},
 		},
 		{
@@ -141,7 +141,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 			// models.GridCodeInfo, mirroring the nested object, so the call
 			// succeeds and the nested fields decode correctly.
 			name: "SiteInfo decodes the simulator's real grid_code object",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				info, err := pw.SiteInfo(t.Context())
 				require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "SiteName reads the un-nested site name endpoint",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				name, err := pw.SiteName(t.Context())
 				require.NoError(t, err)
@@ -166,7 +166,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "Status/Version/Uptime/Din read from the same gateway status payload",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				version, err := pw.Version(t.Context())
 				require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "Vitals decodes the simulator's real protobuf payload",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				vitals, err := pw.Vitals(t.Context())
 				require.NoError(t, err)
@@ -194,7 +194,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "Temps extracts ambient temperature from TETHC vitals devices",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				temps := pw.Temps(t.Context())
 				assert.Len(t, temps.Temps, 2, "one ambient temperature per simulated battery pack")
@@ -202,7 +202,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 		},
 		{
 			name: "Alerts includes the grid-connected status alert",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				alerts := pw.Alerts(t.Context())
 				// The simulator's default grid_status ("SystemGridConnected")
@@ -218,7 +218,7 @@ func TestLocalModeReadSurface(t *testing.T) {
 			// leaves (soe, grid_status, grid_faults). BatteryBlocks
 			// degrades to an empty map rather than erroring.
 			name: "BatteryBlocks is empty because /api/system_status is unimplemented",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				blocks := pw.BatteryBlocks(t.Context())
 				assert.Empty(t, blocks)

@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall/commands"
+	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestTrivialCommands exercises the commands whose Run method has no branch

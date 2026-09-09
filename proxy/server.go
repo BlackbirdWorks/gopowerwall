@@ -9,8 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/models"
+	"github.com/blackbirdworks/gopowerwall/pkgs/cache"
+	"github.com/blackbirdworks/gopowerwall/pkgs/influx"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 const (
@@ -107,12 +110,13 @@ type Server struct {
 	StartTime     time.Time
 	ClearTime     time.Time
 	statsURI      map[string]int
-	RateLimiter   *RateLimiter
+	RateLimiter   *cache.RateLimiter
 	EndpointStats *EndpointStatsTracker
 	Health        *ConnectionHealth
-	PW            *gopowerwall.Powerwall
-	PerfCache     *PerformanceCache
-	DegradedCache *DegradationCache
+	PW            *powerwall.Powerwall
+	PerfCache     *cache.PerformanceCache
+	DegradedCache *cache.DegradationCache
+	InfluxClient  *influx.Client
 	WebRoot       string
 	Config        Config
 	statsTime     int
@@ -123,28 +127,37 @@ type Server struct {
 }
 
 // NewServer creates a new Server instance.
-func NewServer(ctx context.Context, cfg Config, pw *gopowerwall.Powerwall) *Server {
+func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server {
 	if pw == nil {
-		authMode := gopowerwall.AuthMode(cfg.AuthMode)
+		authMode := powerwall.AuthMode(cfg.AuthMode)
 		if authMode == "" {
-			authMode = gopowerwall.AuthModeCookie
+			authMode = powerwall.AuthModeCookie
 		}
 		var err error
-		pw, err = gopowerwall.New(
+		pw, err = powerwall.New(
 			ctx,
-			gopowerwall.WithHost(cfg.Host),
-			gopowerwall.WithPassword(cfg.Password),
-			gopowerwall.WithEmail(cfg.Email),
-			gopowerwall.WithAuthPath(cfg.AuthPath),
-			gopowerwall.WithAuthMode(authMode),
-			gopowerwall.WithGwPwd(cfg.GwPwd),
-			gopowerwall.WithRSAKeyPath(cfg.RsaKeyPath),
-			gopowerwall.WithWiFiHost(cfg.WifiHost),
-			gopowerwall.WithTimeout(cfg.TimeoutDuration()),
-			gopowerwall.WithCacheFile(cfg.CacheFile),
+			powerwall.WithHost(cfg.Host),
+			powerwall.WithPassword(cfg.Password),
+			powerwall.WithEmail(cfg.Email),
+			powerwall.WithAuthPath(cfg.AuthPath),
+			powerwall.WithAuthMode(authMode),
+			powerwall.WithGwPwd(cfg.GwPwd),
+			powerwall.WithRSAKeyPath(cfg.RsaKeyPath),
+			powerwall.WithWiFiHost(cfg.WifiHost),
+			powerwall.WithTimeout(cfg.TimeoutDuration()),
+			powerwall.WithCacheFile(cfg.CacheFile),
 		)
 		if err != nil {
 			logger.Load(ctx).ErrorContext(ctx, "failed to initialize Powerwall client", "error", err)
+		}
+	}
+
+	var influxClient *influx.Client
+	if influxCfg, ok := cfg.InfluxConfig(); ok {
+		var err error
+		influxClient, err = influx.New(influxCfg)
+		if err != nil {
+			logger.Load(ctx).ErrorContext(ctx, "failed to initialize InfluxDB exporter", "error", err)
 		}
 	}
 
@@ -153,11 +166,12 @@ func NewServer(ctx context.Context, cfg Config, pw *gopowerwall.Powerwall) *Serv
 	return &Server{
 		Config:        cfg,
 		PW:            pw,
-		PerfCache:     NewPerformanceCache(cfg.CacheExpireDuration()),
-		DegradedCache: NewDegradationCache(cfg.CacheTTLDuration()),
+		PerfCache:     cache.NewPerformanceCache(cfg.CacheExpireDuration()),
+		DegradedCache: cache.NewDegradationCache(cfg.CacheTTLDuration()),
 		Health:        NewConnectionHealth(),
 		EndpointStats: NewEndpointStatsTracker(),
-		RateLimiter:   NewRateLimiter(),
+		RateLimiter:   cache.NewRateLimiter(),
+		InfluxClient:  influxClient,
 		StartTime:     now,
 		ClearTime:     now,
 		statsURI:      make(map[string]int),
@@ -268,6 +282,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Start runs the HTTP server listening on the configured address.
 func (s *Server) Start(ctx context.Context) error {
+	if s.InfluxClient != nil && s.PW != nil {
+		go s.runInfluxExporter(ctx)
+	}
+
 	addr := fmt.Sprintf("%s:%d", s.Config.BindAddress, s.Config.Port)
 	srv := &http.Server{
 		Addr:              addr,
@@ -291,4 +309,14 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func (s *Server) runInfluxExporter(ctx context.Context) {
+	defer s.InfluxClient.Close()
+	_ = s.InfluxClient.Run(ctx, func(collectCtx context.Context) (models.Snapshot, models.MetersAggregates, error) {
+		snap := s.PW.Snapshot(collectCtx)
+		agg, err := s.PW.Aggregates(collectCtx)
+
+		return snap, agg, err
+	})
 }

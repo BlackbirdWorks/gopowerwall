@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/backend/tedapi"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // TestTEDAPIProtocolCompatibility talks TEDAPI protobuf directly to
@@ -37,7 +37,7 @@ func TestTEDAPIProtocolCompatibility(t *testing.T) {
 	client := tedapi.NewClient(
 		sim.HostPort, "password",
 		10*time.Second, 5*time.Second, 5,
-		gopowerwall.TEDAPIVersion2024_06, gopowerwall.AuthModeBasic,
+		powerwall.TEDAPIVersion2024_06, powerwall.AuthModeBasic,
 	)
 
 	require.True(t, client.Connect(t.Context()), "TEDAPI config round trip should succeed against the simulator")
@@ -85,11 +85,11 @@ func TestTEDAPIModeDispatchFixed(t *testing.T) {
 
 	sim := startSimulator(t)
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost(sim.HostPort),
-		gopowerwall.WithGwPwd("password"),
-		gopowerwall.WithCloudMode(false),
+		powerwall.WithHost(sim.HostPort),
+		powerwall.WithGwPwd("password"),
+		powerwall.WithCloudMode(false),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pw.Close(t.Context()) })
@@ -97,7 +97,7 @@ func TestTEDAPIModeDispatchFixed(t *testing.T) {
 	require.True(t, pw.IsConnected(), "connectLocal's pure-TEDAPI branch reports success")
 	require.True(t, pw.IsTEDAPI())
 
-	assert.Equal(t, gopowerwall.ModeTEDAPI, pw.Mode())
+	assert.Equal(t, powerwall.ModeTEDAPI, pw.Mode())
 	assert.False(t, pw.IsLocal(), "no local HTTP backend was built on the pure-TEDAPI path")
 
 	data := pw.Poll(t.Context(), "/api/status")

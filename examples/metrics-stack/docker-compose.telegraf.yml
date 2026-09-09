@@ -1,0 +1,104 @@
+name: gopowerwall-metrics
+
+# Powerwall proxy -> Telegraf -> InfluxDB -> Grafana, wired end to end.
+#
+# Setup (Tesla Cloud mode via tesla_auth):
+#   1. Run tesla_auth (https://github.com/adriankumpf/tesla_auth) and copy
+#      the refresh token it prints.
+#   2. Copy ../../.env.example to .env in this directory and fill in at
+#      least PW_EMAIL and TESLA_REFRESH_TOKEN.
+#   3. docker compose up -d
+#   4. Grafana: http://localhost:3000 (admin/admin on first login - change
+#      it). The InfluxDB datasource is provisioned automatically.
+#
+# See README.md in this directory for the cloud-mode data caveat before
+# building dashboards: /vitals, /strings, /temps and /alerts are stub/empty
+# data in cloud and FleetAPI mode - only aggregate power, SOE and grid status
+# are real.
+
+services:
+  proxy:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    # Once a release is published you can use the prebuilt image instead of
+    # building locally:
+    # image: ghcr.io/blackbirdworks/gopowerwall:latest
+    container_name: gopowerwall-proxy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PW_PORT: "8675"
+      PW_AUTH_PATH: /data
+    volumes:
+      # Persists .pypowerwall.auth (and its refreshed access token) and
+      # .pypowerwall.site across container restarts.
+      - powerwall-auth:/data
+    ports:
+      - "8675:8675"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  telegraf:
+    image: telegraf:1.32-alpine
+    container_name: gopowerwall-telegraf
+    restart: unless-stopped
+    depends_on:
+      proxy:
+        condition: service_healthy
+      influxdb:
+        condition: service_started
+    environment:
+      POWERWALL_URL: http://proxy:8675
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-gopowerwall-dev-token}
+      INFLUX_ORG: ${INFLUXDB_ORG:-gopowerwall}
+      INFLUX_BUCKET: ${INFLUXDB_BUCKET:-powerwall}
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+
+  influxdb:
+    image: influxdb:2
+    container_name: gopowerwall-influxdb
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-changeme123}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-gopowerwall}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-powerwall}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-gopowerwall-dev-token}
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+
+  grafana:
+    image: grafana/grafana-oss:11.3.1
+    container_name: gopowerwall-grafana
+    restart: unless-stopped
+    depends_on:
+      - influxdb
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-gopowerwall}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-powerwall}
+      INFLUXDB_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-gopowerwall-dev-token}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+
+volumes:
+  powerwall-auth:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:
