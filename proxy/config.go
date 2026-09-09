@@ -5,43 +5,51 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/blackbirdworks/gopowerwall/pkgs/influx"
 )
 
 // Config represents all configuration options for the Proxy server.
 type Config struct {
-	BindAddress           string
-	RsaKeyPath            string
+	WifiHost              string
+	APIBaseURL            string
 	Password              string
 	Email                 string
 	Host                  string
 	Timezone              string
 	TedapiAuthMode        string
-	TedapiAPIVersion      string
-	APIBaseURL            string
-	GwPwd                 string
-	WifiHost              string
-	HTTPSMode             string
 	Style                 string
+	HTTPSMode             string
+	GwPwd                 string
+	RsaKeyPath            string
+	InfluxURL             string
+	TedapiAPIVersion      string
 	SiteID                string
 	AuthPath              string
 	AuthMode              string
 	CacheFile             string
 	ControlSecret         string
-	BrowserCache          int
-	CacheTTL              int
+	InfluxSiteName        string
+	InfluxBucket          string
+	BindAddress           string
+	InfluxOrg             string
+	InfluxToken           string
 	Timeout               int
-	CacheExpire           int
 	FirmwareCheckInterval int
-	TedapiProbeInterval   int
-	SiteZeroThreshold     int
 	Port                  int
 	PoolMaxSize           int
 	NetworkErrorRateLimit int
+	SiteZeroThreshold     int
+	InfluxInterval        int
+	BrowserCache          int
+	CacheTTL              int
+	CacheExpire           int
+	TedapiProbeInterval   int
 	FailFastMode          bool
-	GracefulDegradation   bool
-	HealthCheckEnabled    bool
-	SuppressNetworkErrors bool
 	TedapiRecoveryEnabled bool
+	SuppressNetworkErrors bool
+	HealthCheckEnabled    bool
+	GracefulDegradation   bool
 	NegSolar              bool
 	DebugMode             bool
 }
@@ -55,6 +63,7 @@ const (
 	defaultCacheTTL              = 30
 	defaultTedapiProbeInterval   = 30
 	defaultFirmwareCheckInterval = 300
+	defaultInfluxInterval        = 30
 	minTedapiProbeInterval       = 5
 	minFirmwareCheckInterval     = 30
 )
@@ -139,6 +148,12 @@ func DefaultConfig() Config {
 		TedapiRecoveryEnabled: getEnvBool("PW_TEDAPI_RECOVERY", true),
 		TedapiProbeInterval:   getEnvInt("PW_TEDAPI_PROBE_INTERVAL", defaultTedapiProbeInterval),
 		FirmwareCheckInterval: getEnvInt("PW_FIRMWARE_CHECK_INTERVAL", defaultFirmwareCheckInterval),
+		InfluxURL:             getEnvFirst("INFLUX_URL", "INFLUXDB_URL"),
+		InfluxToken:           getEnvFirst("INFLUX_TOKEN", "INFLUXDB_ADMIN_TOKEN", "INFLUXDB_TOKEN"),
+		InfluxOrg:             getEnvFirst("INFLUX_ORG", "INFLUXDB_ORG"),
+		InfluxBucket:          getEnvFirst("INFLUX_BUCKET", "INFLUXDB_BUCKET"),
+		InfluxSiteName:        getEnv("INFLUX_SITE_NAME", ""),
+		InfluxInterval:        getEnvInt("INFLUX_INTERVAL", defaultInfluxInterval),
 	}
 
 	if cfg.TedapiProbeInterval < minTedapiProbeInterval {
@@ -149,6 +164,37 @@ func DefaultConfig() Config {
 	}
 
 	return cfg
+}
+
+func getEnvFirst(keys ...string) string {
+	for _, k := range keys {
+		if val, ok := os.LookupEnv(k); ok && val != "" {
+			return val
+		}
+	}
+
+	return ""
+}
+
+// InfluxConfig returns the validated influx.Config and true if InfluxDB export is configured.
+func (c *Config) InfluxConfig() (influx.Config, bool) {
+	if c.InfluxURL == "" || c.InfluxToken == "" || c.InfluxOrg == "" || c.InfluxBucket == "" {
+		return influx.Config{}, false
+	}
+
+	interval := time.Duration(c.InfluxInterval) * time.Second
+	if interval <= 0 {
+		interval = influx.DefaultInterval
+	}
+
+	return influx.Config{
+		URL:      c.InfluxURL,
+		Token:    c.InfluxToken,
+		Org:      c.InfluxOrg,
+		Bucket:   c.InfluxBucket,
+		SiteName: c.InfluxSiteName,
+		Interval: interval,
+	}, true
 }
 
 func (c *Config) CacheExpireDuration() time.Duration {

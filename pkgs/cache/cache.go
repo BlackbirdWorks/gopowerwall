@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -270,15 +271,15 @@ func (c *DegradationCache) Snapshot() (int, map[string]map[string]any) {
 	return len(items), res
 }
 
-// RateLimiter limits logs per function per minute.
+// RateLimiter limits logs per function per minute using token-bucket rate limiters.
 type RateLimiter struct {
-	counts map[string]int
-	mu     sync.Mutex
+	limiters map[string]*rate.Limiter
+	mu       sync.Mutex
 }
 
 // NewRateLimiter initializes RateLimiter.
 func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{counts: make(map[string]int)}
+	return &RateLimiter{limiters: make(map[string]*rate.Limiter)}
 }
 
 // ShouldLog checks if logging is within rate limits.
@@ -289,12 +290,14 @@ func (r *RateLimiter) ShouldLog(funcName string, maxPerMinute int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	minBucket := time.Now().Unix() / secondsPerMinute
-	if len(r.counts) > rateLimitMapMaxLen {
-		r.counts = make(map[string]int)
+	if len(r.limiters) > rateLimitMapMaxLen {
+		r.limiters = make(map[string]*rate.Limiter)
 	}
-	bucketKey := funcName + "_" + time.Unix(minBucket*secondsPerMinute, 0).Format("1504")
-	r.counts[bucketKey]++
+	lim, ok := r.limiters[funcName]
+	if !ok {
+		lim = rate.NewLimiter(rate.Limit(float64(maxPerMinute)/secondsPerMinute), maxPerMinute)
+		r.limiters[funcName] = lim
+	}
 
-	return r.counts[bucketKey] <= maxPerMinute
+	return lim.Allow()
 }

@@ -11,13 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/backend/local"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // newAuthClient builds a PyPowerwallLocal backend directly (rather than
-// through gopowerwall.New) so tests in this file can control exactly when
+// through powerwall.New) so tests in this file can control exactly when
 // Authenticate happens, and can call Poll with recursive=true to bypass its
 // automatic re-login-and-retry - isolating the real, single HTTP round trip
 // pwsimulator's cookie enforcement produces. cachefile="" disables the local
@@ -27,7 +27,7 @@ func newAuthClient(host, password string) *local.PyPowerwallLocal {
 	return local.New(
 		host, password, simulatorEmail, simulatorTimezone,
 		10*time.Second, 5*time.Second, 5,
-		gopowerwall.AuthModeCookie, "", "",
+		powerwall.AuthModeCookie, "", "",
 	)
 }
 
@@ -79,7 +79,7 @@ func TestAuthAgainstRealEnforcement(t *testing.T) {
 		// unauthenticated response the simulator sends back.
 		_, err := lb.Poll(t.Context(), "/api/status", true, true, false)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, gopowerwall.ErrLogin)
+		assert.ErrorIs(t, err, powerwall.ErrLogin)
 	})
 
 	t.Run("the same unauthenticated request self-heals via automatic re-login", func(t *testing.T) {

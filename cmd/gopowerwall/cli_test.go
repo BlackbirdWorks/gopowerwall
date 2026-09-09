@@ -62,3 +62,83 @@ func TestNewParserRejectsUnknownCommand(t *testing.T) {
 	_, err = parser.Parse([]string{"bogus-command"})
 	require.Error(t, err)
 }
+
+// TestParserEnvVarResolution tests that environment variables are correctly
+// parsed by Kong into CLI struct fields.
+func TestParserEnvVarResolution(t *testing.T) {
+	type testCase struct {
+		validate func(t *testing.T, cli *CLI)
+		envKey   string
+		envVal   string
+		name     string
+		args     []string
+	}
+
+	cases := []testCase{
+		{
+			name:   "PW_HOST populates Get Host",
+			envKey: "PW_HOST",
+			envVal: "192.168.1.100",
+			args:   []string{"get"},
+			validate: func(t *testing.T, cli *CLI) {
+				t.Helper()
+				assert.Equal(t, "192.168.1.100", cli.Get.Host)
+			},
+		},
+		{
+			name:   "PW_PASSWORD populates Get Password",
+			envKey: "PW_PASSWORD",
+			envVal: "secret123",
+			args:   []string{"get"},
+			validate: func(t *testing.T, cli *CLI) {
+				t.Helper()
+				assert.Equal(t, "secret123", cli.Get.Password)
+			},
+		},
+		{
+			name:   "PW_GW_PWD populates Tedapi GwPwd",
+			envKey: "PW_GW_PWD",
+			envVal: "gatewaypass",
+			args:   []string{"tedapi"},
+			validate: func(t *testing.T, cli *CLI) {
+				t.Helper()
+				assert.Equal(t, "gatewaypass", cli.Tedapi.GwPwd)
+			},
+		},
+		{
+			name:   "PW_EMAIL populates Setup Email",
+			envKey: "PW_EMAIL",
+			envVal: "user@example.com",
+			args:   []string{"setup"},
+			validate: func(t *testing.T, cli *CLI) {
+				t.Helper()
+				assert.Equal(t, "user@example.com", cli.Setup.Email)
+			},
+		},
+		{
+			name:   "PW_DEBUG populates Proxy Debug",
+			envKey: "PW_DEBUG",
+			envVal: "true",
+			args:   []string{"proxy"},
+			validate: func(t *testing.T, cli *CLI) {
+				t.Helper()
+				assert.True(t, cli.Proxy.Debug)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.envKey, tc.envVal)
+
+			var cli CLI
+			parser, err := newParser(&cli)
+			require.NoError(t, err)
+
+			_, err = parser.Parse(tc.args)
+			require.NoError(t, err)
+
+			tc.validate(t, &cli)
+		})
+	}
+}

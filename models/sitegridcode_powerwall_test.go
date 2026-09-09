@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // newLocalTestPowerwallForSiteInfo connects a Powerwall in local mode against
@@ -17,7 +17,7 @@ import (
 // /api/site_info body. It mirrors the equivalent helper in the root
 // package's own tests, kept local to this package to avoid depending on
 // root-package test files.
-func newLocalTestPowerwallForSiteInfo(t *testing.T, siteInfoBody []byte) *gopowerwall.Powerwall {
+func newLocalTestPowerwallForSiteInfo(t *testing.T, siteInfoBody []byte) *powerwall.Powerwall {
 	t.Helper()
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,12 +35,12 @@ func newLocalTestPowerwallForSiteInfo(t *testing.T, siteInfoBody []byte) *gopowe
 	}))
 	t.Cleanup(server.Close)
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost(server.Listener.Addr().String()),
-		gopowerwall.WithPassword("password"),
-		gopowerwall.WithCloudMode(false),
-		gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
+		powerwall.WithHost(server.Listener.Addr().String()),
+		powerwall.WithPassword("password"),
+		powerwall.WithCloudMode(false),
+		powerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
 	)
 	require.NoError(t, err)
 	require.True(t, pw.IsConnected())

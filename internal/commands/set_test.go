@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall/commands"
+	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestSetCmdNoActionSpecified covers the guard that rejects a `set` call

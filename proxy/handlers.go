@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	secondsPerHour = 3600
-	kiloByte       = 1024
+	secondsPerHour   = 3600
+	secondsPerMinute = 60
+	kiloByte         = 1024
 )
 
 func (s *Server) respond(ctx context.Context, w http.ResponseWriter, reqPath, contentType, body string, ok bool) {

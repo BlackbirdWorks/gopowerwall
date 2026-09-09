@@ -5,7 +5,8 @@ Telegraf, InfluxDB, and Grafana, for 24/7 Powerwall metrics against Tesla
 Cloud (Owner API) mode.
 
 ```
-Tesla Cloud API <-- OAuth2 refresh token -- gopowerwall proxy <-- scrape -- Telegraf --> InfluxDB <-- query -- Grafana
+Option A (Direct):   Tesla Cloud API <-- OAuth2 -- gopowerwall proxy -- native push --> InfluxDB <-- query -- Grafana
+Option B (Telegraf): Tesla Cloud API <-- OAuth2 -- gopowerwall proxy <-- scrape -- Telegraf --> InfluxDB <-- query -- Grafana
 ```
 
 ## Data caveat - read this before building dashboards
@@ -53,8 +54,15 @@ against the Gateway directly on your LAN.
 
 4. Start the stack:
 
+   **Option A: Direct InfluxDB export (Recommended — no Telegraf container needed):**
    ```bash
-   docker compose up -d
+   docker compose -f docker-compose.direct.yml up -d
+   ```
+
+   **Option B: Telegraf scraping (Classic 4-container pipeline):**
+   ```bash
+   docker compose -f docker-compose.telegraf.yml up -d
+   # or simply: docker compose up -d
    ```
 
 5. Open Grafana at <http://localhost:3000> (default `admin` / `admin` -

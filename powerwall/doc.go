@@ -1,4 +1,4 @@
-// Package gopowerwall is a Go client library for the Tesla Energy Gateway
+// Package powerwall is a Go client library for the Tesla Energy Gateway
 // that ships with Powerwall 2, Powerwall+, and Powerwall 3 installations. It
 // is a Go port of [pypowerwall], the Python library and proxy server for the
 // same gateway, and provides the same kind of cached, resilient access to
@@ -115,4 +115,4 @@
 // a typed accessor when one exists.
 //
 // [pypowerwall]: https://github.com/jasonacox/pypowerwall
-package gopowerwall
+package powerwall

@@ -1,4 +1,4 @@
-package gopowerwall_test
+package powerwall_test
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 	"github.com/blackbirdworks/gopowerwall/proxy"
 )
 
@@ -48,7 +48,7 @@ func newExampleGateway() *httptest.Server {
 	return httptest.NewTLSServer(mux)
 }
 
-// newExampleCacheFile returns a throwaway path for [gopowerwall.WithCacheFile],
+// newExampleCacheFile returns a throwaway path for [powerwall.WithCacheFile],
 // so the examples below never write their session cache into the module's
 // own source directory.
 func newExampleCacheFile() string {
@@ -60,18 +60,18 @@ func newExampleCacheFile() string {
 	return filepath.Join(dir, "cache")
 }
 
-// connectExampleGateway starts a fake gateway and connects a [gopowerwall.Powerwall]
+// connectExampleGateway starts a fake gateway and connects a [powerwall.Powerwall]
 // to it in local mode, for examples that only need a connected instance
 // without caring about the gateway server itself. Callers must defer both
 // the returned server's Close and pw.Close.
-func connectExampleGateway(ctx context.Context) (*httptest.Server, *gopowerwall.Powerwall) {
+func connectExampleGateway(ctx context.Context) (*httptest.Server, *powerwall.Powerwall) {
 	srv := newExampleGateway()
 
-	pw, err := gopowerwall.New(ctx,
-		gopowerwall.WithHost(srv.Listener.Addr().String()),
-		gopowerwall.WithPassword("password"),
-		gopowerwall.WithCloudMode(false),
-		gopowerwall.WithCacheFile(newExampleCacheFile()),
+	pw, err := powerwall.New(ctx,
+		powerwall.WithHost(srv.Listener.Addr().String()),
+		powerwall.WithPassword("password"),
+		powerwall.WithCloudMode(false),
+		powerwall.WithCacheFile(newExampleCacheFile()),
 	)
 	if err != nil {
 		panic(err)
@@ -81,21 +81,21 @@ func connectExampleGateway(ctx context.Context) (*httptest.Server, *gopowerwall.
 }
 
 // ExampleNew connects to a Powerwall gateway in local mode and checks that
-// the connection actually succeeded. [gopowerwall.New] returns a non-nil
+// the connection actually succeeded. [powerwall.New] returns a non-nil
 // *Powerwall even when the initial connection attempt fails (wrapping that
-// failure as a [gopowerwall.ConnectError] instead), so
-// [gopowerwall.Powerwall.IsConnected] remains the check that matters here.
+// failure as a [powerwall.ConnectError] instead), so
+// [powerwall.Powerwall.IsConnected] remains the check that matters here.
 func ExampleNew() {
 	srv := newExampleGateway()
 	defer srv.Close()
 
 	ctx := context.Background()
 
-	pw, err := gopowerwall.New(ctx,
-		gopowerwall.WithHost(srv.Listener.Addr().String()),
-		gopowerwall.WithPassword("password"), // last 5 characters of the gateway password
-		gopowerwall.WithCloudMode(false),
-		gopowerwall.WithCacheFile(newExampleCacheFile()),
+	pw, err := powerwall.New(ctx,
+		powerwall.WithHost(srv.Listener.Addr().String()),
+		powerwall.WithPassword("password"), // last 5 characters of the gateway password
+		powerwall.WithCloudMode(false),
+		powerwall.WithCacheFile(newExampleCacheFile()),
 	)
 	if err != nil {
 		panic(err)
@@ -158,7 +158,7 @@ func ExamplePowerwall_Level() {
 }
 
 // Example_proxy shows the HTTP proxy consuming an already-connected
-// [gopowerwall.Powerwall] instead of building its own - passing pw to
+// [powerwall.Powerwall] instead of building its own - passing pw to
 // [proxy.NewServer] instead of nil skips that constructor's implicit
 // New/Connect call entirely. proxy.Server implements http.Handler, so it
 // can be exercised directly with httptest, or handed to an *http.Server for
@@ -194,7 +194,7 @@ func Example_proxy() {
 func Example_scan() {
 	ctx := context.Background()
 
-	results, err := gopowerwall.Scan(ctx, gopowerwall.ScanOptions{
+	results, err := powerwall.Scan(ctx, powerwall.ScanOptions{
 		CIDR:       "127.0.0.1/32",
 		TimeoutSec: 0.05,
 	}, io.Discard)

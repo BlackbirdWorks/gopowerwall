@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // TestApplyReserveCloudModeWarnsAboveCap white-box tests applyReserve's
@@ -17,16 +17,16 @@ import (
 // reach the confirmation re-poll's success path itself: that requires a
 // genuinely connected cloud or FleetAPI backend, which is only real (and
 // owned by a different area of this codebase) once authenticated against
-// Tesla. gopowerwall.New still reports IsCloud() == true immediately from
+// Tesla. powerwall.New still reports IsCloud() == true immediately from
 // config, before any connection attempt is made, which is what lets this
 // test reach applyReserve's cap-warning branch at all.
 func TestApplyReserveCloudModeWarnsAboveCap(t *testing.T) {
 	t.Parallel()
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithCloudMode(true),
-		gopowerwall.WithAuthPath(t.TempDir()),
+		powerwall.WithCloudMode(true),
+		powerwall.WithAuthPath(t.TempDir()),
 	)
 	// No auth file exists in this fresh temp dir, so the connection
 	// attempt fails; New still returns a usable *Powerwall that reports
@@ -45,11 +45,11 @@ func TestApplyReserveCloudModeWarnsAboveCap(t *testing.T) {
 func TestApplyReserveLocalModeSkipsCapCheck(t *testing.T) {
 	t.Parallel()
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost("127.0.0.1:9"),
-		gopowerwall.WithPassword("test"),
-		gopowerwall.WithCloudMode(false),
+		powerwall.WithHost("127.0.0.1:9"),
+		powerwall.WithPassword("test"),
+		powerwall.WithCloudMode(false),
 	)
 	require.Error(t, err)
 	assert.False(t, pw.IsCloud())

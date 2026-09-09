@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // TestResolveModeOptions white-box tests the mode-resolution switch behind
@@ -18,7 +18,7 @@ func TestResolveModeOptions(t *testing.T) {
 	t.Parallel()
 
 	type testCase struct {
-		verify func(t *testing.T, cfg *gopowerwall.Config, err error)
+		verify func(t *testing.T, cfg *powerwall.Config, err error)
 		name   string
 		flags  ConnectionFlags
 	}
@@ -27,7 +27,7 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "v1r missing gateway password",
 			flags: ConnectionFlags{V1r: true, Host: "192.168.91.1"},
-			verify: func(t *testing.T, _ *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, _ *powerwall.Config, err error) {
 				t.Helper()
 				assert.ErrorIs(t, err, ErrV1rMissingGwPwd)
 			},
@@ -35,7 +35,7 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "v1r missing host",
 			flags: ConnectionFlags{V1r: true, GwPwd: "secret"},
-			verify: func(t *testing.T, _ *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, _ *powerwall.Config, err error) {
 				t.Helper()
 				assert.ErrorIs(t, err, ErrV1rMissingHost)
 			},
@@ -43,16 +43,16 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "v1r fully configured applies no extra options",
 			flags: ConnectionFlags{V1r: true, GwPwd: "secret", Host: "192.168.91.1"},
-			verify: func(t *testing.T, cfg *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, cfg *powerwall.Config, err error) {
 				t.Helper()
 				require.NoError(t, err)
-				assert.Equal(t, gopowerwall.DefaultConfig(), cfg)
+				assert.Equal(t, powerwall.DefaultConfig(), cfg)
 			},
 		},
 		{
 			name:  "tedapi missing gateway password",
 			flags: ConnectionFlags{TEDAPI: true},
-			verify: func(t *testing.T, _ *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, _ *powerwall.Config, err error) {
 				t.Helper()
 				assert.ErrorIs(t, err, ErrTedapiMissingGw)
 			},
@@ -60,7 +60,7 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "tedapi without host defaults to the local gateway IP",
 			flags: ConnectionFlags{TEDAPI: true, GwPwd: "secret"},
-			verify: func(t *testing.T, cfg *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, cfg *powerwall.Config, err error) {
 				t.Helper()
 				require.NoError(t, err)
 				assert.Equal(t, "192.168.91.1", cfg.Host)
@@ -69,16 +69,16 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "tedapi with host set applies no extra options",
 			flags: ConnectionFlags{TEDAPI: true, GwPwd: "secret", Host: "10.0.0.5"},
-			verify: func(t *testing.T, cfg *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, cfg *powerwall.Config, err error) {
 				t.Helper()
 				require.NoError(t, err)
-				assert.Equal(t, gopowerwall.DefaultConfig(), cfg)
+				assert.Equal(t, powerwall.DefaultConfig(), cfg)
 			},
 		},
 		{
 			name:  "local missing host",
 			flags: ConnectionFlags{Local: true},
-			verify: func(t *testing.T, _ *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, _ *powerwall.Config, err error) {
 				t.Helper()
 				assert.ErrorIs(t, err, ErrLocalMissingHost)
 			},
@@ -86,7 +86,7 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "local with host disables cloud mode",
 			flags: ConnectionFlags{Local: true, Host: "10.0.0.5"},
-			verify: func(t *testing.T, cfg *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, cfg *powerwall.Config, err error) {
 				t.Helper()
 				require.NoError(t, err)
 				assert.False(t, cfg.CloudMode)
@@ -95,7 +95,7 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "cloud enables cloud mode and disables fleetapi",
 			flags: ConnectionFlags{Cloud: true},
-			verify: func(t *testing.T, cfg *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, cfg *powerwall.Config, err error) {
 				t.Helper()
 				require.NoError(t, err)
 				assert.True(t, cfg.CloudMode)
@@ -105,7 +105,7 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "fleetapi enables both cloud mode and fleetapi",
 			flags: ConnectionFlags{FleetAPI: true},
-			verify: func(t *testing.T, cfg *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, cfg *powerwall.Config, err error) {
 				t.Helper()
 				require.NoError(t, err)
 				assert.True(t, cfg.CloudMode)
@@ -115,7 +115,7 @@ func TestResolveModeOptions(t *testing.T) {
 		{
 			name:  "no mode flag falls back to autoselect",
 			flags: ConnectionFlags{},
-			verify: func(t *testing.T, cfg *gopowerwall.Config, err error) {
+			verify: func(t *testing.T, cfg *powerwall.Config, err error) {
 				t.Helper()
 				require.NoError(t, err)
 				assert.True(t, cfg.AutoSelect)
@@ -127,7 +127,7 @@ func TestResolveModeOptions(t *testing.T) {
 
 			opts, err := tc.flags.resolveModeOptions()
 
-			cfg := gopowerwall.DefaultConfig()
+			cfg := powerwall.DefaultConfig()
 			for _, opt := range opts {
 				opt(cfg)
 			}

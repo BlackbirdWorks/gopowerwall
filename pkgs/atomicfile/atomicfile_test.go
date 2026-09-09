@@ -60,9 +60,22 @@ func TestWrite(t *testing.T) {
 func TestWriteRejectsMissingDirectory(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "does-not-exist", "target.txt")
-	err := atomicfile.Write(path, []byte("data"), 0o600)
-	require.Error(t, err)
+	type testCase struct {
+		name    string
+		subPath string
+	}
+
+	for _, tc := range []testCase{
+		{name: "missing nested directory", subPath: "does-not-exist/target.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), tc.subPath)
+			err := atomicfile.Write(path, []byte("data"), 0o600)
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestWriteJSON(t *testing.T) {

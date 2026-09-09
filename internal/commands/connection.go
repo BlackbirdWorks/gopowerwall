@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 var (
@@ -19,25 +19,25 @@ var (
 
 // ConnectionFlags holds shared connection flags for commands interacting with a Powerwall.
 type ConnectionFlags struct {
-	Host       string `help:"IP address of Powerwall Gateway [local/tedapi/v1r]"                name:"host"`
-	Password   string `help:"Customer password = last 5 characters of gateway password"         name:"password"`
-	GwPwd      string `help:"Gateway password [required for -tedapi and -v1r]"                  name:"gw_pwd"`
-	RsaKeyPath string `help:"RSA private key PEM path [v1r; default: ./tedapi_rsa_private.pem]" name:"rsa_key_path"`
+	Host string `env:"PW_HOST" help:"IP address of Powerwall Gateway [local/tedapi/v1r]" name:"host"`
 
-	// AuthPath also carries an env tag, unlike its neighbours above, so a
-	// blank line keeps it out of their gofmt tag-alignment group: aligning
-	// it together with them would otherwise pad this line past the
-	// 120-character limit.
+	Password string `env:"PW_PASSWORD" help:"Customer password = last 5 characters of gateway password" name:"password"`
 
-	AuthPath string `help:"Auth path" name:"authpath" env:"PW_AUTH_PATH"`
-	workDir  string
+	GwPwd string `env:"PW_GW_PWD" help:"Gateway password [required for -tedapi and -v1r]" name:"gw_pwd"`
+
+	RsaKeyPath string `env:"PW_RSA_KEY_PATH" help:"RSA private key PEM path [v1r]" name:"rsa_key_path"`
+
+	AuthPath string `env:"PW_AUTH_PATH" help:"Auth path" name:"authpath"`
+
+	workDir string
 
 	Local    bool `help:"Connect via local Powerwall Gateway (requires -host)"              name:"local"`
 	Cloud    bool `help:"Connect via Tesla Cloud (requires prior 'setup')"                  name:"cloud"`
 	FleetAPI bool `help:"Connect via Tesla Fleet API (requires prior 'setup -fleetapi')"    name:"fleetapi"`
 	TEDAPI   bool `help:"Connect via TEDAPI (requires -gw_pwd)"                             name:"tedapi"`
 	V1r      bool `help:"Connect via v1r LAN TEDAPI (requires -gw_pwd and RSA private key)" name:"v1r"`
-	Debug    bool `help:"Enable debug output"                                               name:"debug"`
+
+	Debug bool `env:"PW_DEBUG" help:"Enable debug output" name:"debug"`
 }
 
 func (c *ConnectionFlags) resolveRSAKey() string {
@@ -71,19 +71,19 @@ func (c *ConnectionFlags) WithLogger(ctx context.Context) context.Context {
 // BuildPowerwall constructs a Powerwall client based on flags.
 //
 // A non-nil error here always means the flags themselves were invalid -
-// a bad mode combination (see resolveModeOptions) or a [gopowerwall.Config]
+// a bad mode combination (see resolveModeOptions) or a [powerwall.Config]
 // validation failure. A failed *connection* attempt is deliberately not
-// surfaced as an error: [gopowerwall.New] wraps that case in a
-// [gopowerwall.ConnectError], but every command built on BuildPowerwall
+// surfaced as an error: [powerwall.New] wraps that case in a
+// [powerwall.ConnectError], but every command built on BuildPowerwall
 // already reports "not connected" itself, with its own message, after
-// checking [gopowerwall.Powerwall.IsConnected] - see GetCmd.Run and
+// checking [powerwall.Powerwall.IsConnected] - see GetCmd.Run and
 // SetCmd.Run. Propagating New's ConnectError here as well would just
 // duplicate that reporting with a second, differently-worded error, so
 // BuildPowerwall discards it and returns the constructed (but possibly
 // disconnected) *Powerwall with a nil error instead, preserving the
 // existing "build, then check IsConnected" flow.
-func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*gopowerwall.Powerwall, error) {
-	var opts []gopowerwall.Option
+func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*powerwall.Powerwall, error) {
+	var opts []powerwall.Option
 
 	if c.AuthPath != "" {
 		// The proxy server (see proxy.DefaultConfig) already relocates its
@@ -93,21 +93,21 @@ func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*gopowerwall.Powe
 		// it always fell back to the process's working directory. Mirror the
 		// proxy's behaviour so -authpath consistently controls both.
 		opts = append(opts,
-			gopowerwall.WithAuthPath(c.AuthPath),
-			gopowerwall.WithCacheFile(filepath.Join(c.AuthPath, ".powerwall")),
+			powerwall.WithAuthPath(c.AuthPath),
+			powerwall.WithCacheFile(filepath.Join(c.AuthPath, ".powerwall")),
 		)
 	}
 	if c.Host != "" {
-		opts = append(opts, gopowerwall.WithHost(c.Host))
+		opts = append(opts, powerwall.WithHost(c.Host))
 	}
 	if c.Password != "" {
-		opts = append(opts, gopowerwall.WithPassword(c.Password))
+		opts = append(opts, powerwall.WithPassword(c.Password))
 	}
 	if c.GwPwd != "" {
-		opts = append(opts, gopowerwall.WithGwPwd(c.GwPwd))
+		opts = append(opts, powerwall.WithGwPwd(c.GwPwd))
 	}
 	if rsaKey := c.resolveRSAKey(); rsaKey != "" {
-		opts = append(opts, gopowerwall.WithRSAKeyPath(rsaKey))
+		opts = append(opts, powerwall.WithRSAKeyPath(rsaKey))
 	}
 
 	modeOpts, err := c.resolveModeOptions()
@@ -116,15 +116,15 @@ func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*gopowerwall.Powe
 	}
 	opts = append(opts, modeOpts...)
 
-	pw, err := gopowerwall.New(ctx, opts...)
-	if _, ok := errors.AsType[*gopowerwall.ConnectError](err); ok {
+	pw, err := powerwall.New(ctx, opts...)
+	if _, ok := errors.AsType[*powerwall.ConnectError](err); ok {
 		return pw, nil
 	}
 
 	return pw, err
 }
 
-func (c *ConnectionFlags) resolveModeOptions() ([]gopowerwall.Option, error) {
+func (c *ConnectionFlags) resolveModeOptions() ([]powerwall.Option, error) {
 	switch {
 	case c.V1r:
 		if c.GwPwd == "" {
@@ -140,7 +140,7 @@ func (c *ConnectionFlags) resolveModeOptions() ([]gopowerwall.Option, error) {
 			return nil, ErrTedapiMissingGw
 		}
 		if c.Host == "" {
-			return []gopowerwall.Option{gopowerwall.WithHost("192.168.91.1")}, nil
+			return []powerwall.Option{powerwall.WithHost("192.168.91.1")}, nil
 		}
 
 		return nil, nil
@@ -149,12 +149,12 @@ func (c *ConnectionFlags) resolveModeOptions() ([]gopowerwall.Option, error) {
 			return nil, ErrLocalMissingHost
 		}
 
-		return []gopowerwall.Option{gopowerwall.WithCloudMode(false)}, nil
+		return []powerwall.Option{powerwall.WithCloudMode(false)}, nil
 	case c.Cloud:
-		return []gopowerwall.Option{gopowerwall.WithCloudMode(true), gopowerwall.WithFleetAPI(false)}, nil
+		return []powerwall.Option{powerwall.WithCloudMode(true), powerwall.WithFleetAPI(false)}, nil
 	case c.FleetAPI:
-		return []gopowerwall.Option{gopowerwall.WithCloudMode(true), gopowerwall.WithFleetAPI(true)}, nil
+		return []powerwall.Option{powerwall.WithCloudMode(true), powerwall.WithFleetAPI(true)}, nil
 	default:
-		return []gopowerwall.Option{gopowerwall.WithAutoSelect(true)}, nil
+		return []powerwall.Option{powerwall.WithAutoSelect(true)}, nil
 	}
 }

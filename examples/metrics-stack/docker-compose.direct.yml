@@ -1,0 +1,81 @@
+name: gopowerwall-metrics-direct
+
+# Direct setup: Powerwall proxy -> InfluxDB -> Grafana (no Telegraf container needed).
+#
+# Setup:
+#   1. Copy ../../.env.example to .env in this directory and configure your Powerwall connection.
+#   2. docker compose -f docker-compose.direct.yml up -d
+#   3. Grafana: http://localhost:3000 (admin/admin on first login).
+
+services:
+  proxy:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: gopowerwall-proxy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PW_PORT: "8675"
+      PW_AUTH_PATH: /data
+      # Direct InfluxDB export configuration:
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-gopowerwall-dev-token}
+      INFLUX_ORG: ${INFLUXDB_ORG:-gopowerwall}
+      INFLUX_BUCKET: ${INFLUXDB_BUCKET:-powerwall}
+      INFLUX_INTERVAL: "30"
+    volumes:
+      - powerwall-auth:/data
+    ports:
+      - "8675:8675"
+    depends_on:
+      influxdb:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/app/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  influxdb:
+    image: influxdb:2
+    container_name: gopowerwall-influxdb
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-changeme123}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-gopowerwall}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-powerwall}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-gopowerwall-dev-token}
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: gopowerwall-grafana
+    restart: unless-stopped
+    depends_on:
+      - influxdb
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-gopowerwall}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-powerwall}
+      INFLUXDB_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-gopowerwall-dev-token}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+
+volumes:
+  powerwall-auth:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:

@@ -1,4 +1,4 @@
-package gopowerwall_test
+package powerwall_test
 
 import (
 	"crypto/rand"
@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
 )
 
@@ -25,33 +25,33 @@ import (
 func TestPowerwallDisconnectedDegradation(t *testing.T) {
 	t.Parallel()
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost("127.0.0.1:9"), // non-routable port: nothing listens here
-		gopowerwall.WithPassword("test"),
-		gopowerwall.WithCloudMode(false),
+		powerwall.WithHost("127.0.0.1:9"), // non-routable port: nothing listens here
+		powerwall.WithPassword("test"),
+		powerwall.WithCloudMode(false),
 	)
-	var connectErr *gopowerwall.ConnectError
+	var connectErr *powerwall.ConnectError
 	require.ErrorAs(t, err, &connectErr)
 	require.NotNil(t, pw)
 	require.False(t, pw.IsConnected())
 
 	type testCase struct {
-		run  func(t *testing.T, pw *gopowerwall.Powerwall)
+		run  func(t *testing.T, pw *powerwall.Powerwall)
 		name string
 	}
 
 	for _, tc := range []testCase{
 		{
 			name: "Poll returns nil",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				assert.Nil(t, pw.Poll(t.Context(), "/api/status"))
 			},
 		},
 		{
 			name: "Level returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.Level(t.Context())
 				assert.Error(t, callErr)
@@ -59,7 +59,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "Power returns zero summary",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				p := pw.Power(t.Context())
 				assert.Zero(t, p.Site)
@@ -68,7 +68,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "SiteReading returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.SiteReading(t.Context())
 				assert.Error(t, callErr)
@@ -76,7 +76,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "SolarReading returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.SolarReading(t.Context())
 				assert.Error(t, callErr)
@@ -84,7 +84,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "BatteryReading returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.BatteryReading(t.Context())
 				assert.Error(t, callErr)
@@ -92,7 +92,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "LoadReading returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.LoadReading(t.Context())
 				assert.Error(t, callErr)
@@ -100,7 +100,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GridReading returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GridReading(t.Context())
 				assert.Error(t, callErr)
@@ -108,7 +108,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "HomeReading returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.HomeReading(t.Context())
 				assert.Error(t, callErr)
@@ -116,7 +116,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "Vitals returns no devices",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				vit, vitErr := pw.Vitals(t.Context())
 				if vitErr == nil {
@@ -126,14 +126,14 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "Strings returns no strings",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				assert.Empty(t, pw.Strings(t.Context()).Strings)
 			},
 		},
 		{
 			name: "Din returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.Din(t.Context())
 				assert.Error(t, callErr)
@@ -141,7 +141,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "Uptime returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.Uptime(t.Context())
 				assert.Error(t, callErr)
@@ -149,7 +149,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "SiteName returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.SiteName(t.Context())
 				assert.Error(t, callErr)
@@ -157,7 +157,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetTimeRemaining returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetTimeRemaining(t.Context())
 				assert.Error(t, callErr)
@@ -165,7 +165,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetReserve returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetReserve(t.Context())
 				assert.Error(t, callErr)
@@ -173,7 +173,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetMode returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetMode(t.Context())
 				assert.Error(t, callErr)
@@ -181,7 +181,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetGridCharging returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetGridCharging(t.Context())
 				assert.Error(t, callErr)
@@ -189,7 +189,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetGridExport returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetGridExport(t.Context())
 				assert.Error(t, callErr)
@@ -197,7 +197,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetTEDAPIStatus returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetTEDAPIStatus(t.Context())
 				assert.Error(t, callErr)
@@ -205,7 +205,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetTEDAPIComponents returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetTEDAPIComponents(t.Context())
 				assert.Error(t, callErr)
@@ -213,7 +213,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetTEDAPIBattery returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetTEDAPIBattery(t.Context())
 				assert.Error(t, callErr)
@@ -221,7 +221,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetTEDAPIDeviceController returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetTEDAPIDeviceController(t.Context())
 				assert.Error(t, callErr)
@@ -229,7 +229,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetCloudBattery returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetCloudBattery(t.Context())
 				assert.Error(t, callErr)
@@ -237,7 +237,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetCloudPower returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetCloudPower(t.Context())
 				assert.Error(t, callErr)
@@ -245,7 +245,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetCloudConfig returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetCloudConfig(t.Context())
 				assert.Error(t, callErr)
@@ -253,7 +253,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetFleetAPIInfo returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetFleetAPIInfo(t.Context())
 				assert.Error(t, callErr)
@@ -261,7 +261,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		},
 		{
 			name: "GetFleetAPIStatus returns an error",
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 				_, callErr := pw.GetFleetAPIStatus(t.Context())
 				assert.Error(t, callErr)
@@ -391,7 +391,7 @@ func buildMultiPVACVitalsProtobuf(t *testing.T) []byte {
 // newLocalTestPowerwall connects a Powerwall in local mode against a fake
 // gateway that serves cookie-based login and the given raw /api/devices/vitals
 // protobuf payload.
-func newLocalTestPowerwall(t *testing.T, vitalsBody []byte) *gopowerwall.Powerwall {
+func newLocalTestPowerwall(t *testing.T, vitalsBody []byte) *powerwall.Powerwall {
 	t.Helper()
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -409,12 +409,12 @@ func newLocalTestPowerwall(t *testing.T, vitalsBody []byte) *gopowerwall.Powerwa
 	}))
 	t.Cleanup(server.Close)
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost(server.Listener.Addr().String()),
-		gopowerwall.WithPassword("password"),
-		gopowerwall.WithCloudMode(false),
-		gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
+		powerwall.WithHost(server.Listener.Addr().String()),
+		powerwall.WithPassword("password"),
+		powerwall.WithCloudMode(false),
+		powerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
 	)
 	require.NoError(t, err)
 	require.True(t, pw.IsConnected())
@@ -563,7 +563,7 @@ func TestPureTEDAPIAndV1rModesReportTheirOwnConnectionMode(t *testing.T) {
 
 	type testCase struct {
 		name       string
-		wantMode   gopowerwall.ConnectionMode
+		wantMode   powerwall.ConnectionMode
 		useV1rKey  bool
 		wantV1r    bool
 		wantTEDAPI bool
@@ -572,13 +572,13 @@ func TestPureTEDAPIAndV1rModesReportTheirOwnConnectionMode(t *testing.T) {
 	for _, tc := range []testCase{
 		{
 			name:       "pure TEDAPI (gateway password, no customer password)",
-			wantMode:   gopowerwall.ModeTEDAPI,
+			wantMode:   powerwall.ModeTEDAPI,
 			wantTEDAPI: true,
 		},
 		{
 			name:       "pure v1r (RSA key, no customer password)",
 			useV1rKey:  true,
-			wantMode:   gopowerwall.ModeV1r,
+			wantMode:   powerwall.ModeV1r,
 			wantV1r:    true,
 			wantTEDAPI: true,
 		},
@@ -586,17 +586,17 @@ func TestPureTEDAPIAndV1rModesReportTheirOwnConnectionMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			opts := []gopowerwall.Option{
-				gopowerwall.WithHost("127.0.0.1:9"), // non-routable: reads are expected to fail over the wire
-				gopowerwall.WithCloudMode(false),
-				gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
-				gopowerwall.WithGwPwd("gatewaypassword"),
+			opts := []powerwall.Option{
+				powerwall.WithHost("127.0.0.1:9"), // non-routable: reads are expected to fail over the wire
+				powerwall.WithCloudMode(false),
+				powerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
+				powerwall.WithGwPwd("gatewaypassword"),
 			}
 			if tc.useV1rKey {
-				opts = append(opts, gopowerwall.WithRSAKeyPath(writeTestRSAKey(t)))
+				opts = append(opts, powerwall.WithRSAKeyPath(writeTestRSAKey(t)))
 			}
 
-			pw, err := gopowerwall.New(t.Context(), opts...)
+			pw, err := powerwall.New(t.Context(), opts...)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = pw.Close(t.Context()) })
 
@@ -606,9 +606,9 @@ func TestPureTEDAPIAndV1rModesReportTheirOwnConnectionMode(t *testing.T) {
 			assert.False(t, pw.IsLocal(), "pure TEDAPI/v1r has no local HTTP backend, so IsLocal must be false")
 
 			if tc.wantV1r {
-				assert.Equal(t, gopowerwall.TEDAPIV1r, pw.TEDAPIMode())
+				assert.Equal(t, powerwall.TEDAPIV1r, pw.TEDAPIMode())
 			} else {
-				assert.Equal(t, gopowerwall.TEDAPIFull, pw.TEDAPIMode())
+				assert.Equal(t, powerwall.TEDAPIFull, pw.TEDAPIMode())
 			}
 		})
 	}
@@ -628,7 +628,7 @@ func TestSOEAndGridStatusResponseSurviveEarlierParsedPoll(t *testing.T) {
 	t.Parallel()
 
 	type testCase struct {
-		run  func(t *testing.T, pw *gopowerwall.Powerwall)
+		run  func(t *testing.T, pw *powerwall.Powerwall)
 		name string
 		api  string
 		body string
@@ -639,7 +639,7 @@ func TestSOEAndGridStatusResponseSurviveEarlierParsedPoll(t *testing.T) {
 			name: "SOE succeeds after an earlier parsed Poll of the same endpoint",
 			api:  "/api/system_status/soe",
 			body: `{"percentage": 20.109166592431226}`,
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 
 				soe, err := pw.SOE(t.Context())
@@ -651,7 +651,7 @@ func TestSOEAndGridStatusResponseSurviveEarlierParsedPoll(t *testing.T) {
 			name: "GridStatusResponse succeeds after an earlier parsed Poll of the same endpoint",
 			api:  "/api/system_status/grid_status",
 			body: `{"grid_status":"SystemGridConnected","grid_services_active":false}`,
-			run: func(t *testing.T, pw *gopowerwall.Powerwall) {
+			run: func(t *testing.T, pw *powerwall.Powerwall) {
 				t.Helper()
 
 				status, err := pw.GridStatusResponse(t.Context())
@@ -678,12 +678,12 @@ func TestSOEAndGridStatusResponseSurviveEarlierParsedPoll(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 
-			pw, err := gopowerwall.New(
+			pw, err := powerwall.New(
 				t.Context(),
-				gopowerwall.WithHost(server.Listener.Addr().String()),
-				gopowerwall.WithPassword("password"),
-				gopowerwall.WithCloudMode(false),
-				gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
+				powerwall.WithHost(server.Listener.Addr().String()),
+				powerwall.WithPassword("password"),
+				powerwall.WithCloudMode(false),
+				powerwall.WithCacheFile(filepath.Join(t.TempDir(), "cache")),
 			)
 			require.NoError(t, err)
 			require.True(t, pw.IsConnected())

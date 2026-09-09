@@ -354,13 +354,26 @@ func TestRateLimiterShouldLog(t *testing.T) {
 func TestRateLimiterResetsBucketMapWhenLarge(t *testing.T) {
 	t.Parallel()
 
-	rl := cache.NewRateLimiter()
-	for i := range 205 {
-		rl.ShouldLog(fmt.Sprintf("func-%d", i), 1000)
+	type testCase struct {
+		name     string
+		prefills int
 	}
 
-	// The bucket map should have been reset internally without panicking, and
-	// a brand new key should still be tracked correctly from a count of one.
-	assert.True(t, rl.ShouldLog("fresh-func", 1))
-	assert.False(t, rl.ShouldLog("fresh-func", 1))
+	for _, tc := range []testCase{
+		{name: "exceeds rateLimitMapMaxLen and resets", prefills: 205},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rl := cache.NewRateLimiter()
+			for i := range tc.prefills {
+				rl.ShouldLog(fmt.Sprintf("func-%d", i), 1000)
+			}
+
+			// The limiters map should have been reset internally without panicking, and
+			// a brand new key should still be tracked correctly from a count of one.
+			assert.True(t, rl.ShouldLog("fresh-func", 1))
+			assert.False(t, rl.ShouldLog("fresh-func", 1))
+		})
+	}
 }

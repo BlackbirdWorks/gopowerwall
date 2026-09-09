@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/blackbirdworks/gopowerwall"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 var ErrUnableToConnectGet = errors.New(
@@ -71,7 +71,7 @@ func orNil[T any](v T, err error) any {
 	return v
 }
 
-func collectMetrics(ctx context.Context, pw *gopowerwall.Powerwall) map[string]any {
+func collectMetrics(ctx context.Context, pw *powerwall.Powerwall) map[string]any {
 	gridStatus, gridStatusErr := pw.GridStatusString(ctx)
 	if gridStatusErr != nil {
 		gridStatus = "Unknown"

@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/blackbirdworks/gopowerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
 	"github.com/blackbirdworks/gopowerwall/proxy"
 )
@@ -164,22 +164,22 @@ func newFakeGateway(t *testing.T, overrides map[string]http.HandlerFunc) *httpte
 
 // newLocalPowerwall connects a Powerwall client in local mode to the given
 // fake gateway server (as returned by newFakeGateway).
-func newLocalPowerwall(t *testing.T, gw *httptest.Server) *gopowerwall.Powerwall {
+func newLocalPowerwall(t *testing.T, gw *httptest.Server) *powerwall.Powerwall {
 	t.Helper()
 
 	host := strings.TrimPrefix(gw.URL, "https://")
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost(host),
-		gopowerwall.WithPassword("testpw"),
-		gopowerwall.WithCloudMode(false),
-		gopowerwall.WithTimeout(2*time.Second),
+		powerwall.WithHost(host),
+		powerwall.WithPassword("testpw"),
+		powerwall.WithCloudMode(false),
+		powerwall.WithTimeout(2*time.Second),
 		// Isolate the auth-session cache file per test: the local backend
 		// reads it before ever attempting a network login, so sharing the
 		// default "./.powerwall" path across tests (or across runs, since
 		// it persists on disk) lets a stale cached session from one test
 		// silently satisfy Authenticate() in another.
-		gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
+		powerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
 	)
 	require.NoError(t, err)
 
@@ -189,15 +189,15 @@ func newLocalPowerwall(t *testing.T, gw *httptest.Server) *gopowerwall.Powerwall
 // newDisconnectedPowerwall returns a Powerwall in local mode pointed at a
 // host nothing listens on, so every backend call fails gracefully. Useful
 // for exercising the proxy's degraded/no-data response paths.
-func newDisconnectedPowerwall(t *testing.T) *gopowerwall.Powerwall {
+func newDisconnectedPowerwall(t *testing.T) *powerwall.Powerwall {
 	t.Helper()
 
-	pw, err := gopowerwall.New(
+	pw, err := powerwall.New(
 		t.Context(),
-		gopowerwall.WithHost("127.0.0.1:9"),
-		gopowerwall.WithCloudMode(false),
-		gopowerwall.WithTimeout(200*time.Millisecond),
-		gopowerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
+		powerwall.WithHost("127.0.0.1:9"),
+		powerwall.WithCloudMode(false),
+		powerwall.WithTimeout(200*time.Millisecond),
+		powerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
 	)
 	// The connection is deliberately expected to fail here (that's the
 	// point of this helper); New still returns a usable, disconnected
@@ -210,7 +210,7 @@ func newDisconnectedPowerwall(t *testing.T) *gopowerwall.Powerwall {
 
 // newProxyServer wraps a proxy.Server for a given Config and Powerwall in an
 // httptest.Server, registering cleanup.
-func newProxyServer(t *testing.T, cfg proxy.Config, pw *gopowerwall.Powerwall) *httptest.Server {
+func newProxyServer(t *testing.T, cfg proxy.Config, pw *powerwall.Powerwall) *httptest.Server {
 	t.Helper()
 
 	srv := proxy.NewServer(t.Context(), cfg, pw)

@@ -143,9 +143,87 @@ func TestDefaultConfigFirmwareCheckIntervalClamp(t *testing.T) {
 func TestConfigDurationHelpers(t *testing.T) {
 	t.Parallel()
 
-	cfg := proxy.Config{CacheExpire: 5, CacheTTL: 30, Timeout: 10}
+	type testCase struct {
+		name        string
+		cfg         proxy.Config
+		wantExpire  time.Duration
+		wantTTL     time.Duration
+		wantTimeout time.Duration
+	}
 
-	assert.Equal(t, 5*time.Second, cfg.CacheExpireDuration())
-	assert.Equal(t, 30*time.Second, cfg.CacheTTLDuration())
-	assert.Equal(t, 10*time.Second, cfg.TimeoutDuration())
+	for _, tc := range []testCase{
+		{
+			name:        "durations converted from seconds",
+			cfg:         proxy.Config{CacheExpire: 5, CacheTTL: 30, Timeout: 10},
+			wantExpire:  5 * time.Second,
+			wantTTL:     30 * time.Second,
+			wantTimeout: 10 * time.Second,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.wantExpire, tc.cfg.CacheExpireDuration())
+			assert.Equal(t, tc.wantTTL, tc.cfg.CacheTTLDuration())
+			assert.Equal(t, tc.wantTimeout, tc.cfg.TimeoutDuration())
+		})
+	}
+}
+
+func TestConfigInfluxConfig(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name         string
+		wantURL      string
+		cfg          proxy.Config
+		wantInterval time.Duration
+		wantOK       bool
+	}
+
+	cases := []testCase{
+		{
+			name:   "incomplete returns false",
+			cfg:    proxy.Config{InfluxURL: "http://localhost:8086"},
+			wantOK: false,
+		},
+		{
+			name: "complete with default interval",
+			cfg: proxy.Config{
+				InfluxURL:    "http://localhost:8086",
+				InfluxToken:  "token",
+				InfluxOrg:    "org",
+				InfluxBucket: "bucket",
+			},
+			wantOK:       true,
+			wantURL:      "http://localhost:8086",
+			wantInterval: 30 * time.Second,
+		},
+		{
+			name: "complete with custom interval",
+			cfg: proxy.Config{
+				InfluxURL:      "http://localhost:8086",
+				InfluxToken:    "token",
+				InfluxOrg:      "org",
+				InfluxBucket:   "bucket",
+				InfluxInterval: 15,
+			},
+			wantOK:       true,
+			wantURL:      "http://localhost:8086",
+			wantInterval: 15 * time.Second,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotCfg, gotOK := tc.cfg.InfluxConfig()
+			assert.Equal(t, tc.wantOK, gotOK)
+			if tc.wantOK {
+				assert.Equal(t, tc.wantURL, gotCfg.URL)
+				assert.Equal(t, tc.wantInterval, gotCfg.Interval)
+			}
+		})
+	}
 }
