@@ -9,7 +9,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"time"
@@ -173,11 +173,14 @@ func (s *Server) proxyLocalGateway(ctx context.Context, w http.ResponseWriter, r
 	}
 
 	gwURL := fmt.Sprintf("https://%s%s", s.Config.Host, reqPath)
-	tr := &http.Transport{
-		//nolint:gosec // Local gateway connects via self-signed HTTPS by design
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	client := s.localGWClient
+	if client == nil {
+		tr := &http.Transport{
+			//nolint:gosec // Local gateway connects via self-signed HTTPS by design
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		client = &http.Client{Transport: tr, Timeout: s.Config.TimeoutDuration()}
 	}
-	client := &http.Client{Transport: tr, Timeout: s.Config.TimeoutDuration()}
 	//nolint:gosec // Local gateway reverse proxy target is user-configured host
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, gwURL, nil)
 	if reqErr != nil {
@@ -202,7 +205,7 @@ func (s *Server) proxyLocalGateway(ctx context.Context, w http.ResponseWriter, r
 func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request, reqPath string) {
 	ctx := r.Context()
 	cookieSuffix := "path=/;"
-	if s.Config.HTTPSMode == "yes" || s.Config.HTTPSMode == "http" {
+	if s.Config.HTTPSMode == valYes || s.Config.HTTPSMode == "http" {
 		cookieSuffix = "path=/;SameSite=None;Secure;"
 	}
 	// Add, not Set: both cookies must be sent. A second Set-Cookie header
@@ -265,8 +268,13 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 	clearTS := s.ClearTime.Unix()
 	s.statsMu.RUnlock()
 
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
+	sample := make([]metrics.Sample, 1)
+	sample[0].Name = "/memory/classes/heap/objects:bytes"
+	metrics.Read(sample)
+	var memKB uint64
+	if sample[0].Value.Kind() == metrics.KindUint64 {
+		memKB = sample[0].Value.Uint64() / kiloByte
+	}
 
 	siteName, siteNameErr := s.PW.SiteName(ctx)
 
@@ -282,7 +290,7 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 		"start":       startTS,
 		"clear":       clearTS,
 		"uptime":      uptime,
-		"mem":         m.Alloc / kiloByte,
+		"mem":         memKB,
 		keySiteName:   orNil(siteName, siteNameErr),
 		"cloudmode":   s.PW.IsCloud(),
 		"fleetapi":    s.PW.IsFleetAPI(),

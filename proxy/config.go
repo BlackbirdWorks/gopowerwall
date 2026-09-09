@@ -90,7 +90,7 @@ func getEnvBool(key string, defaultVal bool) bool {
 	if val, ok := os.LookupEnv(key); ok {
 		lower := strings.ToLower(val)
 
-		return lower == "yes" || lower == valTrue || lower == "1"
+		return lower == valYes || lower == valTrue || lower == "1"
 	}
 
 	return defaultVal

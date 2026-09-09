@@ -13,4 +13,5 @@ const (
 	keyUptime       = "uptime"
 	valTrue         = "true"
 	valFalse        = "false"
+	valYes          = "yes"
 )

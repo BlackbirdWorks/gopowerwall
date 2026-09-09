@@ -26,6 +26,13 @@ var (
 	errNoResponse   = errors.New("no response")
 )
 
+const (
+	csvV1BufSize = 96
+	csvV2BufSize = 128
+	freqExtraCap = 2
+	podExtraCap  = 5
+)
+
 // aggregatesOptions builds the [powerwall.AggregatesOption] values
 // carrying this server's configured corrections, so every route deriving
 // power figures from meter data (aggregates, CSV, JSON) applies the same
@@ -56,6 +63,7 @@ func (s *Server) formatV2CSVRow(
 	grid, home, solar, battery, batLevel float64,
 ) string {
 	var sb strings.Builder
+	sb.Grow(csvV2BufSize)
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel,GridStatus,Reserve\n")
 	}
@@ -73,6 +81,7 @@ func (s *Server) formatV1CSVRow(
 	grid, home, solar, battery, batLevel float64,
 ) string {
 	var sb strings.Builder
+	sb.Grow(csvV1BufSize)
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel\n")
 	}
@@ -94,8 +103,11 @@ func (s *Server) generateCSV(ctx context.Context, isV2, includeHeaders bool) (st
 }
 
 func (s *Server) generateFreq(ctx context.Context) (string, error) {
-	fcv := make(map[string]any)
 	rawSys, _ := s.PW.SystemStatus(ctx)
+	freq := s.PW.FrequencyView(ctx)
+	capHint := len(rawSys.BatteryBlocks)*11 + len(freq.Inverters)*4 +
+		len(freq.SyncMeterFields) + freqExtraCap
+	fcv := make(map[string]any, capHint)
 	for idx, block := range rawSys.BatteryBlocks {
 		pNum := idx + 1
 		fcv[fmt.Sprintf("PW%d_name", pNum)] = nil
@@ -111,7 +123,6 @@ func (s *Server) generateFreq(ctx context.Context) (string, error) {
 		fcv[fmt.Sprintf("PW%d_i_out", pNum)] = block.IOut
 	}
 
-	freq := s.PW.FrequencyView(ctx)
 	for invIdx, inv := range freq.Inverters {
 		pNum := invIdx + 1
 		fcv[fmt.Sprintf("PW%d_name", pNum)] = inv.Device
@@ -157,7 +168,7 @@ func applyPODTEPODVitals(pod map[string]any, entries []models.PODTEPODEntry) {
 
 func (s *Server) generatePOD(ctx context.Context) (string, error) {
 	view := s.PW.PODView(ctx)
-	pod := make(map[string]any)
+	pod := make(map[string]any, len(view.Blocks)*29+len(view.TEPODEntries)*6+podExtraCap)
 	for idx, block := range view.Blocks {
 		prefix := fmt.Sprintf("PW%d_", idx+1)
 		pod[prefix+"name"] = nil
