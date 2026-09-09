@@ -100,3 +100,28 @@ func TestScaleBatteryLevel(t *testing.T) {
 		})
 	}
 }
+
+func TestUnscaleBatteryLevel(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name  string
+		level float64
+		want  float64
+	}
+
+	for _, tc := range []testCase{
+		{name: "100 app maps to 100 raw", level: 100.0, want: 100.0},
+		{name: "0 app maps to 5 raw", level: 0.0, want: 5.0},
+		{name: "50 app maps to 52.5 raw", level: 50.0, want: 52.5},
+		{name: "roundtrips with ScaleBatteryLevel", level: 20.0, want: (20.0 * 0.95) + 5.0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw := calc.UnscaleBatteryLevel(tc.level)
+			assert.InDelta(t, tc.want, raw, 1e-9)
+			assert.InDelta(t, tc.level, calc.ScaleBatteryLevel(raw), 1e-9)
+		})
+	}
+}

@@ -47,3 +47,12 @@ const (
 func ScaleBatteryLevel(level float64) float64 {
 	return (level / scaleUsableFraction) - (scaleReservedFloor / scaleUsableFraction)
 }
+
+// UnscaleBatteryLevel converts a user-facing battery percentage (such as
+// percentage_charged from Tesla Cloud / FleetAPI) into the raw gateway
+// battery percentage, mapping the 0-100 app range back onto the gateway's
+// usable 5-100 range.
+// Matches pypowerwall's (level + (5 / 0.95)) * 0.95.
+func UnscaleBatteryLevel(level float64) float64 {
+	return (level + (scaleReservedFloor / scaleUsableFraction)) * scaleUsableFraction
+}
