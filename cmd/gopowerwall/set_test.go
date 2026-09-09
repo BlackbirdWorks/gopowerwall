@@ -1,12 +1,10 @@
-package commands_test
+package main
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestSetCmdNoActionSpecified covers the guard that rejects a `set` call
@@ -15,10 +13,10 @@ import (
 func TestSetCmdNoActionSpecified(t *testing.T) {
 	t.Parallel()
 
-	cmd := commands.SetCmd{Reserve: -1}
+	cmd := SetCmd{Reserve: -1}
 
-	err := cmd.Run(&commands.Context{Context: t.Context()})
-	assert.ErrorIs(t, err, commands.ErrNoActionSpecified)
+	err := cmd.Run(&Context{Context: t.Context()})
+	assert.ErrorIs(t, err, ErrNoActionSpecified)
 }
 
 // TestSetCmdRequiresConnection covers SetCmd's disconnected error path; the
@@ -26,14 +24,14 @@ func TestSetCmdNoActionSpecified(t *testing.T) {
 func TestSetCmdRequiresConnection(t *testing.T) {
 	t.Parallel()
 
-	cmd := commands.SetCmd{
+	cmd := SetCmd{
 		Reserve: 50,
 		Local:   true,
 		Host:    "127.0.0.1:9",
 	}
 
-	err := cmd.Run(&commands.Context{Context: t.Context()})
-	assert.ErrorIs(t, err, commands.ErrUnableToConnect)
+	err := cmd.Run(&Context{Context: t.Context()})
+	assert.ErrorIs(t, err, ErrUnableToConnect)
 }
 
 // TestSetCmdAppliesAllSettingsLocally drives SetCmd.Run against a fake local
@@ -45,7 +43,7 @@ func TestSetCmdAppliesAllSettingsLocally(t *testing.T) {
 	t.Parallel()
 
 	gw := newFakeGateway(t)
-	cmd := commands.SetCmd{
+	cmd := SetCmd{
 		Mode:            "backup",
 		GridCharging:    "on",
 		GridExport:      "battery_ok",
@@ -53,7 +51,7 @@ func TestSetCmdAppliesAllSettingsLocally(t *testing.T) {
 		ConnectionFlags: connectionFlags(t, gw),
 	}
 
-	err := cmd.Run(&commands.Context{Context: t.Context()})
+	err := cmd.Run(&Context{Context: t.Context()})
 	require.NoError(t, err)
 }
 
@@ -64,12 +62,12 @@ func TestSetCmdCurrentUsesLiveChargeLevel(t *testing.T) {
 	t.Parallel()
 
 	gw := newFakeGateway(t)
-	cmd := commands.SetCmd{
+	cmd := SetCmd{
 		Current:         true,
 		ConnectionFlags: connectionFlags(t, gw),
 	}
 
-	err := cmd.Run(&commands.Context{Context: t.Context()})
+	err := cmd.Run(&Context{Context: t.Context()})
 	require.NoError(t, err)
 }
 
@@ -80,27 +78,27 @@ func TestSetCmdInvalidValues(t *testing.T) {
 	t.Parallel()
 
 	type testCase struct {
-		build func(flags commands.ConnectionFlags) commands.SetCmd
+		build func(flags ConnectionFlags) SetCmd
 		name  string
 	}
 
 	for _, tc := range []testCase{
 		{
 			name: "invalid mode",
-			build: func(flags commands.ConnectionFlags) commands.SetCmd {
-				return commands.SetCmd{Mode: "bogus", Reserve: -1, ConnectionFlags: flags}
+			build: func(flags ConnectionFlags) SetCmd {
+				return SetCmd{Mode: "bogus", Reserve: -1, ConnectionFlags: flags}
 			},
 		},
 		{
 			name: "invalid gridcharging",
-			build: func(flags commands.ConnectionFlags) commands.SetCmd {
-				return commands.SetCmd{GridCharging: "bogus", Reserve: -1, ConnectionFlags: flags}
+			build: func(flags ConnectionFlags) SetCmd {
+				return SetCmd{GridCharging: "bogus", Reserve: -1, ConnectionFlags: flags}
 			},
 		},
 		{
 			name: "invalid gridexport",
-			build: func(flags commands.ConnectionFlags) commands.SetCmd {
-				return commands.SetCmd{GridExport: "bogus", Reserve: -1, ConnectionFlags: flags}
+			build: func(flags ConnectionFlags) SetCmd {
+				return SetCmd{GridExport: "bogus", Reserve: -1, ConnectionFlags: flags}
 			},
 		},
 	} {
@@ -110,8 +108,8 @@ func TestSetCmdInvalidValues(t *testing.T) {
 			gw := newFakeGateway(t)
 			cmd := tc.build(connectionFlags(t, gw))
 
-			err := cmd.Run(&commands.Context{Context: t.Context()})
-			assert.ErrorIs(t, err, commands.ErrNoActionSpecified)
+			err := cmd.Run(&Context{Context: t.Context()})
+			assert.ErrorIs(t, err, ErrNoActionSpecified)
 		})
 	}
 }

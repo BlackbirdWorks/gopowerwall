@@ -1,4 +1,4 @@
-package commands_test
+package main
 
 import (
 	"encoding/json"
@@ -11,8 +11,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // fixtureDir returns the absolute path to proxy/web/bogus, resolved from
@@ -87,10 +85,10 @@ func newFakeGateway(t *testing.T) *httptest.Server {
 // way, instead of the previous t.Chdir(t.TempDir()) approach, keeps callers
 // free to run in parallel - the testing package forbids combining t.Chdir
 // with t.Parallel since both act on process-wide state.
-func connectionFlags(t *testing.T, gw *httptest.Server) commands.ConnectionFlags {
+func connectionFlags(t *testing.T, gw *httptest.Server) ConnectionFlags {
 	t.Helper()
 
-	return commands.ConnectionFlags{
+	return ConnectionFlags{
 		Local:    true,
 		Host:     strings.TrimPrefix(gw.URL, "https://"),
 		Password: "testpw",

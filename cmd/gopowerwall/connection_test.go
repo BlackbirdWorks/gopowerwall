@@ -1,12 +1,10 @@
-package commands_test
+package main
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestBuildPowerwallModeValidation exercises BuildPowerwall's error paths.
@@ -18,29 +16,29 @@ func TestBuildPowerwallModeValidation(t *testing.T) {
 	type testCase struct {
 		wantErr error
 		name    string
-		flags   commands.ConnectionFlags
+		flags   ConnectionFlags
 	}
 
 	for _, tc := range []testCase{
 		{
 			name:    "v1r missing gateway password",
-			flags:   commands.ConnectionFlags{V1r: true, Host: "127.0.0.1:9"},
-			wantErr: commands.ErrV1rMissingGwPwd,
+			flags:   ConnectionFlags{V1r: true, Host: "127.0.0.1:9"},
+			wantErr: ErrV1rMissingGwPwd,
 		},
 		{
 			name:    "v1r missing host",
-			flags:   commands.ConnectionFlags{V1r: true, GwPwd: "secret"},
-			wantErr: commands.ErrV1rMissingHost,
+			flags:   ConnectionFlags{V1r: true, GwPwd: "secret"},
+			wantErr: ErrV1rMissingHost,
 		},
 		{
 			name:    "tedapi missing gateway password",
-			flags:   commands.ConnectionFlags{TEDAPI: true},
-			wantErr: commands.ErrTedapiMissingGw,
+			flags:   ConnectionFlags{TEDAPI: true},
+			wantErr: ErrTedapiMissingGw,
 		},
 		{
 			name:    "local missing host",
-			flags:   commands.ConnectionFlags{Local: true},
-			wantErr: commands.ErrLocalMissingHost,
+			flags:   ConnectionFlags{Local: true},
+			wantErr: ErrLocalMissingHost,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,17 +64,17 @@ func TestBuildPowerwallAppliesEveryConfiguredOption(t *testing.T) {
 	t.Parallel()
 
 	type testCase struct {
-		flags func(t *testing.T) commands.ConnectionFlags
+		flags func(t *testing.T) ConnectionFlags
 		name  string
 	}
 
 	for _, tc := range []testCase{
 		{
 			name: "local mode with host, password and authpath set",
-			flags: func(t *testing.T) commands.ConnectionFlags {
+			flags: func(t *testing.T) ConnectionFlags {
 				t.Helper()
 
-				return commands.ConnectionFlags{
+				return ConnectionFlags{
 					Local:    true,
 					Host:     "127.0.0.1:9",
 					Password: "testpw",
@@ -86,10 +84,10 @@ func TestBuildPowerwallAppliesEveryConfiguredOption(t *testing.T) {
 		},
 		{
 			name: "v1r mode with an explicit RSA key path",
-			flags: func(t *testing.T) commands.ConnectionFlags {
+			flags: func(t *testing.T) ConnectionFlags {
 				t.Helper()
 
-				return commands.ConnectionFlags{
+				return ConnectionFlags{
 					V1r:        true,
 					Host:       "127.0.0.1:9",
 					GwPwd:      "gatewaypwd",

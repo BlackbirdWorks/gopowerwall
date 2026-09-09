@@ -1,11 +1,9 @@
-package commands_test
+package main
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestTrivialCommands exercises the commands whose Run method has no branch
@@ -23,54 +21,54 @@ func TestTrivialCommands(t *testing.T) {
 			name: "version command",
 			run: func(t *testing.T) error {
 				t.Helper()
-				cmd := commands.VersionCmd{}
+				cmd := VersionCmd{}
 
-				return cmd.Run(&commands.Context{Context: t.Context()})
+				return cmd.Run(&Context{Context: t.Context()})
 			},
 		},
 		{
 			name: "setup command",
 			run: func(t *testing.T) error {
 				t.Helper()
-				cmd := commands.SetupCmd{}
+				cmd := SetupCmd{}
 
-				return cmd.Run(&commands.Context{Context: t.Context()})
+				return cmd.Run(&Context{Context: t.Context()})
 			},
 		},
 		{
 			name: "authtoken command",
 			run: func(t *testing.T) error {
 				t.Helper()
-				cmd := commands.AuthTokenCmd{}
+				cmd := AuthTokenCmd{}
 
-				return cmd.Run(&commands.Context{Context: t.Context()})
+				return cmd.Run(&Context{Context: t.Context()})
 			},
 		},
 		{
 			name: "cloudcheck command",
 			run: func(t *testing.T) error {
 				t.Helper()
-				cmd := commands.CloudCheckCmd{}
+				cmd := CloudCheckCmd{}
 
-				return cmd.Run(&commands.Context{Context: t.Context()})
+				return cmd.Run(&Context{Context: t.Context()})
 			},
 		},
 		{
 			name: "tedapi command",
 			run: func(t *testing.T) error {
 				t.Helper()
-				cmd := commands.TedapiCmd{Host: "127.0.0.1"}
+				cmd := TedapiCmd{Host: "127.0.0.1"}
 
-				return cmd.Run(&commands.Context{Context: t.Context()})
+				return cmd.Run(&Context{Context: t.Context()})
 			},
 		},
 		{
 			name: "register command",
 			run: func(t *testing.T) error {
 				t.Helper()
-				cmd := commands.RegisterCmd{}
+				cmd := RegisterCmd{}
 
-				return cmd.Run(&commands.Context{Context: t.Context()})
+				return cmd.Run(&Context{Context: t.Context()})
 			},
 		},
 	} {
