@@ -148,7 +148,8 @@ func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server
 			powerwall.WithCacheFile(cfg.CacheFile),
 		)
 		if err != nil {
-			logger.Load(ctx).ErrorContext(ctx, "failed to initialize Powerwall client", "error", err)
+			logger.Load(ctx).
+				ErrorContext(ctx, "failed to initialize Powerwall client", "error", err)
 		}
 	}
 
@@ -157,7 +158,8 @@ func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server
 		var err error
 		influxClient, err = influx.New(influxCfg)
 		if err != nil {
-			logger.Load(ctx).ErrorContext(ctx, "failed to initialize InfluxDB exporter", "error", err)
+			logger.Load(ctx).
+				ErrorContext(ctx, "failed to initialize InfluxDB exporter", "error", err)
 		}
 	}
 
@@ -197,7 +199,11 @@ func (s *Server) recordStats(_ context.Context, uri string, isErr, isTimeout boo
 	}
 }
 
-func (s *Server) safePWCall(_ context.Context, endpoint string, fn func() (any, error)) (any, bool) {
+func (s *Server) safePWCall(
+	_ context.Context,
+	endpoint string,
+	fn func() (any, error),
+) (any, bool) {
 	if s.Config.FailFastMode && s.Health.IsDegraded {
 		if val, ok, _ := s.DegradedCache.Get(endpoint); ok {
 			return val, true
@@ -280,11 +286,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Start runs the HTTP server listening on the configured address.
-func (s *Server) Start(ctx context.Context) error {
+// StartExporter starts the background InfluxDB exporter loop if configured.
+func (s *Server) StartExporter(ctx context.Context) {
 	if s.InfluxClient != nil && s.PW != nil {
 		go s.runInfluxExporter(ctx)
 	}
+}
+
+// Start runs the HTTP server listening on the configured address.
+func (s *Server) Start(ctx context.Context) error {
+	s.StartExporter(ctx)
 
 	addr := fmt.Sprintf("%s:%d", s.Config.BindAddress, s.Config.Port)
 	srv := &http.Server{
@@ -313,10 +324,20 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) runInfluxExporter(ctx context.Context) {
 	defer s.InfluxClient.Close()
-	_ = s.InfluxClient.Run(ctx, func(collectCtx context.Context) (models.Snapshot, models.MetersAggregates, error) {
+	logger.Load(ctx).InfoContext(
+		ctx,
+		"influx exporter started",
+		"url", s.Config.InfluxURL,
+		"bucket", s.Config.InfluxBucket,
+		"interval", s.Config.InfluxInterval,
+	)
+	collector := func(collectCtx context.Context) (models.Snapshot, models.MetersAggregates, error) {
 		snap := s.PW.Snapshot(collectCtx)
 		agg, err := s.PW.Aggregates(collectCtx)
 
 		return snap, agg, err
-	})
+	}
+	if err := s.InfluxClient.Run(ctx, collector); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Load(ctx).ErrorContext(ctx, "influx exporter stopped", "error", err)
+	}
 }

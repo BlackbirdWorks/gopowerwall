@@ -32,6 +32,7 @@ func main() {
 	cfg := proxy.DefaultConfig()
 	ctx := logger.Into(context.Background(), logger.New(os.Stderr, logger.LevelFor(cfg.DebugMode)))
 	srv := proxy.NewServer(ctx, cfg, nil)
+	srv.StartExporter(ctx)
 
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
 	protocol := "HTTP"

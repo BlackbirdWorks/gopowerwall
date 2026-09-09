@@ -45,6 +45,7 @@ func (c *ProxyCmd) Run(cmdCtx *Context) error {
 	}
 
 	srv := proxy.NewServer(ctx, cfg, nil)
+	srv.StartExporter(ctx)
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
 	fmt.Fprintf(
 		cmdCtx.Output(),

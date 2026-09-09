@@ -194,6 +194,8 @@ func (c *Client) Run(ctx context.Context, collect MetricCollector) error {
 		return ErrNilCollector
 	}
 
+	c.flushOnce(ctx, collect)
+
 	ticker := time.NewTicker(c.cfg.EffectiveInterval())
 	defer ticker.Stop()
 
