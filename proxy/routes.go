@@ -39,6 +39,10 @@ func pwPrefix(num int) string {
 	return "PW" + strconv.Itoa(num) + "_"
 }
 
+func fanPrefix(num int) string {
+	return "FAN" + strconv.Itoa(num)
+}
+
 // aggregatesOptions builds the [powerwall.AggregatesOption] values
 // carrying this server's configured corrections, so every route deriving
 // power figures from meter data (aggregates, CSV, JSON) applies the same
@@ -470,7 +474,7 @@ func fanSpeedsPWJSON(speeds map[string]models.FanSpeedEntry) map[string]any {
 	out := make(map[string]any, len(keys)*2) //nolint:mnd // two output keys (_actual/_target) per device.
 	for i, k := range keys {
 		entry := speeds[k]
-		prefix := fmt.Sprintf("FAN%d", i+1)
+		prefix := fanPrefix(i + 1)
 		out[prefix+"_actual"] = entry.ActualRPM
 		out[prefix+"_target"] = entry.TargetRPM
 	}
@@ -505,6 +509,7 @@ func (s *Server) handleSystemManagementRoutes(ctx context.Context, w http.Respon
 		s.Health.Reset()
 		cleared := s.DegradedCache.Clear()
 		epCleared := s.EndpointStats.Reset()
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			keyStatus:                "reset_complete",
 			"health_counters_reset":  s.Config.HealthCheckEnabled,
@@ -560,6 +565,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, reqPath strin
 	case strings.HasPrefix(reqPath, "/pw/"):
 		s.handlePWFacing(ctx, w, reqPath)
 	case isDisabled(reqPath):
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyStatus: "404 Response - API Disabled"})
 		s.recordStats(ctx, reqPath, false, false)
@@ -618,6 +624,7 @@ func (s *Server) generatePWAlerts(ctx context.Context) (string, error) {
 }
 
 func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
 	verStr, err := s.PW.Version(ctx)
 	if err != nil || verStr == "" {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -634,6 +641,7 @@ func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) 
 }
 
 func (s *Server) handleTedapiRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	if !s.PW.IsTEDAPI() {
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "TEDAPI not enabled"})
 
@@ -663,6 +671,7 @@ func (s *Server) handleTedapiRoute(ctx context.Context, w http.ResponseWriter, r
 }
 
 func (s *Server) handleCloudRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	if !s.PW.IsCloud() || s.PW.IsFleetAPI() {
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Cloud API not enabled"})
 
@@ -686,6 +695,7 @@ func (s *Server) handleCloudRoute(ctx context.Context, w http.ResponseWriter, re
 }
 
 func (s *Server) handleFleetAPIRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	if !s.PW.IsFleetAPI() {
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "FleetAPI not enabled"})
 
@@ -706,6 +716,7 @@ func (s *Server) handleFleetAPIRoute(ctx context.Context, w http.ResponseWriter,
 }
 
 func (s *Server) handleControlGetRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case strings.HasPrefix(reqPath, "/control/reserve"):
 		res, err := s.PW.GetReserve(ctx)

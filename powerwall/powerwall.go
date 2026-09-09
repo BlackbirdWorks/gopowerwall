@@ -942,7 +942,7 @@ func (p *Powerwall) Vitals(ctx context.Context) (models.VitalsData, error) {
 		return models.VitalsData{}, err
 	}
 
-	devices := make(map[string]map[string]any)
+	devices := make(map[string]map[string]any, len(res))
 	for k, v := range res {
 		if devMap, ok := v.(map[string]any); ok {
 			devices[k] = devMap
@@ -959,12 +959,12 @@ func (p *Powerwall) Vitals(ctx context.Context) (models.VitalsData, error) {
 // has no TETHC devices; the two cases are not distinguishable from the
 // result.
 func (p *Powerwall) Temps(ctx context.Context) models.PowerwallTemps {
-	temps := make(map[string]float64)
 	vitals, err := p.Vitals(ctx)
 	if err != nil || len(vitals.Devices) == 0 {
-		return models.PowerwallTemps{Temps: temps}
+		return models.PowerwallTemps{Temps: make(map[string]float64)}
 	}
 
+	temps := make(map[string]float64, len(vitals.Devices))
 	for dev, data := range vitals.Devices {
 		if strings.HasPrefix(dev, "TETHC") {
 			if t, ok := data["THC_AmbientTemp"].(float64); ok {
@@ -974,6 +974,49 @@ func (p *Powerwall) Temps(ctx context.Context) models.PowerwallTemps {
 	}
 
 	return models.PowerwallTemps{Temps: temps}
+}
+
+func collectDeviceAlerts(devices map[string]map[string]any, alertSet map[string]struct{}) {
+	for _, data := range devices {
+		switch rawAlerts := data["alerts"].(type) {
+		case []any:
+			// A JSON-decoded backend (e.g. cloud or fleetapi) yields []any.
+			for _, a := range rawAlerts {
+				if s, ok := a.(string); ok {
+					alertSet[s] = struct{}{}
+				} else {
+					alertSet[fmt.Sprint(a)] = struct{}{}
+				}
+			}
+		case []string:
+			// The local backend stores the protobuf accessor's []string result
+			// directly (see backend/local.go's devMap["alerts"] assignment).
+			for _, a := range rawAlerts {
+				alertSet[a] = struct{}{}
+			}
+		}
+	}
+}
+
+func collectGridStatusAlert(gridStatus any, alertSet map[string]struct{}) {
+	if gridStatus == nil {
+		return
+	}
+	if lookup.Lookup(gridStatus, "grid_services_active") == true {
+		alertSet["GridServicesActive"] = struct{}{}
+
+		return
+	}
+	gStatus := lookup.Lookup(gridStatus, "grid_status")
+	if gStatus == nil {
+		return
+	}
+	if s, ok := gStatus.(string); ok {
+		alertSet[s] = struct{}{}
+
+		return
+	}
+	alertSet[fmt.Sprint(gStatus)] = struct{}{}
 }
 
 // Alerts returns the sorted, de-duplicated union of every device's alert
@@ -986,30 +1029,10 @@ func (p *Powerwall) Alerts(ctx context.Context) models.AlertsList {
 	alertSet := make(map[string]struct{})
 
 	vitals, _ := p.Vitals(ctx)
-	for _, data := range vitals.Devices {
-		switch rawAlerts := data["alerts"].(type) {
-		case []any:
-			// A JSON-decoded backend (e.g. cloud or fleetapi) yields []any.
-			for _, a := range rawAlerts {
-				alertSet[fmt.Sprintf("%v", a)] = struct{}{}
-			}
-		case []string:
-			// The local backend stores the protobuf accessor's []string result
-			// directly (see backend/local.go's devMap["alerts"] assignment).
-			for _, a := range rawAlerts {
-				alertSet[a] = struct{}{}
-			}
-		}
-	}
+	collectDeviceAlerts(vitals.Devices, alertSet)
 
 	gridStatus := p.Poll(ctx, "/api/system_status/grid_status")
-	if gridStatus != nil {
-		if lookup.Lookup(gridStatus, "grid_services_active") == true {
-			alertSet["GridServicesActive"] = struct{}{}
-		} else if gStatus := lookup.Lookup(gridStatus, "grid_status"); gStatus != nil {
-			alertSet[fmt.Sprintf("%v", gStatus)] = struct{}{}
-		}
-	}
+	collectGridStatusAlert(gridStatus, alertSet)
 
 	list := make([]string, 0, len(alertSet))
 	for a := range alertSet {
@@ -1175,16 +1198,17 @@ func (p *Powerwall) Strings(ctx context.Context) models.SolarStrings {
 // or a block with an empty serial number (silently dropped rather than
 // added under an empty key) all just shrink or empty the returned map.
 func (p *Powerwall) BatteryBlocks(ctx context.Context) map[string]models.BatteryBlock {
-	res := make(map[string]models.BatteryBlock)
 	sys := p.Poll(ctx, "/api/system_status")
 	if sys == nil {
-		return res
+		return make(map[string]models.BatteryBlock)
 	}
 
 	blocks, ok := lookup.Lookup(sys, "battery_blocks").([]any)
 	if !ok {
-		return res
+		return make(map[string]models.BatteryBlock)
 	}
+
+	res := make(map[string]models.BatteryBlock, len(blocks))
 
 	for _, b := range blocks {
 		raw, err := json.Marshal(b)

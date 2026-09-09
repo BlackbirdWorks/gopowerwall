@@ -23,10 +23,11 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 	t.Parallel()
 
 	type testCase struct {
-		name       string
-		path       string
-		wantSubs   []string
-		wantStatus int
+		name            string
+		path            string
+		wantContentType string
+		wantSubs        []string
+		wantStatus      int
 	}
 
 	for _, tc := range []testCase{
@@ -167,10 +168,11 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"{}"},
 		},
 		{
-			name:       "version",
-			path:       "/version",
-			wantStatus: http.StatusOK,
-			wantSubs:   []string{`"version"`, `"vint"`},
+			name:            "version",
+			path:            "/version",
+			wantStatus:      http.StatusOK,
+			wantSubs:        []string{`"version"`, `"vint"`},
+			wantContentType: "application/json",
 		},
 		{
 			name:       "help",
@@ -197,10 +199,11 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"proxy_stats", "connection_health"},
 		},
 		{
-			name:       "health reset",
-			path:       "/health/reset",
-			wantStatus: http.StatusOK,
-			wantSubs:   []string{"reset_complete"},
+			name:            "health reset",
+			path:            "/health/reset",
+			wantStatus:      http.StatusOK,
+			wantSubs:        []string{"reset_complete"},
+			wantContentType: "application/json",
 		},
 		{
 			name:       "troubleshooting problems always empty",
@@ -215,10 +218,11 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"PackagePartNumber"},
 		},
 		{
-			name:       "tedapi routes disabled without tedapi mode",
-			path:       "/tedapi/config",
-			wantStatus: http.StatusOK,
-			wantSubs:   []string{"TEDAPI not enabled"},
+			name:            "tedapi routes disabled without tedapi mode",
+			path:            "/tedapi/config",
+			wantStatus:      http.StatusOK,
+			wantSubs:        []string{"TEDAPI not enabled"},
+			wantContentType: "application/json",
 		},
 		{
 			name:       "tedapi status disabled without tedapi mode",
@@ -245,10 +249,11 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"TEDAPI not enabled"},
 		},
 		{
-			name:       "cloud routes disabled in local mode",
-			path:       "/cloud/battery",
-			wantStatus: http.StatusOK,
-			wantSubs:   []string{"Cloud API not enabled"},
+			name:            "cloud routes disabled in local mode",
+			path:            "/cloud/battery",
+			wantStatus:      http.StatusOK,
+			wantSubs:        []string{"Cloud API not enabled"},
+			wantContentType: "application/json",
 		},
 		{
 			name:       "cloud power disabled in local mode",
@@ -269,10 +274,11 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"FleetAPI not enabled"},
 		},
 		{
-			name:       "fleetapi status disabled in local mode",
-			path:       "/fleetapi/status",
-			wantStatus: http.StatusOK,
-			wantSubs:   []string{"FleetAPI not enabled"},
+			name:            "fleetapi status disabled in local mode",
+			path:            "/fleetapi/status",
+			wantStatus:      http.StatusOK,
+			wantSubs:        []string{"FleetAPI not enabled"},
+			wantContentType: "application/json",
 		},
 		{
 			name:       "pw level",
@@ -431,10 +437,11 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"Invalid Request"},
 		},
 		{
-			name:       "control get reserve via GET route",
-			path:       "/control/reserve",
-			wantStatus: http.StatusOK,
-			wantSubs:   []string{"reserve"},
+			name:            "control get reserve via GET route",
+			path:            "/control/reserve",
+			wantStatus:      http.StatusOK,
+			wantSubs:        []string{"reserve"},
+			wantContentType: "application/json",
 		},
 		{
 			name:       "control get mode via GET route",
@@ -455,10 +462,18 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			wantSubs:   []string{"grid_export"},
 		},
 		{
-			name:       "control get max_backup requires tedapi",
-			path:       "/control/max_backup",
-			wantStatus: http.StatusOK,
-			wantSubs:   []string{"max_backup requires v1r LAN transport"},
+			name:            "control get max_backup requires tedapi",
+			path:            "/control/max_backup",
+			wantStatus:      http.StatusOK,
+			wantSubs:        []string{"max_backup requires v1r LAN transport"},
+			wantContentType: "application/json",
+		},
+		{
+			name:            "disabled route customer registration returns 404 json",
+			path:            "/api/customer/registration",
+			wantStatus:      http.StatusNotFound,
+			wantSubs:        []string{"404 Response - API Disabled"},
+			wantContentType: "application/json",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -480,6 +495,9 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			require.NoError(t, readErr)
 
 			assert.Equal(t, tc.wantStatus, resp.StatusCode, "body: %s", body)
+			if tc.wantContentType != "" {
+				assert.Equal(t, tc.wantContentType, resp.Header.Get("Content-Type"))
+			}
 			for _, sub := range tc.wantSubs {
 				assert.Contains(t, string(body), sub)
 			}
