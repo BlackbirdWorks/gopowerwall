@@ -20,6 +20,7 @@ import (
 	"github.com/blackbirdworks/gopowerwall/backend/stubs"
 	"github.com/blackbirdworks/gopowerwall/pkgs/atomicfile"
 	"github.com/blackbirdworks/gopowerwall/pkgs/cache"
+	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 	"github.com/blackbirdworks/gopowerwall/pkgs/oauthclient"
@@ -666,7 +667,7 @@ func (f *PyPowerwallFleetAPI) getAPISystemStatusSOE(ctx context.Context, force b
 	if data != nil {
 		if p := lookup.Lookup(data, "response", "percentage_charged"); p != nil {
 			if pf, ok := p.(float64); ok {
-				pct = pf
+				pct = calc.UnscaleBatteryLevel(pf)
 			}
 		}
 	}

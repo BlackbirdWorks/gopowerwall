@@ -15,6 +15,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/cloud"
+	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 )
 
 // recordedRequest captures the parts of an inbound HTTP request the
@@ -932,7 +933,7 @@ func TestCloudNetworkBackedBehavior(t *testing.T) {
 		require.NoError(t, err)
 		m, ok := res.(map[string]any)
 		require.True(t, ok)
-		assert.InDelta(t, 66.6, m["percentage"], 0.001)
+		assert.InDelta(t, calc.UnscaleBatteryLevel(66.6), m["percentage"], 0.001)
 	})
 
 	t.Run("getAPISystemStatusSOE defaults to 100 when the site is unreachable", func(t *testing.T) {

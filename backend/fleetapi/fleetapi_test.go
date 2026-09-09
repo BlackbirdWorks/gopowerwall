@@ -16,6 +16,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall/backend"
 	"github.com/blackbirdworks/gopowerwall/backend/fleetapi"
+	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 )
 
 // recordedRequest captures the parts of an inbound HTTP request the write-path
@@ -1085,7 +1086,7 @@ func TestFleetAPISystemStatusSOE(t *testing.T) {
 		require.NoError(t, err)
 		m, ok := res.(map[string]any)
 		require.True(t, ok)
-		assert.InDelta(t, 44.4, m["percentage"], 0.001)
+		assert.InDelta(t, calc.UnscaleBatteryLevel(44.4), m["percentage"], 0.001)
 	})
 
 	t.Run("defaults to 100 when unreachable", func(t *testing.T) {
