@@ -116,18 +116,40 @@ func (n *notifyingSource) Token() (*oauth2.Token, error) {
 // TokenFromFields builds an oauth2.Token from a generic auth-file field map
 // (as decoded from JSON into map[string]any), reading "access_token",
 // "refresh_token", "token_type", and either "expires_at" (absolute Unix
-// seconds) or "expires_in" (seconds from now). It returns
-// [ErrMissingRefreshToken] when no refresh token is present, since a token
-// that can never be renewed defeats the purpose of a long-running cloud
-// connection.
+// seconds) or "expires_in" (seconds from now). It transparently inspects nested
+// "sso" (standard .pypowerwall.auth format) and "token" (FleetAPI config format)
+// sub-maps when present. It returns [ErrMissingRefreshToken] when no refresh
+// token is present, since a token that can never be renewed defeats the purpose
+// of a long-running cloud connection.
 func TokenFromFields(fields map[string]any) (*oauth2.Token, error) {
-	refresh, _ := fields["refresh_token"].(string)
-	if refresh == "" {
+	if fields == nil {
 		return nil, ErrMissingRefreshToken
 	}
 
-	access, _ := fields["access_token"].(string)
-	tokenType, _ := fields["token_type"].(string)
+	target := fields
+	if sso, ssoOk := fields["sso"].(map[string]any); ssoOk && sso != nil {
+		target = sso
+	} else if tokenMap, tokOk := fields["token"].(map[string]any); tokOk && tokenMap != nil {
+		target = tokenMap
+	}
+
+	refresh, _ := target["refresh_token"].(string)
+	if refresh == "" {
+		refresh, _ = fields["refresh_token"].(string)
+		if refresh == "" {
+			return nil, ErrMissingRefreshToken
+		}
+	}
+
+	access, _ := target["access_token"].(string)
+	if access == "" {
+		access, _ = fields["access_token"].(string)
+	}
+
+	tokenType, _ := target["token_type"].(string)
+	if tokenType == "" {
+		tokenType, _ = fields["token_type"].(string)
+	}
 
 	tok := &oauth2.Token{
 		AccessToken:  access,
@@ -136,26 +158,46 @@ func TokenFromFields(fields map[string]any) (*oauth2.Token, error) {
 	}
 
 	switch {
-	case setAbsoluteExpiry(tok, fields["expires_at"]):
-	case setRelativeExpiry(tok, fields["expires_in"]):
+	case setAbsoluteExpiry(tok, target["expires_at"]) || setAbsoluteExpiry(tok, fields["expires_at"]):
+	case setRelativeExpiry(tok, target["expires_in"]) || setRelativeExpiry(tok, fields["expires_in"]):
 	}
 
 	return tok, nil
 }
 
 func setAbsoluteExpiry(tok *oauth2.Token, raw any) bool {
-	expiresAt, ok := raw.(float64)
-	if !ok || expiresAt <= 0 {
+	var expiresAt int64
+	switch v := raw.(type) {
+	case float64:
+		expiresAt = int64(v)
+	case int64:
+		expiresAt = v
+	case int:
+		expiresAt = int64(v)
+	default:
 		return false
 	}
-	tok.Expiry = time.Unix(int64(expiresAt), 0)
+	if expiresAt <= 0 {
+		return false
+	}
+	tok.Expiry = time.Unix(expiresAt, 0)
 
 	return true
 }
 
 func setRelativeExpiry(tok *oauth2.Token, raw any) bool {
-	expiresIn, ok := raw.(float64)
-	if !ok || expiresIn <= 0 {
+	var expiresIn int64
+	switch v := raw.(type) {
+	case float64:
+		expiresIn = int64(v)
+	case int64:
+		expiresIn = v
+	case int:
+		expiresIn = int64(v)
+	default:
+		return false
+	}
+	if expiresIn <= 0 {
 		return false
 	}
 	tok.Expiry = time.Now().Add(time.Duration(expiresIn) * time.Second)
@@ -164,8 +206,9 @@ func setRelativeExpiry(tok *oauth2.Token, raw any) bool {
 }
 
 // MergeToken writes tok's fields into fields in place (creating a new map
-// when fields is nil) and returns it for convenient chaining. Fields
-// unrelated to the token, such as a cached site ID, are left untouched.
+// when fields is nil) and returns it for convenient chaining. If nested "sso"
+// or "token" sub-maps exist, they are also updated in place. Fields unrelated
+// to the token, such as a cached site ID, are left untouched.
 func MergeToken(fields map[string]any, tok *oauth2.Token) map[string]any {
 	if fields == nil {
 		fields = make(map[string]any)
@@ -179,6 +222,32 @@ func MergeToken(fields map[string]any, tok *oauth2.Token) map[string]any {
 	}
 	if !tok.Expiry.IsZero() {
 		fields["expires_at"] = tok.Expiry.Unix()
+	}
+
+	if sso, ok := fields["sso"].(map[string]any); ok && sso != nil {
+		sso["access_token"] = tok.AccessToken
+		if tok.RefreshToken != "" {
+			sso["refresh_token"] = tok.RefreshToken
+		}
+		if tok.TokenType != "" {
+			sso["token_type"] = tok.TokenType
+		}
+		if !tok.Expiry.IsZero() {
+			sso["expires_at"] = tok.Expiry.Unix()
+		}
+	}
+
+	if tokenMap, ok := fields["token"].(map[string]any); ok && tokenMap != nil {
+		tokenMap["access_token"] = tok.AccessToken
+		if tok.RefreshToken != "" {
+			tokenMap["refresh_token"] = tok.RefreshToken
+		}
+		if tok.TokenType != "" {
+			tokenMap["token_type"] = tok.TokenType
+		}
+		if !tok.Expiry.IsZero() {
+			tokenMap["expires_at"] = tok.Expiry.Unix()
+		}
 	}
 
 	return fields

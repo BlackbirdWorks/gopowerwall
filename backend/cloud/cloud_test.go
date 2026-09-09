@@ -171,6 +171,27 @@ func TestCloudAuthenticate(t *testing.T) {
 			},
 		},
 		{
+			name:  "success with nested sso auth file and cached site id",
+			email: testEmail,
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				data := map[string]any{
+					testEmail: map[string]any{
+						"url": "https://auth.tesla.com/",
+						"sso": map[string]any{
+							"access_token":  "tok-sso",
+							"refresh_token": "r1-sso",
+							"token_type":    "Bearer",
+						},
+					},
+				}
+				b, err := json.Marshal(data)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(filepath.Join(dir, cloud.AuthFile), b, 0o600))
+				writeSiteFile(t, dir)
+			},
+		},
+		{
 			name:  "empty email resolves to the sole auth file entry",
 			email: "",
 			setup: func(t *testing.T, dir string) {
