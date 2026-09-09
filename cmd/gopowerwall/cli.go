@@ -8,22 +8,21 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/joho/godotenv"
 
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 )
 
 // CLI represents root command-line grammar for gopowerwall.
 type CLI struct {
-	Version    commands.VersionCmd    `cmd:"" help:"Print version information"`
-	Register   commands.RegisterCmd   `cmd:"" help:"Register RSA key via Owner or Fleet API"`
-	AuthToken  commands.AuthTokenCmd  `cmd:"" help:"Get a Tesla Cloud refresh token"                name:"authtoken"`
-	Get        commands.GetCmd        `cmd:"" help:"Get Powerwall settings and power levels"`
-	Tedapi     commands.TedapiCmd     `cmd:"" help:"Test TEDAPI connection to Powerwall Gateway"`
-	Setup      commands.SetupCmd      `cmd:"" help:"Setup Tesla Cloud, Fleet API or v1r access"`
-	CloudCheck commands.CloudCheckCmd `cmd:"" help:"Diagnose cloud auth environment"                name:"cloudcheck"`
-	Proxy      commands.ProxyCmd      `cmd:"" help:"Run Powerwall HTTP proxy server"`
-	Set        commands.SetCmd        `cmd:"" help:"Set Powerwall operating mode and reserve level"`
-	Scan       commands.ScanCmd       `cmd:"" help:"Scan local network for Powerwall gateway"`
+	Version    VersionCmd    `cmd:"" help:"Print version information"`
+	Register   RegisterCmd   `cmd:"" help:"Register RSA key via Owner or Fleet API"`
+	AuthToken  AuthTokenCmd  `cmd:"" help:"Get a Tesla Cloud refresh token"                name:"authtoken"`
+	Get        GetCmd        `cmd:"" help:"Get Powerwall settings and power levels"`
+	Tedapi     TedapiCmd     `cmd:"" help:"Test TEDAPI connection to Powerwall Gateway"`
+	Setup      SetupCmd      `cmd:"" help:"Setup Tesla Cloud, Fleet API or v1r access"`
+	CloudCheck CloudCheckCmd `cmd:"" help:"Diagnose cloud auth environment"                name:"cloudcheck"`
+	Proxy      ProxyCmd      `cmd:"" help:"Run Powerwall HTTP proxy server"`
+	Set        SetCmd        `cmd:"" help:"Set Powerwall operating mode and reserve level"`
+	Scan       ScanCmd       `cmd:"" help:"Scan local network for Powerwall gateway"`
 }
 
 // newParser builds the kong parser for cli's grammar: every subcommand,
@@ -59,7 +58,7 @@ func Run() {
 	kctx, err := parser.Parse(os.Args[1:])
 	parser.FatalIfErrorf(err)
 
-	if runErr := kctx.Run(&commands.Context{Context: context.Background()}); runErr != nil {
+	if runErr := kctx.Run(&Context{Context: context.Background()}); runErr != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
 		os.Exit(1)
 	}

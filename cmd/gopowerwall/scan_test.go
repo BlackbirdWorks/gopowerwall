@@ -1,4 +1,4 @@
-package commands_test
+package main
 
 import (
 	"bytes"
@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 	"github.com/blackbirdworks/gopowerwall/models"
 )
 
@@ -19,7 +18,7 @@ import (
 func TestScanCmdJSON(t *testing.T) {
 	t.Parallel()
 
-	cmd := commands.ScanCmd{
+	cmd := ScanCmd{
 		Network: "127.0.0.1/32",
 		Hosts:   1,
 		Timeout: 0.05,
@@ -28,7 +27,7 @@ func TestScanCmdJSON(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := cmd.Run(&commands.Context{Context: t.Context(), Out: &buf})
+	err := cmd.Run(&Context{Context: t.Context(), Out: &buf})
 	require.NoError(t, err)
 
 	var results []models.DiscoveredDevice
@@ -42,7 +41,7 @@ func TestScanCmdJSON(t *testing.T) {
 func TestScanCmdTextBanner(t *testing.T) {
 	t.Parallel()
 
-	cmd := commands.ScanCmd{
+	cmd := ScanCmd{
 		Network: "127.0.0.1/32",
 		Hosts:   1,
 		Timeout: 0.05,
@@ -50,7 +49,7 @@ func TestScanCmdTextBanner(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := cmd.Run(&commands.Context{Context: t.Context(), Out: &buf})
+	err := cmd.Run(&Context{Context: t.Context(), Out: &buf})
 	require.NoError(t, err)
 	require.Contains(t, buf.String(), "Scanner")
 }

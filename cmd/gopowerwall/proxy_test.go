@@ -1,4 +1,4 @@
-package commands_test
+package main
 
 import (
 	"bytes"
@@ -7,8 +7,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestProxyCmdFailsFastOnPortInUse drives ProxyCmd.Run far enough to build
@@ -25,13 +23,13 @@ func TestProxyCmdFailsFastOnPortInUse(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	cmd := commands.ProxyCmd{
+	cmd := ProxyCmd{
 		BindAddress: "127.0.0.1",
 		Port:        port,
 	}
 
 	var buf bytes.Buffer
-	err = cmd.Run(&commands.Context{Context: t.Context(), Out: &buf})
+	err = cmd.Run(&Context{Context: t.Context(), Out: &buf})
 	require.Error(t, err)
 	assert.Contains(t, buf.String(), "starting on")
 }

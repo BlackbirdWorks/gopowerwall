@@ -1,4 +1,4 @@
-package commands_test
+package main
 
 import (
 	"bytes"
@@ -6,8 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blackbirdworks/gopowerwall/internal/commands"
 )
 
 // TestGetCmdConnected drives GetCmd.Run against a fake local gateway for
@@ -31,12 +29,12 @@ func TestGetCmdConnected(t *testing.T) {
 			t.Parallel()
 
 			gw := newFakeGateway(t)
-			cmd := commands.GetCmd{
+			cmd := GetCmd{
 				Format:          tc.format,
 				ConnectionFlags: connectionFlags(t, gw),
 			}
 
-			err := cmd.Run(&commands.Context{Context: t.Context()})
+			err := cmd.Run(&Context{Context: t.Context()})
 			require.NoError(t, err)
 		})
 	}
@@ -53,13 +51,13 @@ func TestGetCmdTextOutputDereferencesPointerMetrics(t *testing.T) {
 	t.Parallel()
 
 	gw := newFakeGateway(t)
-	cmd := commands.GetCmd{
+	cmd := GetCmd{
 		Format:          "text",
 		ConnectionFlags: connectionFlags(t, gw),
 	}
 
 	var buf bytes.Buffer
-	err := cmd.Run(&commands.Context{Context: t.Context(), Out: &buf})
+	err := cmd.Run(&Context{Context: t.Context(), Out: &buf})
 	require.NoError(t, err)
 
 	out := buf.String()
@@ -74,11 +72,11 @@ func TestGetCmdTextOutputDereferencesPointerMetrics(t *testing.T) {
 func TestGetCmdRequiresConnection(t *testing.T) {
 	t.Parallel()
 
-	cmd := commands.GetCmd{
+	cmd := GetCmd{
 		Local: true,
 		Host:  "127.0.0.1:9",
 	}
 
-	err := cmd.Run(&commands.Context{Context: t.Context()})
-	assert.ErrorIs(t, err, commands.ErrUnableToConnectGet)
+	err := cmd.Run(&Context{Context: t.Context()})
+	assert.ErrorIs(t, err, ErrUnableToConnectGet)
 }
