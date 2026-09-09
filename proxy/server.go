@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -212,6 +213,21 @@ func (s *Server) recordStats(_ context.Context, uri string, isErr, isTimeout boo
 	}
 }
 
+func serializeForDegradedCache(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []byte:
+		return string(val)
+	default:
+		if b, err := json.Marshal(val); err == nil {
+			return string(b)
+		}
+
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 func (s *Server) safePWCall(
 	_ context.Context,
 	endpoint string,
@@ -230,8 +246,7 @@ func (s *Server) safePWCall(
 	if success {
 		s.Health.RecordSuccess()
 		if s.Config.GracefulDegradation {
-			str := fmt.Sprintf("%v", res)
-			s.DegradedCache.Set(endpoint, str)
+			s.DegradedCache.Set(endpoint, serializeForDegradedCache(res))
 		}
 
 		return res, true

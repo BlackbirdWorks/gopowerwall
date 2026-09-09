@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/alecthomas/kong"
 	"github.com/joho/godotenv"
@@ -41,25 +44,44 @@ func newParser(cli *CLI) (*kong.Kong, error) {
 
 // Run parses command line and executes selected command.
 func Run() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, out, errOut io.Writer) int {
 	// Load .env before parsing flags or reading configuration, so gopowerwall
 	// can be configured either by real environment variables or a local
 	// .env file. Real environment variables always win: godotenv.Load never
 	// overwrites a variable that is already set. A missing .env file is a
 	// silent no-op; only a malformed one is reported.
 	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "warning: failed to load .env: %v\n", err)
+		fmt.Fprintf(errOut, "warning: failed to load .env: %v\n", err)
 	}
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	var cli CLI
 	parser, err := newParser(&cli)
 	if err != nil {
-		panic(err)
-	}
-	kctx, err := parser.Parse(os.Args[1:])
-	parser.FatalIfErrorf(err)
+		fmt.Fprintf(errOut, "Error creating parser: %v\n", err)
 
-	if runErr := kctx.Run(&Context{Context: context.Background()}); runErr != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
-		os.Exit(1)
+		return 1
 	}
+	parser.Stdout = out
+	parser.Stderr = errOut
+
+	kctx, err := parser.Parse(args)
+	if err != nil {
+		parser.Errorf("%s", err)
+
+		return 1
+	}
+
+	if runErr := kctx.Run(&Context{Context: sigCtx, Out: out}); runErr != nil {
+		fmt.Fprintf(errOut, "Error: %v\n", runErr)
+
+		return 1
+	}
+
+	return 0
 }

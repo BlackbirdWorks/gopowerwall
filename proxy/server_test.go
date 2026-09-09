@@ -236,3 +236,47 @@ func TestServerLifecycleStartAndShutdown(t *testing.T) {
 		assert.Fail(t, "server did not shut down within timeout")
 	}
 }
+
+func TestDegradedCacheSerialization(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		input any
+		name  string
+		want  string
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:  "string passthrough",
+			input: `{"status": "ok"}`,
+			want:  `{"status": "ok"}`,
+		},
+		{
+			name:  "byte slice conversion",
+			input: []byte(`{"bytes": true}`),
+			want:  `{"bytes": true}`,
+		},
+		{
+			name:  "map marshalled as json",
+			input: map[string]int{"grid": 100},
+			want:  `{"grid":100}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := proxy.DefaultConfig()
+			cfg.GracefulDegradation = true
+			srv := proxy.NewServer(t.Context(), cfg, newDisconnectedPowerwall(t))
+
+			srv.SafePWCall(t.Context(), "/test-ep", func() (any, error) {
+				return tc.input, nil
+			})
+
+			got, ok, _ := srv.DegradedCache.Get("/test-ep")
+			require.True(t, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
