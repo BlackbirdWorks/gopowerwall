@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,22 @@ var (
 	errNoStrings    = errors.New("no strings")
 	errNoResponse   = errors.New("no response")
 )
+
+const (
+	csvV1BufSize = 96
+	csvV2BufSize = 128
+	freqExtraCap = 2
+	podExtraCap  = 5
+	jsonCap      = 11
+)
+
+func pwPrefix(num int) string {
+	return "PW" + strconv.Itoa(num) + "_"
+}
+
+func fanPrefix(num int) string {
+	return "FAN" + strconv.Itoa(num)
+}
 
 // aggregatesOptions builds the [powerwall.AggregatesOption] values
 // carrying this server's configured corrections, so every route deriving
@@ -56,6 +73,7 @@ func (s *Server) formatV2CSVRow(
 	grid, home, solar, battery, batLevel float64,
 ) string {
 	var sb strings.Builder
+	sb.Grow(csvV2BufSize)
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel,GridStatus,Reserve\n")
 	}
@@ -73,6 +91,7 @@ func (s *Server) formatV1CSVRow(
 	grid, home, solar, battery, batLevel float64,
 ) string {
 	var sb strings.Builder
+	sb.Grow(csvV1BufSize)
 	if includeHeaders {
 		sb.WriteString("Grid,Home,Solar,Battery,BatteryLevel\n")
 	}
@@ -94,30 +113,34 @@ func (s *Server) generateCSV(ctx context.Context, isV2, includeHeaders bool) (st
 }
 
 func (s *Server) generateFreq(ctx context.Context) (string, error) {
-	fcv := make(map[string]any)
 	rawSys, _ := s.PW.SystemStatus(ctx)
+	freq := s.PW.FrequencyView(ctx)
+	capHint := len(rawSys.BatteryBlocks)*11 + len(freq.Inverters)*4 +
+		len(freq.SyncMeterFields) + freqExtraCap
+	fcv := make(map[string]any, capHint)
 	for idx, block := range rawSys.BatteryBlocks {
 		pNum := idx + 1
-		fcv[fmt.Sprintf("PW%d_name", pNum)] = nil
-		fcv[fmt.Sprintf("PW%d_PINV_Fout", pNum)] = block.FOut
-		fcv[fmt.Sprintf("PW%d_PINV_VSplit1", pNum)] = nil
-		fcv[fmt.Sprintf("PW%d_PINV_VSplit2", pNum)] = nil
-		fcv[fmt.Sprintf("PW%d_PackagePartNumber", pNum)] = block.PackagePartNumber
-		fcv[fmt.Sprintf("PW%d_PackageSerialNumber", pNum)] = block.PackageSerialNumber
-		fcv[fmt.Sprintf("PW%d_p_out", pNum)] = block.POut
-		fcv[fmt.Sprintf("PW%d_q_out", pNum)] = block.QOut
-		fcv[fmt.Sprintf("PW%d_v_out", pNum)] = block.VOut
-		fcv[fmt.Sprintf("PW%d_f_out", pNum)] = block.FOut
-		fcv[fmt.Sprintf("PW%d_i_out", pNum)] = block.IOut
+		pfx := pwPrefix(pNum)
+		fcv[pfx+"name"] = nil
+		fcv[pfx+"PINV_Fout"] = block.FOut
+		fcv[pfx+"PINV_VSplit1"] = nil
+		fcv[pfx+"PINV_VSplit2"] = nil
+		fcv[pfx+"PackagePartNumber"] = block.PackagePartNumber
+		fcv[pfx+"PackageSerialNumber"] = block.PackageSerialNumber
+		fcv[pfx+"p_out"] = block.POut
+		fcv[pfx+"q_out"] = block.QOut
+		fcv[pfx+"v_out"] = block.VOut
+		fcv[pfx+"f_out"] = block.FOut
+		fcv[pfx+"i_out"] = block.IOut
 	}
 
-	freq := s.PW.FrequencyView(ctx)
 	for invIdx, inv := range freq.Inverters {
 		pNum := invIdx + 1
-		fcv[fmt.Sprintf("PW%d_name", pNum)] = inv.Device
-		fcv[fmt.Sprintf("PW%d_PINV_Fout", pNum)] = inv.Fout
-		fcv[fmt.Sprintf("PW%d_PINV_VSplit1", pNum)] = inv.VSplit1
-		fcv[fmt.Sprintf("PW%d_PINV_VSplit2", pNum)] = inv.VSplit2
+		pfx := pwPrefix(pNum)
+		fcv[pfx+"name"] = inv.Device
+		fcv[pfx+"PINV_Fout"] = inv.Fout
+		fcv[pfx+"PINV_VSplit1"] = inv.VSplit1
+		fcv[pfx+"PINV_VSplit2"] = inv.VSplit2
 	}
 	maps.Copy(fcv, freq.SyncMeterFields)
 
@@ -138,7 +161,7 @@ func (s *Server) generateFreq(ctx context.Context) (string, error) {
 // ordering to line up instead of matching by DIN.
 func applyPODTEPODVitals(pod map[string]any, entries []models.PODTEPODEntry) {
 	for idx, entry := range entries {
-		prefix := fmt.Sprintf("PW%d_", idx+1)
+		prefix := pwPrefix(idx + 1)
 		pod[prefix+"name"] = entry.Device
 		pod[prefix+"POD_ActiveHeating"] = entry.ActiveHeating
 		pod[prefix+"POD_ChargeComplete"] = entry.ChargeComplete
@@ -157,9 +180,9 @@ func applyPODTEPODVitals(pod map[string]any, entries []models.PODTEPODEntry) {
 
 func (s *Server) generatePOD(ctx context.Context) (string, error) {
 	view := s.PW.PODView(ctx)
-	pod := make(map[string]any)
+	pod := make(map[string]any, len(view.Blocks)*29+len(view.TEPODEntries)*6+podExtraCap)
 	for idx, block := range view.Blocks {
-		prefix := fmt.Sprintf("PW%d_", idx+1)
+		prefix := pwPrefix(idx + 1)
 		pod[prefix+"name"] = nil
 		pod[prefix+"POD_ActiveHeating"] = nil
 		pod[prefix+"POD_ChargeComplete"] = nil
@@ -210,19 +233,18 @@ func (s *Server) generateJSON(ctx context.Context) (string, error) {
 		gridStatusNumeric = 1
 	}
 
-	out := map[string]any{
-		"grid":                 snap.Grid,
-		"home":                 snap.Home,
-		"solar":                snap.Solar,
-		"battery":              snap.Battery,
-		"soe":                  snap.BatteryLevel,
-		"grid_status":          gridStatusNumeric,
-		keyReserve:             snap.Reserve,
-		"time_remaining_hours": snap.TimeRemaining.Hours(),
-		"full_pack_energy":     snap.FullPackEnergy,
-		"energy_remaining":     snap.EnergyRemaining,
-		"strings":              solarStringsJSON(snap.Strings),
-	}
+	out := make(map[string]any, jsonCap)
+	out["grid"] = snap.Grid
+	out["home"] = snap.Home
+	out["solar"] = snap.Solar
+	out["battery"] = snap.Battery
+	out["soe"] = snap.BatteryLevel
+	out["grid_status"] = gridStatusNumeric
+	out[keyReserve] = snap.Reserve
+	out["time_remaining_hours"] = snap.TimeRemaining.Hours()
+	out["full_pack_energy"] = snap.FullPackEnergy
+	out["energy_remaining"] = snap.EnergyRemaining
+	out["strings"] = solarStringsJSON(snap.Strings)
 	b, err := json.Marshal(out)
 
 	return string(b), err
@@ -452,7 +474,7 @@ func fanSpeedsPWJSON(speeds map[string]models.FanSpeedEntry) map[string]any {
 	out := make(map[string]any, len(keys)*2) //nolint:mnd // two output keys (_actual/_target) per device.
 	for i, k := range keys {
 		entry := speeds[k]
-		prefix := fmt.Sprintf("FAN%d", i+1)
+		prefix := fanPrefix(i + 1)
 		out[prefix+"_actual"] = entry.ActualRPM
 		out[prefix+"_target"] = entry.TargetRPM
 	}
@@ -487,6 +509,7 @@ func (s *Server) handleSystemManagementRoutes(ctx context.Context, w http.Respon
 		s.Health.Reset()
 		cleared := s.DegradedCache.Clear()
 		epCleared := s.EndpointStats.Reset()
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			keyStatus:                "reset_complete",
 			"health_counters_reset":  s.Config.HealthCheckEnabled,
@@ -542,6 +565,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, reqPath strin
 	case strings.HasPrefix(reqPath, "/pw/"):
 		s.handlePWFacing(ctx, w, reqPath)
 	case isDisabled(reqPath):
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{keyStatus: "404 Response - API Disabled"})
 		s.recordStats(ctx, reqPath, false, false)
@@ -572,7 +596,7 @@ func (s *Server) handleCSVRoute(w http.ResponseWriter, r *http.Request, reqPath 
 
 func (s *Server) generatePWTemps(ctx context.Context) (string, error) {
 	raw := s.PW.Temps(ctx)
-	pwtemp := make(map[string]any)
+	pwtemp := make(map[string]any, len(raw.Temps))
 	idx := 1
 	keys := make([]string, 0, len(raw.Temps))
 	for k := range raw.Temps {
@@ -580,7 +604,7 @@ func (s *Server) generatePWTemps(ctx context.Context) (string, error) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		pwtemp[fmt.Sprintf("PW%d_temp", idx)] = raw.Temps[k]
+		pwtemp[pwPrefix(idx)+"temp"] = raw.Temps[k]
 		idx++
 	}
 	b, err := json.Marshal(pwtemp)
@@ -590,7 +614,7 @@ func (s *Server) generatePWTemps(ctx context.Context) (string, error) {
 
 func (s *Server) generatePWAlerts(ctx context.Context) (string, error) {
 	raw := s.PW.Alerts(ctx)
-	pwalerts := make(map[string]int)
+	pwalerts := make(map[string]int, len(raw.Alerts))
 	for _, a := range raw.Alerts {
 		pwalerts[a] = 1
 	}
@@ -600,6 +624,7 @@ func (s *Server) generatePWAlerts(ctx context.Context) (string, error) {
 }
 
 func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
 	verStr, err := s.PW.Version(ctx)
 	if err != nil || verStr == "" {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -616,6 +641,7 @@ func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) 
 }
 
 func (s *Server) handleTedapiRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	if !s.PW.IsTEDAPI() {
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "TEDAPI not enabled"})
 
@@ -645,6 +671,7 @@ func (s *Server) handleTedapiRoute(ctx context.Context, w http.ResponseWriter, r
 }
 
 func (s *Server) handleCloudRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	if !s.PW.IsCloud() || s.PW.IsFleetAPI() {
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Cloud API not enabled"})
 
@@ -668,6 +695,7 @@ func (s *Server) handleCloudRoute(ctx context.Context, w http.ResponseWriter, re
 }
 
 func (s *Server) handleFleetAPIRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	if !s.PW.IsFleetAPI() {
 		_ = json.NewEncoder(w).Encode(map[string]string{keyError: "FleetAPI not enabled"})
 
@@ -688,6 +716,7 @@ func (s *Server) handleFleetAPIRoute(ctx context.Context, w http.ResponseWriter,
 }
 
 func (s *Server) handleControlGetRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case strings.HasPrefix(reqPath, "/control/reserve"):
 		res, err := s.PW.GetReserve(ctx)

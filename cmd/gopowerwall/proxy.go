@@ -1,15 +1,16 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 	"github.com/blackbirdworks/gopowerwall/proxy"
 )
-
-const defaultProxyTimeout = 15 * time.Second
 
 // ProxyCmd runs the Powerwall HTTP proxy service.
 type ProxyCmd struct {
@@ -20,7 +21,10 @@ type ProxyCmd struct {
 
 // Run executes the proxy command.
 func (c *ProxyCmd) Run(cmdCtx *Context) error {
-	ctx := c.WithLogger(cmdCtx.Context)
+	sigCtx, stop := signal.NotifyContext(cmdCtx.Context, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	ctx := c.WithLogger(sigCtx)
 	cfg := proxy.DefaultConfig()
 	if c.BindAddress != "" {
 		cfg.BindAddress = c.BindAddress
@@ -45,7 +49,6 @@ func (c *ProxyCmd) Run(cmdCtx *Context) error {
 	}
 
 	srv := proxy.NewServer(ctx, cfg, nil)
-	srv.StartExporter(ctx)
 	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
 	fmt.Fprintf(
 		cmdCtx.Output(),
@@ -55,13 +58,9 @@ func (c *ProxyCmd) Run(cmdCtx *Context) error {
 		addr,
 	)
 
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           srv,
-		ReadHeaderTimeout: defaultProxyTimeout,
-		ReadTimeout:       defaultProxyTimeout,
-		WriteTimeout:      defaultProxyTimeout,
+	if err := srv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
 
-	return server.ListenAndServe()
+	return nil
 }

@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
-	"time"
+	"os/signal"
+	"syscall"
 
 	"github.com/joho/godotenv"
 
@@ -17,9 +16,11 @@ import (
 	"github.com/blackbirdworks/gopowerwall/proxy"
 )
 
-const defaultProxyTimeout = 15 * time.Second
-
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	// Load .env before reading configuration, so a container can be
 	// configured either by real environment variables (docker-compose) or a
 	// mounted .env file (local testing). Real environment variables always
@@ -30,11 +31,12 @@ func main() {
 	}
 
 	cfg := proxy.DefaultConfig()
-	ctx := logger.Into(context.Background(), logger.New(os.Stderr, logger.LevelFor(cfg.DebugMode)))
-	srv := proxy.NewServer(ctx, cfg, nil)
-	srv.StartExporter(ctx)
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
+	ctx := logger.Into(sigCtx, logger.New(os.Stderr, logger.LevelFor(cfg.DebugMode)))
+	srv := proxy.NewServer(ctx, cfg, nil)
+
 	protocol := "HTTP"
 	if cfg.HTTPSMode == "yes" {
 		protocol = "HTTPS"
@@ -50,30 +52,11 @@ func main() {
 	)
 	fmt.Fprintln(os.Stdout, "gopowerwall Proxy Started")
 
-	server := &http.Server{
-		Addr:              addr,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
-		Handler:           srv,
-		ReadHeaderTimeout: defaultProxyTimeout,
-		ReadTimeout:       defaultProxyTimeout,
-		WriteTimeout:      defaultProxyTimeout,
-	}
-
-	if cfg.HTTPSMode == "yes" {
-		server.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-		if err := server.ListenAndServeTLS("localhost.crt", "localhost.key"); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
-			logger.Load(ctx).ErrorContext(ctx, "HTTPS server error", "error", err)
-			os.Exit(1)
-		}
-
-		return
-	}
-
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Load(ctx).ErrorContext(ctx, "server error", "error", err)
-		os.Exit(1)
+
+		return 1
 	}
+
+	return 0
 }

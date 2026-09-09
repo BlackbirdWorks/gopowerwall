@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -117,6 +120,7 @@ type Server struct {
 	PerfCache     *cache.PerformanceCache
 	DegradedCache *cache.DegradationCache
 	InfluxClient  *influx.Client
+	localGWClient *http.Client
 	WebRoot       string
 	Config        Config
 	statsTime     int
@@ -163,6 +167,15 @@ func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server
 		}
 	}
 
+	tr := &http.Transport{
+		//nolint:gosec // Local gateway connects via self-signed HTTPS by design
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	localGWClient := &http.Client{
+		Transport: tr,
+		Timeout:   cfg.TimeoutDuration(),
+	}
+
 	now := time.Now()
 
 	return &Server{
@@ -174,6 +187,7 @@ func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server
 		EndpointStats: NewEndpointStatsTracker(),
 		RateLimiter:   cache.NewRateLimiter(),
 		InfluxClient:  influxClient,
+		localGWClient: localGWClient,
 		StartTime:     now,
 		ClearTime:     now,
 		statsURI:      make(map[string]int),
@@ -199,6 +213,21 @@ func (s *Server) recordStats(_ context.Context, uri string, isErr, isTimeout boo
 	}
 }
 
+func serializeForDegradedCache(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []byte:
+		return string(val)
+	default:
+		if b, err := json.Marshal(val); err == nil {
+			return string(b)
+		}
+
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 func (s *Server) safePWCall(
 	_ context.Context,
 	endpoint string,
@@ -217,8 +246,7 @@ func (s *Server) safePWCall(
 	if success {
 		s.Health.RecordSuccess()
 		if s.Config.GracefulDegradation {
-			str := fmt.Sprintf("%v", res)
-			s.DegradedCache.Set(endpoint, str)
+			s.DegradedCache.Set(endpoint, serializeForDegradedCache(res))
 		}
 
 		return res, true
@@ -300,16 +328,31 @@ func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", s.Config.BindAddress, s.Config.Port)
 	srv := &http.Server{
 		Addr:              addr,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 		Handler:           s,
 		ReadHeaderTimeout: defaultServerTimeout,
+		ReadTimeout:       defaultServerTimeout,
+		WriteTimeout:      defaultServerTimeout,
 	}
 
 	errCh := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+	if s.Config.HTTPSMode == valYes {
+		srv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
 		}
-	}()
+		go func() {
+			if err := srv.ListenAndServeTLS("localhost.crt", "localhost.key"); err != nil &&
+				!errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	} else {
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():

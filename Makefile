@@ -1,4 +1,4 @@
-.PHONY: build build-linux build-proxy install-deps lint lint-fix test integration-test total-coverage proto bench clean upgrade all
+.PHONY: build build-linux build-proxy install-deps lint lint-fix test integration-test total-coverage proto bench clean upgrade all fmt run-proxy
 
 BINARY_NAME=gopowerwall
 PROXY_NAME=proxy
@@ -112,3 +112,10 @@ upgrade:
 all:
 	make lint-fix
 	make total-coverage
+
+fmt:
+	go fmt ./...
+
+run-proxy:
+	go run ./cmd/proxy
+

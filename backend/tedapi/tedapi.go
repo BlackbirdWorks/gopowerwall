@@ -839,7 +839,14 @@ func (p *PyPowerwallTEDAPI) getAPISystemStatus(ctx context.Context, force bool) 
 
 func checkConnectedAlert(alerts []any) bool {
 	for _, a := range alerts {
-		if fmt.Sprintf("%v", a) == "SystemConnectedToGrid" {
+		if s, ok := a.(string); ok {
+			if s == "SystemConnectedToGrid" {
+				return true
+			}
+
+			continue
+		}
+		if fmt.Sprint(a) == "SystemConnectedToGrid" {
 			return true
 		}
 	}
@@ -1029,9 +1036,9 @@ func fanSpeedSignalValue(sig map[string]any) *float64 {
 // returns real data in practice needs a live V2026_06-firmware gateway, not
 // more static analysis - see docs/parity-matrix.md's /fans row.
 func ExtractFanSpeeds(data map[string]any) map[string]models.FanSpeedEntry {
-	result := make(map[string]models.FanSpeedEntry)
-
 	msaList, _ := lookup.Lookup(data, "components", "msa").([]any)
+	result := make(map[string]models.FanSpeedEntry, len(msaList))
+
 	for _, compAny := range msaList {
 		comp, ok := compAny.(map[string]any)
 		if !ok {
@@ -1061,7 +1068,7 @@ func ExtractFanSpeeds(data map[string]any) map[string]models.FanSpeedEntry {
 
 		partNumber, _ := comp["partNumber"].(string)
 		serialNumber, _ := comp["serialNumber"].(string)
-		result[fmt.Sprintf("PVAC--%s--%s", partNumber, serialNumber)] = entry
+		result["PVAC--"+partNumber+"--"+serialNumber] = entry
 	}
 
 	return result
@@ -1091,14 +1098,14 @@ func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) 
 	}
 
 	out["TESLA--None"] = map[string]any{
-		"componentParentDin": fmt.Sprintf("STSTSM--%s", din),
+		"componentParentDin": "STSTSM--" + din,
 	}
 	out["TESYNC--None--None"] = map[string]any{}
 
 	if components := p.client.GetComponents(ctx, false); components != nil {
 		if pvac, pvs := synthesizeStringVitals(components); pvac != nil {
-			out[fmt.Sprintf("PVAC--%s", din)] = pvac
-			out[fmt.Sprintf("PVS--%s", din)] = pvs
+			out["PVAC--"+din] = pvac
+			out["PVS--"+din] = pvs
 		}
 	}
 
