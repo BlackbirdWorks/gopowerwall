@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall/backend/local"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 	"github.com/blackbirdworks/gopowerwall/powerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall/local"
 )
 
 // newAuthClient builds a PyPowerwallLocal backend directly (rather than

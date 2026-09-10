@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
+	"github.com/blackbirdworks/gopowerwall/powerwall/proto/teslapower"
 )
 
 // TestGETRoutesAgainstConnectedGateway exercises the proxy's read-only GET

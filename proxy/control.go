@@ -322,3 +322,34 @@ func (s *Server) handleControlMaxBackup(ctx context.Context, w http.ResponseWrit
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{keyMaxBackup: fmt.Sprintf("Scheduled for %d seconds", sec)})
 }
+
+func (s *Server) handleControlGetRoute(ctx context.Context, w http.ResponseWriter, reqPath string) {
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case strings.HasPrefix(reqPath, "/control/reserve"):
+		res, err := s.PW.GetReserve(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyReserve: orNil(res, err)})
+	case strings.HasPrefix(reqPath, "/control/mode"):
+		res, err := s.PW.GetMode(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyMode: orNil(res, err)})
+	case strings.HasPrefix(reqPath, "/control/grid_charging"):
+		res, err := s.PW.GetGridCharging(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyGridCharging: orNil(res, err)})
+	case strings.HasPrefix(reqPath, "/control/grid_export"):
+		res, err := s.PW.GetGridExport(ctx)
+		_ = json.NewEncoder(w).Encode(map[string]any{keyGridExport: orNil(res, err)})
+	case strings.HasPrefix(reqPath, "/control/max_backup"):
+		if !s.PW.IsTEDAPI() {
+			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "max_backup requires v1r LAN transport"})
+
+			return
+		}
+		events, err := s.PW.GetBackupEvents(ctx)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]string{keyError: "Failed to get backup events"})
+
+			return
+		}
+		_ = json.NewEncoder(w).Encode(events)
+	}
+}

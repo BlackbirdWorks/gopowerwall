@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
+	"sync"
 
+	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
@@ -58,42 +61,65 @@ func (c *GetCmd) Run(cmdCtx *Context) error {
 	}
 }
 
-// orNil converts a (value, error) pair from a gopowerwall client accessor
-// into an any that is nil on error, so printText/printCSV/printJSON below -
-// unchanged since before the client's API redesign - keep rendering
-// "unavailable" fields as "N/A" via formatMetricValue's existing nil check
-// rather than needing their own per-field error handling.
-func orNil[T any](v T, err error) any {
-	if err != nil {
-		return nil
-	}
-
-	return v
-}
-
 func collectMetrics(ctx context.Context, pw *powerwall.Powerwall) map[string]any {
-	gridStatus, gridStatusErr := pw.GridStatusString(ctx)
-	if gridStatusErr != nil {
-		gridStatus = "Unknown"
-	}
-	timeRemaining, timeRemainingErr := pw.GetTimeRemaining(ctx)
+	var (
+		wg             sync.WaitGroup
+		siteName       any
+		din            any
+		firmware       any
+		mode           any
+		reserve        any
+		soc            any
+		gridStatus     = "Unknown"
+		grid           any
+		home           any
+		battery        any
+		solar          any
+		gridCharging   any
+		gridExportMode any
+		timeRemaining  any
+	)
+
+	wg.Go(func() { siteName = lookup.OrNil(pw.SiteName(ctx)) })
+	wg.Go(func() { din = lookup.OrNil(pw.Din(ctx)) })
+	wg.Go(func() { firmware = lookup.OrNil(pw.Version(ctx)) })
+	wg.Go(func() { mode = lookup.OrNil(pw.GetMode(ctx)) })
+	wg.Go(func() { reserve = lookup.OrNil(pw.GetReserve(ctx)) })
+	wg.Go(func() { soc = lookup.OrNil(pw.LevelScaled(ctx)) })
+	wg.Go(func() {
+		gs, err := pw.GridStatusString(ctx)
+		if err == nil {
+			gridStatus = gs
+		}
+	})
+	wg.Go(func() { grid = lookup.OrNil(pw.Grid(ctx)) })
+	wg.Go(func() { home = lookup.OrNil(pw.Home(ctx)) })
+	wg.Go(func() { battery = lookup.OrNil(pw.Battery(ctx)) })
+	wg.Go(func() { solar = lookup.OrNil(pw.Solar(ctx)) })
+	wg.Go(func() { gridCharging = lookup.OrNil(pw.GetGridCharging(ctx)) })
+	wg.Go(func() { gridExportMode = lookup.OrNil(pw.GetGridExport(ctx)) })
+	wg.Go(func() {
+		tr, err := pw.GetTimeRemaining(ctx)
+		timeRemaining = lookup.OrNil(tr.Hours(), err)
+	})
+	wg.Wait()
 
 	return map[string]any{
-		"site":             orNil(pw.SiteName(ctx)),
-		"site_id":          orNil(pw.SiteName(ctx)),
-		"din":              orNil(pw.Din(ctx)),
-		"firmware":         orNil(pw.Version(ctx)),
-		"mode":             orNil(pw.GetMode(ctx)),
-		"reserve":          orNil(pw.GetReserve(ctx)),
-		"soc":              orNil(pw.LevelScaled(ctx)),
+		"site":             siteName,
+		"site_id":          siteName,
+		"din":              din,
+		"firmware":         firmware,
+		"mode":             mode,
+		"reserve":          reserve,
+		"soc":              soc,
 		"grid_status":      gridStatus,
-		"grid":             orNil(pw.Grid(ctx)),
-		"home":             orNil(pw.Home(ctx)),
-		"battery":          orNil(pw.Battery(ctx)),
-		"solar":            orNil(pw.Solar(ctx)),
-		"grid_charging":    orNil(pw.GetGridCharging(ctx)),
-		"grid_export_mode": orNil(pw.GetGridExport(ctx)),
-		"time_remaining":   orNil(timeRemaining.Hours(), timeRemainingErr),
+		"grid":             grid,
+		"home":             home,
+		"battery":          battery,
+		"solar":            solar,
+		"grid_charging":    gridCharging,
+		"grid_export_mode": gridExportMode,
+		"time_remaining":   timeRemaining,
 	}
 }
 
@@ -108,11 +134,7 @@ func printJSON(w io.Writer, out map[string]any) error {
 }
 
 func printCSV(w io.Writer, out map[string]any) error {
-	keys := make([]string, 0, len(out))
-	for k := range out {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(out))
 	fmt.Fprintln(w, strings.Join(keys, ","))
 	vals := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -129,11 +151,7 @@ func printText(w io.Writer, out map[string]any) error {
 		"din":     "DIN",
 		"soc":     "Battery Level",
 	}
-	keys := make([]string, 0, len(out))
-	for k := range out {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(out))
 	for _, item := range keys {
 		name := labels[item]
 		if name == "" {

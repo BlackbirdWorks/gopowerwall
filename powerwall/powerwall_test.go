@@ -16,7 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/blackbirdworks/gopowerwall/powerwall"
-	"github.com/blackbirdworks/gopowerwall/proto/teslapower"
+	"github.com/blackbirdworks/gopowerwall/powerwall/proto/teslapower"
 )
 
 // TestPowerwallDisconnectedDegradation verifies that every facade method on a

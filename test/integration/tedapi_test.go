@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blackbirdworks/gopowerwall/backend/tedapi"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 	"github.com/blackbirdworks/gopowerwall/powerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall/tedapi"
 )
 
 // TestTEDAPIProtocolCompatibility talks TEDAPI protobuf directly to

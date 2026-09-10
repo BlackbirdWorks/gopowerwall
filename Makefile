@@ -94,10 +94,10 @@ total-coverage:
 # Regenerate the Go bindings for the vendored Tesla protobuf definitions.
 # Output is byte-reproducible with protoc-gen-go v1.36.12.
 proto:
-	protoc --proto_path=proto/tedapiv2 --go_out=. --go_opt=module=$(MODULE) proto/tedapiv2/*.proto
-	protoc --proto_path=proto/tedapi --go_out=. --go_opt=module=$(MODULE) proto/tedapi/tedapi.proto
-	protoc --proto_path=proto/tedapi/combined --go_out=. --go_opt=module=$(MODULE) proto/tedapi/combined/tedapi_combined.proto
-	protoc --proto_path=proto/teslapower --go_out=. --go_opt=module=$(MODULE) proto/teslapower/tesla.proto
+	protoc --proto_path=powerwall/proto/tedapiv2 --go_out=. --go_opt=module=$(MODULE) powerwall/proto/tedapiv2/*.proto
+	protoc --proto_path=powerwall/proto/tedapi --go_out=. --go_opt=module=$(MODULE) powerwall/proto/tedapi/tedapi.proto
+	protoc --proto_path=powerwall/proto/tedapi/combined --go_out=. --go_opt=module=$(MODULE) powerwall/proto/tedapi/combined/tedapi_combined.proto
+	protoc --proto_path=powerwall/proto/teslapower --go_out=. --go_opt=module=$(MODULE) powerwall/proto/teslapower/tesla.proto
 
 bench:
 	go test -bench=. -benchmem ./...

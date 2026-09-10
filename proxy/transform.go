@@ -116,7 +116,7 @@ func InjectJS(htmlsrc []byte, scriptPaths ...string) []byte {
 	lower := bytes.ToLower(htmlsrc)
 	bodyIdx := bytes.LastIndex(lower, []byte("</body>"))
 	if bodyIdx != -1 {
-		res := make([]byte, 0, len(htmlsrc)+len(tagBytes))
+		res := make([]byte, 0, clampedCapAdd(len(htmlsrc), len(tagBytes)))
 		res = append(res, htmlsrc[:bodyIdx]...)
 		res = append(res, tagBytes...)
 		res = append(res, htmlsrc[bodyIdx:]...)

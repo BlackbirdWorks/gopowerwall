@@ -5,7 +5,7 @@ import (
 	"io"
 
 	"github.com/blackbirdworks/gopowerwall/models"
-	"github.com/blackbirdworks/gopowerwall/scan"
+	"github.com/blackbirdworks/gopowerwall/powerwall/scan"
 )
 
 // ScanOptions configures a network scan for Powerwall gateways.
