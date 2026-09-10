@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"math"
 	"net/http"
@@ -24,8 +25,34 @@ func pwPrefix(num int) string {
 func (s *Server) generateFreq(ctx context.Context) (string, error) {
 	rawSys, _ := s.PW.SystemStatus(ctx)
 	freq := s.PW.FrequencyView(ctx)
-	capHint := len(rawSys.BatteryBlocks)*11 + len(freq.Inverters)*4 +
-		len(freq.SyncMeterFields) + freqExtraCap
+
+	if len(rawSys.BatteryBlocks) > math.MaxInt/11 {
+		return "", errors.New("frequency view too large")
+	}
+	batteryTerm := len(rawSys.BatteryBlocks) * 11
+
+	if len(freq.Inverters) > math.MaxInt/4 {
+		return "", errors.New("frequency view too large")
+	}
+	inverterTerm := len(freq.Inverters) * 4
+
+	syncTerm := len(freq.SyncMeterFields)
+
+	if batteryTerm > math.MaxInt-inverterTerm {
+		return "", errors.New("frequency view too large")
+	}
+	capHint := batteryTerm + inverterTerm
+
+	if capHint > math.MaxInt-syncTerm {
+		return "", errors.New("frequency view too large")
+	}
+	capHint += syncTerm
+
+	if capHint > math.MaxInt-freqExtraCap {
+		return "", errors.New("frequency view too large")
+	}
+	capHint += freqExtraCap
+
 	fcv := make(map[string]any, capHint)
 	for idx, block := range rawSys.BatteryBlocks {
 		pNum := idx + 1
