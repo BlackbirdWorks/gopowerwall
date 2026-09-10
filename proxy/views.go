@@ -16,7 +16,26 @@ const (
 	freqExtraCap = 2
 	podExtraCap  = 5
 	jsonCap      = 11
+
+	batteryFieldCount  = 11
+	inverterFieldCount = 4
+	podBlockFieldCount = 29
+	podTepodFieldCount = 6
 )
+
+var errCapacityOverflow = errors.New("capacity computation overflowed")
+
+// safeCapAdd returns base + count*perItem, or errCapacityOverflow if the
+// multiplication or addition would overflow int - guarding the map capacity
+// hints below against CodeQL's "size computation for allocation may
+// overflow" finding.
+func safeCapAdd(base, count, perItem int) (int, error) {
+	if count != 0 && perItem > (math.MaxInt-base)/count {
+		return 0, errCapacityOverflow
+	}
+
+	return base + count*perItem, nil
+}
 
 func pwPrefix(num int) string {
 	return "PW" + strconv.Itoa(num) + "_"
@@ -26,32 +45,20 @@ func (s *Server) generateFreq(ctx context.Context) (string, error) {
 	rawSys, _ := s.PW.SystemStatus(ctx)
 	freq := s.PW.FrequencyView(ctx)
 
-	if len(rawSys.BatteryBlocks) > math.MaxInt/11 {
-		return "", errors.New("frequency view too large")
+	capHint, err := safeCapAdd(freqExtraCap, len(rawSys.BatteryBlocks), batteryFieldCount)
+	if err != nil {
+		return "", err
 	}
-	batteryTerm := len(rawSys.BatteryBlocks) * 11
 
-	if len(freq.Inverters) > math.MaxInt/4 {
-		return "", errors.New("frequency view too large")
+	capHint, err = safeCapAdd(capHint, len(freq.Inverters), inverterFieldCount)
+	if err != nil {
+		return "", err
 	}
-	inverterTerm := len(freq.Inverters) * 4
 
-	syncTerm := len(freq.SyncMeterFields)
-
-	if batteryTerm > math.MaxInt-inverterTerm {
-		return "", errors.New("frequency view too large")
+	capHint, err = safeCapAdd(capHint, len(freq.SyncMeterFields), 1)
+	if err != nil {
+		return "", err
 	}
-	capHint := batteryTerm + inverterTerm
-
-	if capHint > math.MaxInt-syncTerm {
-		return "", errors.New("frequency view too large")
-	}
-	capHint += syncTerm
-
-	if capHint > math.MaxInt-freqExtraCap {
-		return "", errors.New("frequency view too large")
-	}
-	capHint += freqExtraCap
 
 	fcv := make(map[string]any, capHint)
 	for idx, block := range rawSys.BatteryBlocks {
@@ -117,15 +124,14 @@ func applyPODTEPODVitals(pod map[string]any, entries []models.PODTEPODEntry) {
 func (s *Server) generatePOD(ctx context.Context) (string, error) {
 	view := s.PW.PODView(ctx)
 
-	capHint := podExtraCap
-	blocksLen := len(view.Blocks)
-	entriesLen := len(view.TEPODEntries)
+	capHint, err := safeCapAdd(podExtraCap, len(view.Blocks), podBlockFieldCount)
+	if err != nil {
+		return "", err
+	}
 
-	if blocksLen <= (math.MaxInt-podExtraCap)/29 {
-		capHint = blocksLen*29 + podExtraCap
-		if entriesLen <= (math.MaxInt-capHint)/6 {
-			capHint += entriesLen * 6
-		}
+	capHint, err = safeCapAdd(capHint, len(view.TEPODEntries), podTepodFieldCount)
+	if err != nil {
+		return "", err
 	}
 
 	pod := make(map[string]any, capHint)
