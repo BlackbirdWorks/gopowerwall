@@ -37,6 +37,17 @@ func safeCapAdd(base, count, perItem int) (int, error) {
 	return base + count*perItem, nil
 }
 
+// clampedCapAdd returns a+b, saturating at math.MaxInt instead of
+// overflowing - used for the same class of allocation-size guard as
+// safeCapAdd, for call sites that can't return an error.
+func clampedCapAdd(a, b int) int {
+	if b > math.MaxInt-a {
+		return math.MaxInt
+	}
+
+	return a + b
+}
+
 func pwPrefix(num int) string {
 	return "PW" + strconv.Itoa(num) + "_"
 }
