@@ -6,7 +6,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
-	"github.com/blackbirdworks/gopowerwall/scan"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 // ScanCmd scans local network for Powerwall gateways.
@@ -31,7 +31,7 @@ func (c *ScanCmd) Run(cmdCtx *Context) error {
 		target = c.IP
 	}
 
-	results, err := scan.Scan(cmdCtx.Context, models.ScanOptions{
+	results, err := powerwall.Scan(cmdCtx.Context, models.ScanOptions{
 		CIDR:        target,
 		MaxHosts:    c.Hosts,
 		TimeoutSec:  c.Timeout,

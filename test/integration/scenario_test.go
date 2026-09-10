@@ -131,9 +131,7 @@ func TestScenarios(t *testing.T) {
 		ts := newProxyServer(t, sim)
 
 		_, soeBody := getBody(t, ts, "/soe")
-		var proxySOE struct {
-			Percentage float64 `json:"percentage"`
-		}
+		var proxySOE proxySOEResponse
 		require.NoError(t, json.Unmarshal(soeBody, &proxySOE))
 		assert.InDelta(t, 52.5, proxySOE.Percentage, 0.001)
 

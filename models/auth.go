@@ -16,6 +16,11 @@ type LocalAuthCredentials struct {
 	UserRecord string `json:"UserRecord,omitempty"`
 }
 
+// LoginResponse represents the JSON response containing an auth token.
+type LoginResponse struct {
+	Token string `json:"token"`
+}
+
 // TokenData represents OAuth2 token payload.
 type TokenData struct {
 	AccessToken  string `json:"access_token"`

@@ -255,39 +255,6 @@ func TestHandwrittenRoundTrip(t *testing.T) {
 			model: models.PowerwallTemps{Temps: map[string]float64{"TETHC--1": 28.5}},
 		},
 		{
-			name: "ProxyStats",
-			model: models.ProxyStats{
-				SiteName:   "Tesla Energy Gateway",
-				Config:     map[string]any{"host": "127.0.0.1"},
-				Uptime:     "1h2m3s",
-				TotalGets:  10,
-				TotalPosts: 2,
-				CloudMode:  true,
-			},
-		},
-		{
-			name: "CompositeJSON",
-			model: models.CompositeJSON{
-				SiteName: "Tesla Energy Gateway",
-				Firmware: "23.28.2",
-				DIN:      "1232100-00-E--TG1234567890G1",
-				SOE:      models.SOE{Percentage: 50},
-			},
-		},
-		{
-			name: "PODMetrics",
-			model: models.PODMetrics{
-				Voltage:   243.7,
-				Current:   40.9,
-				Frequency: 60.0,
-				Power:     -1990,
-			},
-		},
-		{
-			name:  "FrequencyMetrics",
-			model: models.FrequencyMetrics{Grid: 60.01, Home: 60.02},
-		},
-		{
 			name:  "PowerSummary",
 			model: models.PowerSummary{Site: 27, Solar: 1840, Battery: -990, Load: 866.25},
 		},

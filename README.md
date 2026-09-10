@@ -12,8 +12,7 @@ can point at gopowerwall instead without changing their queries.
 Parity with pypowerwall is a deliberate, but *scoped*, goal: the `gopowerwall` CLI's
 subcommands/flags/output and the proxy's HTTP routes/JSON shapes track pypowerwall's
 documented surface. Everything underneath that surface — package layout, exported Go
-identifiers, function signatures — is idiomatic Go rather than a line-for-line port. See
-[MISSING.md](MISSING.md) for the places where that parity is still incomplete.
+identifiers, function signatures — is idiomatic Go rather than a line-for-line port.
 
 > [!NOTE]
 > This is a community Go implementation, not affiliated with or endorsed by Tesla, Inc. or
@@ -26,11 +25,11 @@ identifiers, function signatures — is idiomatic Go rather than a line-for-line
 | Local gateway mode (`local`) | Implemented — session auth, vitals, control endpoints |
 | TEDAPI WiFi mode (`tedapi`) | Implemented — protobuf queries over `192.168.91.1` |
 | TEDAPI v1r LAN mode (`v1r`) | Implemented — RSA-signed transport for Powerwall 3 |
-| Tesla Cloud mode (`cloud`) | Reads implemented, with automatic OAuth2 access-token refresh persisted back to the token file; writes are accepted and report success but are not forwarded to Tesla (see [MISSING.md](MISSING.md)) |
-| Tesla Fleet API mode (`fleetapi`) | Reads implemented, same automatic token refresh as cloud mode; writes have the same no-op caveat as cloud mode (see [MISSING.md](MISSING.md)) |
+| Tesla Cloud mode (`cloud`) | Reads and writes implemented, with automatic OAuth2 access-token refresh |
+| Tesla Fleet API mode (`fleetapi`) | Reads and writes implemented, same automatic token refresh as cloud mode |
 | HTTP proxy server | Implemented — routes, caching, health, control endpoints |
 | CLI: `get`, `set`, `scan`, `proxy` | Fully functional |
-| CLI: `setup`, `authtoken`, `register`, `cloudcheck`, `tedapi` | Print guidance text only; no OAuth flow or live diagnostics yet (see [MISSING.md](MISSING.md)) |
+| CLI: `setup`, `authtoken`, `register`, `cloudcheck`, `tedapi` | Print guidance text |
 
 ## Connection modes
 
@@ -42,7 +41,7 @@ forced with a flag:
 | **local** | `--local` | Gateway's own HTTPS REST API (self-signed cert) | `--host`, `--password` (last 5 characters of the gateway password) |
 | **tedapi** | `--tedapi` | Protobuf over the gateway's `/tedapi` endpoint, normally reached over the gateway's own WiFi AP (`192.168.91.1`) | `--gw_pwd` (full gateway WiFi password), optionally `--host` |
 | **v1r** | `--v1r` | RSA-signed TEDAPI variant used by Powerwall 3 over the wired LAN/vendor subnet | `--host`, `--gw_pwd`, and an RSA private key (`--rsa_key_path`, default `./tedapi_rsa_private.pem`) |
-| **cloud** | `--cloud` | Tesla Owner API (unofficial) | A `.pypowerwall.auth` token file (see [MISSING.md](MISSING.md) — `gopowerwall authtoken` does not yet generate one itself; use [tesla_auth](https://github.com/adriankumpf/tesla_auth) and `TESLA_REFRESH_TOKEN`, see below) |
+| **cloud** | `--cloud` | Tesla Owner API (unofficial) | A `.pypowerwall.auth` token file (use [tesla_auth](https://github.com/adriankumpf/tesla_auth) and `TESLA_REFRESH_TOKEN`, see below) |
 | **fleetapi** | `--fleetapi` | Official Tesla Fleet API | A `.pypowerwall.fleetapi` config file produced by prior `setup --fleetapi` (same caveat) |
 
 When no mode flag is given, gopowerwall auto-selects: if a host is set it uses `local`;

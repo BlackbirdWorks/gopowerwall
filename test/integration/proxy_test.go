@@ -17,6 +17,34 @@ import (
 	"github.com/blackbirdworks/gopowerwall/proxy"
 )
 
+type proxySOEResponse struct {
+	Percentage float64 `json:"percentage"`
+}
+
+type proxyGridStatusResponse struct {
+	GridStatus string `json:"grid_status"`
+}
+
+type proxyVitalsResponse struct {
+	Devices map[string]map[string]any `json:"devices"`
+}
+
+type proxySolarStringMetric struct {
+	State     string  `json:"State"`
+	Connected bool    `json:"Connected"`
+	Voltage   float64 `json:"Voltage"`
+	Current   float64 `json:"Current"`
+	Power     float64 `json:"Power"`
+}
+
+type proxyTempsResponse struct {
+	Temps map[string]float64 `json:"temps"`
+}
+
+type proxyAlertsResponse struct {
+	Alerts []string `json:"alerts"`
+}
+
 // newProxyServer wires a proxy.Server to a local-mode Powerwall connected to
 // sim, exposed over plain HTTP via httptest so route assertions do not also
 // need to reason about the simulator's TLS.
@@ -117,9 +145,7 @@ func TestProxyHTTPSurface(t *testing.T) {
 			path: "/soe",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var soe struct {
-					Percentage float64 `json:"percentage"`
-				}
+				var soe proxySOEResponse
 				require.NoError(t, json.Unmarshal(body, &soe))
 				assert.InDelta(t, 23.975388, soe.Percentage, 1e-6)
 			},
@@ -136,9 +162,7 @@ func TestProxyHTTPSurface(t *testing.T) {
 			path: "/api/system_status/soe",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var soe struct {
-					Percentage float64 `json:"percentage"`
-				}
+				var soe proxySOEResponse
 				require.NoError(t, json.Unmarshal(body, &soe))
 				// scaled = (raw - 5) / 0.95 = (23.975388 - 5) / 0.95 = 19.974092...
 				assert.InDelta(t, 19.974093, soe.Percentage, 1e-4)
@@ -149,9 +173,7 @@ func TestProxyHTTPSurface(t *testing.T) {
 			path: "/api/system_status/grid_status",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var gs struct {
-					GridStatus string `json:"grid_status"`
-				}
+				var gs proxyGridStatusResponse
 				require.NoError(t, json.Unmarshal(body, &gs))
 				assert.Equal(t, "SystemGridConnected", gs.GridStatus)
 			},
@@ -161,9 +183,7 @@ func TestProxyHTTPSurface(t *testing.T) {
 			path: "/vitals",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var vitals struct {
-					Devices map[string]map[string]any `json:"devices"`
-				}
+				var vitals proxyVitalsResponse
 				require.NoError(t, json.Unmarshal(body, &vitals))
 				assert.Contains(t, vitals.Devices, "TETHC--2012170-25-E--T0000000000000")
 			},
@@ -186,13 +206,7 @@ func TestProxyHTTPSurface(t *testing.T) {
 			path: "/strings",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var strs map[string]struct {
-					State     string  `json:"State"`
-					Connected bool    `json:"Connected"`
-					Voltage   float64 `json:"Voltage"`
-					Current   float64 `json:"Current"`
-					Power     float64 `json:"Power"`
-				}
+				var strs map[string]proxySolarStringMetric
 				require.NoError(t, json.Unmarshal(body, &strs))
 				assert.Len(t, strs, 4)
 				assert.NotContains(
@@ -233,9 +247,7 @@ func TestProxyHTTPSurface(t *testing.T) {
 			path: "/temps",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var temps struct {
-					Temps map[string]float64 `json:"temps"`
-				}
+				var temps proxyTempsResponse
 				require.NoError(t, json.Unmarshal(body, &temps))
 				assert.Len(t, temps.Temps, 2)
 			},
@@ -245,9 +257,7 @@ func TestProxyHTTPSurface(t *testing.T) {
 			path: "/alerts",
 			check: func(t *testing.T, body []byte) {
 				t.Helper()
-				var alerts struct {
-					Alerts []string `json:"alerts"`
-				}
+				var alerts proxyAlertsResponse
 				require.NoError(t, json.Unmarshal(body, &alerts))
 				assert.Contains(t, alerts.Alerts, "SystemConnectedToGrid")
 			},

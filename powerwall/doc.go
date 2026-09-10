@@ -17,9 +17,7 @@
 // pointer, sensor and reserve/level readers that used to fork on a trailing
 // ...bool are now two clearly-named methods, and derived JSON shapes decode
 // into typed [github.com/blackbirdworks/gopowerwall/models] structs instead
-// of bare any. See docs/migration-v2.md in the module's source repository
-// for a symbol-by-symbol before/after if you are updating code written
-// against an earlier version.
+// of bare any.
 //
 // # Connecting
 //
@@ -85,10 +83,10 @@
 // pypowerwall's circular fallback across modes (local -> FleetAPI -> cloud
 // -> local) on a failed attempt, so [Powerwall.Mode] after connecting can
 // differ from what was originally configured. See
-// [github.com/blackbirdworks/gopowerwall/backend/local],
-// [github.com/blackbirdworks/gopowerwall/backend/tedapi],
-// [github.com/blackbirdworks/gopowerwall/backend/cloud], and
-// [github.com/blackbirdworks/gopowerwall/backend/fleetapi] for what each
+// [github.com/blackbirdworks/gopowerwall/powerwall/local],
+// [github.com/blackbirdworks/gopowerwall/powerwall/tedapi],
+// [github.com/blackbirdworks/gopowerwall/powerwall/cloud], and
+// [github.com/blackbirdworks/gopowerwall/powerwall/fleetapi] for what each
 // backend actually implements, and docs/architecture in the module's
 // source repository for the full picture.
 //

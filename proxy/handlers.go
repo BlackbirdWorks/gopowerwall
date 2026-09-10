@@ -5,22 +5,11 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"maps"
 	"net/http"
-	"runtime/metrics"
 	"strconv"
 	"strings"
-	"time"
-
-	"github.com/blackbirdworks/gopowerwall/pkgs/version"
-)
-
-const (
-	secondsPerHour   = 3600
-	secondsPerMinute = 60
-	kiloByte         = 1024
 )
 
 func (s *Server) respond(ctx context.Context, w http.ResponseWriter, reqPath, contentType, body string, ok bool) {
@@ -246,126 +235,4 @@ func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request, reqPath strin
 
 	http.NotFound(w, r)
 	s.recordStats(ctx, reqPath, true, false)
-}
-
-func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
-	s.statsMu.RLock()
-	now := time.Now()
-	delta := int(now.Sub(s.StartTime).Seconds())
-	uptime := fmt.Sprintf(
-		"%02d:%02d:%02d",
-		delta/secondsPerHour,
-		(delta%secondsPerHour)/secondsPerMinute,
-		delta%secondsPerMinute,
-	)
-
-	uriCopy := maps.Clone(s.statsURI)
-	gets := s.statsGets
-	posts := s.statsPost
-	errs := s.statsErr
-	timeouts := s.statsTime
-	startTS := s.StartTime.Unix()
-	clearTS := s.ClearTime.Unix()
-	s.statsMu.RUnlock()
-
-	sample := make([]metrics.Sample, 1)
-	sample[0].Name = "/memory/classes/heap/objects:bytes"
-	metrics.Read(sample)
-	var memKB uint64
-	if sample[0].Value.Kind() == metrics.KindUint64 {
-		memKB = sample[0].Value.Uint64() / kiloByte
-	}
-
-	siteName, siteNameErr := s.PW.SiteName(ctx)
-
-	stats := map[string]any{
-		"pypowerwall": fmt.Sprintf("%s Proxy %s", version.Version, Build),
-		"mode":        s.PW.Mode(),
-		"gets":        gets,
-		"posts":       posts,
-		"errors":      errs,
-		"timeout":     timeouts,
-		"uri":         uriCopy,
-		"ts":          now.Unix(),
-		"start":       startTS,
-		"clear":       clearTS,
-		"uptime":      uptime,
-		"mem":         memKB,
-		keySiteName:   orNil(siteName, siteNameErr),
-		"cloudmode":   s.PW.IsCloud(),
-		"fleetapi":    s.PW.IsFleetAPI(),
-		"tedapi":      s.PW.IsTEDAPI(),
-		"config": map[string]any{
-			"PW_BIND_ADDRESS":        s.Config.BindAddress,
-			"PW_HOST":                s.Config.Host,
-			"PW_EMAIL":               s.Config.Email,
-			"PW_TIMEZONE":            s.Config.Timezone,
-			"PW_PORT":                s.Config.Port,
-			"PW_STYLE":               s.Config.Style,
-			"PW_CACHE_EXPIRE":        s.Config.CacheExpire,
-			"PW_CACHE_TTL":           s.Config.CacheTTL,
-			"PW_NEG_SOLAR":           s.Config.NegSolar,
-			"PW_SITE_ZERO_THRESHOLD": s.Config.SiteZeroThreshold,
-		},
-	}
-
-	if s.Config.HealthCheckEnabled {
-		stats["connection_health"] = s.Health.Snapshot()
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(stats)
-}
-
-func (s *Server) handleHealth(_ context.Context, w http.ResponseWriter) {
-	s.statsMu.RLock()
-	gets := s.statsGets
-	posts := s.statsPost
-	errs := s.statsErr
-	timeouts := s.statsTime
-	s.statsMu.RUnlock()
-
-	health := map[string]any{
-		"pypowerwall":                   fmt.Sprintf("%s Proxy %s", version.Version, Build),
-		"mode":                          s.PW.Mode(),
-		"pypowerwall_cache_expire":      s.Config.CacheExpire,
-		"degradation_cache_ttl_seconds": s.Config.CacheTTL,
-		"graceful_degradation":          s.Config.GracefulDegradation,
-		"fail_fast_mode":                s.Config.FailFastMode,
-		"health_check_enabled":          s.Config.HealthCheckEnabled,
-		"startup_time":                  s.StartTime.Format(time.RFC3339),
-		"current_time":                  time.Now().Format(time.RFC3339),
-		"proxy_stats": map[string]any{
-			"total_gets":     gets,
-			"total_posts":    posts,
-			"total_errors":   errs,
-			"total_timeouts": timeouts,
-		},
-	}
-
-	if s.Config.HealthCheckEnabled {
-		health["connection_health"] = s.Health.Snapshot()
-	}
-
-	if s.Config.GracefulDegradation {
-		size, snap := s.DegradedCache.Snapshot()
-		health["cached_data"] = map[string]any{
-			"cache_size": size,
-			"endpoints":  snap,
-		}
-	}
-
-	health["endpoint_statistics"] = s.EndpointStats.Snapshot()
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(health)
-}
-
-func (s *Server) handleHelp(_ context.Context, w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<html><head><title>pyPowerwall Proxy</title></head><body>
-<h1>pyPowerwall [%s] Proxy [%s]</h1>
-<p>Proxy running in mode: %s</p>
-<p><a href="https://github.com/jasonacox/pypowerwall">Documentation & API Reference</a></p>
-</body></html>`, html.EscapeString(version.Version), Build, html.EscapeString(string(s.PW.Mode())))
 }

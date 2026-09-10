@@ -54,13 +54,13 @@ conclusion unverified rather than inventing a plausible answer.
 
 ### Connection modes
 
-Five backends live under `backend/`, selected by `ConnectionMode` in `types.go`:
+Five backends live under `powerwall/`, selected by `ConnectionMode` in `types.go`:
 
 - `local` - the gateway's own HTTP API over self-signed TLS.
 - `tedapi` - protobuf over the gateway's `/tedapi` endpoint.
 - `cloud` - the Tesla Owner API.
 - `fleetapi` - the Tesla Fleet API.
-- `v1r` - the LAN/RSA TEDAPI variant, in `backend/tedapi/v1r.go`.
+- `v1r` - the LAN/RSA TEDAPI variant, in `powerwall/tedapi/v1r.go`.
 
 `InsecureSkipVerify` against the local gateway is inherent to the protocol - the gateway
 ships a self-signed certificate. Those `gosec` waivers are legitimate and stay.
