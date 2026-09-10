@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -88,7 +89,19 @@ func applyPODTEPODVitals(pod map[string]any, entries []models.PODTEPODEntry) {
 
 func (s *Server) generatePOD(ctx context.Context) (string, error) {
 	view := s.PW.PODView(ctx)
-	pod := make(map[string]any, len(view.Blocks)*29+len(view.TEPODEntries)*6+podExtraCap)
+
+	capHint := podExtraCap
+	blocksLen := len(view.Blocks)
+	entriesLen := len(view.TEPODEntries)
+
+	if blocksLen <= (math.MaxInt-podExtraCap)/29 {
+		capHint = blocksLen*29 + podExtraCap
+		if entriesLen <= (math.MaxInt-capHint)/6 {
+			capHint += entriesLen * 6
+		}
+	}
+
+	pod := make(map[string]any, capHint)
 	for idx, block := range view.Blocks {
 		prefix := pwPrefix(idx + 1)
 		pod[prefix+"name"] = nil
