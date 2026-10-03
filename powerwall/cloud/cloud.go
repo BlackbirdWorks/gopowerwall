@@ -75,6 +75,10 @@ type Client struct {
 // PyPowerwallCloud is an alias for Client.
 type PyPowerwallCloud = Client
 
+type productsResponse struct {
+	Response []map[string]any `json:"response"`
+}
+
 // New creates a new Client backend.
 func New(email string, cacheTTL, timeout time.Duration, siteID, authPath string) *Client {
 	c := &Client{
@@ -377,9 +381,7 @@ func (c *Client) findEnergySite(ctx context.Context) (string, error) {
 		return "", statusErr
 	}
 
-	var data struct {
-		Response []map[string]any `json:"response"`
-	}
+	var data productsResponse
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
 		return "", decodeErr
 	}

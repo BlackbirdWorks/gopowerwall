@@ -713,55 +713,75 @@ func TestSOEAndGridStatusResponseSurviveEarlierParsedPoll(t *testing.T) {
 func TestPODViewIncludesTEPODVitalsAugmentation(t *testing.T) {
 	t.Parallel()
 
-	pb := &teslapower.DevicesWithVitals{
-		Devices: []*teslapower.SiteControllerConnectedDeviceWithVitals{
-			{
-				Device: &teslapower.SiteControllerConnectedDevice{
-					Device: &teslapower.Device{Din: &teslapower.StringValue{Value: "TEPOD--1234--5678"}},
-				},
-				Vitals: []*teslapower.DeviceVital{
-					vitalBool("POD_ActiveHeating", true),
-					vitalBool("POD_ChargeComplete", false),
-					vitalBool("POD_ChargeRequest", true),
-					vitalBool("POD_DischargeComplete", false),
-					vitalBool("POD_PermanentlyFaulted", false),
-					vitalBool("POD_PersistentlyFaulted", false),
-					vitalBool("POD_enable_line", true),
-					vitalFloat("POD_available_charge_power", 3300.0),
-					vitalFloat("POD_available_dischg_power", 3200.0),
-					vitalFloat("POD_nom_energy_remaining", 9000.0),
-					vitalFloat("POD_nom_energy_to_be_charged", 4500.0),
-					vitalFloat("POD_nom_full_pack_energy", 13500.0),
-				},
-			},
-		},
+	type testCase struct {
+		name       string
+		wantDevice string
+		wantHeat   int
+		wantCharge int
 	}
-	data, err := proto.Marshal(pb)
-	require.NoError(t, err)
 
-	pw := newLocalTestPowerwall(t, data)
-	view := pw.PODView(t.Context())
+	for _, tc := range []testCase{
+		{
+			name:       "tepod vitals populated",
+			wantDevice: "TEPOD--1234--5678",
+			wantHeat:   1,
+			wantCharge: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Len(t, view.TEPODEntries, 1)
-	entry := view.TEPODEntries[0]
-	assert.Equal(t, "TEPOD--1234--5678", entry.Device)
-	assert.Equal(t, 1, entry.ActiveHeating)
-	assert.Equal(t, 0, entry.ChargeComplete)
-	assert.Equal(t, 1, entry.ChargeRequest)
-	assert.Equal(t, 0, entry.DischargeComplete)
-	assert.Equal(t, 0, entry.PermanentlyFaulted)
-	assert.Equal(t, 0, entry.PersistentlyFaulted)
-	assert.Equal(t, 1, entry.EnableLine)
-	require.NotNil(t, entry.AvailableChargePower)
-	assert.InDelta(t, 3300.0, *entry.AvailableChargePower, 0.001)
-	require.NotNil(t, entry.AvailableDischargePower)
-	assert.InDelta(t, 3200.0, *entry.AvailableDischargePower, 0.001)
-	require.NotNil(t, entry.NomEnergyRemaining)
-	assert.InDelta(t, 9000.0, *entry.NomEnergyRemaining, 0.001)
-	require.NotNil(t, entry.NomEnergyToBeCharged)
-	assert.InDelta(t, 4500.0, *entry.NomEnergyToBeCharged, 0.001)
-	require.NotNil(t, entry.NomFullPackEnergy)
-	assert.InDelta(t, 13500.0, *entry.NomFullPackEnergy, 0.001)
+			pb := &teslapower.DevicesWithVitals{
+				Devices: []*teslapower.SiteControllerConnectedDeviceWithVitals{
+					{
+						Device: &teslapower.SiteControllerConnectedDevice{
+							Device: &teslapower.Device{Din: &teslapower.StringValue{Value: tc.wantDevice}},
+						},
+						Vitals: []*teslapower.DeviceVital{
+							vitalBool("POD_ActiveHeating", true),
+							vitalBool("POD_ChargeComplete", false),
+							vitalBool("POD_ChargeRequest", true),
+							vitalBool("POD_DischargeComplete", false),
+							vitalBool("POD_PermanentlyFaulted", false),
+							vitalBool("POD_PersistentlyFaulted", false),
+							vitalBool("POD_enable_line", true),
+							vitalFloat("POD_available_charge_power", 3300.0),
+							vitalFloat("POD_available_dischg_power", 3200.0),
+							vitalFloat("POD_nom_energy_remaining", 9000.0),
+							vitalFloat("POD_nom_energy_to_be_charged", 4500.0),
+							vitalFloat("POD_nom_full_pack_energy", 13500.0),
+						},
+					},
+				},
+			}
+			data, err := proto.Marshal(pb)
+			require.NoError(t, err)
+
+			pw := newLocalTestPowerwall(t, data)
+			view := pw.PODView(t.Context())
+
+			require.Len(t, view.TEPODEntries, 1)
+			entry := view.TEPODEntries[0]
+			assert.Equal(t, tc.wantDevice, entry.Device)
+			assert.Equal(t, tc.wantHeat, entry.ActiveHeating)
+			assert.Equal(t, 0, entry.ChargeComplete)
+			assert.Equal(t, tc.wantCharge, entry.ChargeRequest)
+			assert.Equal(t, 0, entry.DischargeComplete)
+			assert.Equal(t, 0, entry.PermanentlyFaulted)
+			assert.Equal(t, 0, entry.PersistentlyFaulted)
+			assert.Equal(t, 1, entry.EnableLine)
+			require.NotNil(t, entry.AvailableChargePower)
+			assert.InDelta(t, 3300.0, *entry.AvailableChargePower, 0.001)
+			require.NotNil(t, entry.AvailableDischargePower)
+			assert.InDelta(t, 3200.0, *entry.AvailableDischargePower, 0.001)
+			require.NotNil(t, entry.NomEnergyRemaining)
+			assert.InDelta(t, 9000.0, *entry.NomEnergyRemaining, 0.001)
+			require.NotNil(t, entry.NomEnergyToBeCharged)
+			assert.InDelta(t, 4500.0, *entry.NomEnergyToBeCharged, 0.001)
+			require.NotNil(t, entry.NomFullPackEnergy)
+			assert.InDelta(t, 13500.0, *entry.NomFullPackEnergy, 0.001)
+		})
+	}
 }
 
 // TestGetFanSpeedsEmptyOutsideTEDAPIMode is the regression test proving
@@ -773,9 +793,21 @@ func TestPODViewIncludesTEPODVitalsAugmentation(t *testing.T) {
 func TestGetFanSpeedsEmptyOutsideTEDAPIMode(t *testing.T) {
 	t.Parallel()
 
-	pw := newLocalTestPowerwall(t, buildMultiPVACVitalsProtobuf(t))
+	type testCase struct {
+		name string
+	}
 
-	speeds := pw.GetFanSpeeds(t.Context())
-	assert.NotNil(t, speeds)
-	assert.Empty(t, speeds)
+	for _, tc := range []testCase{
+		{name: "empty outside tedapi mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			pw := newLocalTestPowerwall(t, buildMultiPVACVitalsProtobuf(t))
+
+			speeds := pw.GetFanSpeeds(t.Context())
+			assert.NotNil(t, speeds)
+			assert.Empty(t, speeds)
+		})
+	}
 }
