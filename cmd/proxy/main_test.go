@@ -59,6 +59,18 @@ func TestProxyRun(t *testing.T) {
 			},
 			want: 0,
 		},
+		{
+			name: "https mode with missing certificate files fails start",
+			setup: func(t *testing.T) {
+				t.Helper()
+				t.Setenv("PW_PORT", "0")
+				t.Setenv("PW_BIND_ADDRESS", "127.0.0.1")
+				t.Setenv("PW_HTTPS", "yes")
+				tempDir := t.TempDir()
+				t.Chdir(tempDir)
+			},
+			want: 1,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.setup(t)

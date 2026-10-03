@@ -20,28 +20,18 @@ func loadFromDisk(webRoot, cleanPath string) ([]byte, bool) {
 		return nil, false
 	}
 
-	freq := filepath.Join(webRoot, cleanPath)
-	realPath, err := filepath.Abs(freq)
+	root, err := os.OpenRoot(webRoot)
 	if err != nil {
 		return nil, false
 	}
+	defer root.Close()
 
-	realWebRoot, errRoot := filepath.Abs(webRoot)
-	if errRoot != nil {
-		return nil, false
-	}
-
-	isChild := strings.HasPrefix(realPath, realWebRoot+string(os.PathSeparator))
-	if !isChild && realPath != realWebRoot {
-		return nil, false
-	}
-
-	fi, statErr := os.Stat(realPath)
+	fi, statErr := root.Stat(cleanPath)
 	if statErr != nil || fi.IsDir() {
 		return nil, false
 	}
 
-	content, readErr := os.ReadFile(realPath)
+	content, readErr := root.ReadFile(cleanPath)
 	if readErr != nil {
 		return nil, false
 	}
