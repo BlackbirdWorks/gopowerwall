@@ -20,10 +20,10 @@ func (s *Server) respond(ctx context.Context, w http.ResponseWriter, reqPath, co
 			reqPath == "/soe" || reqPath == "/vitals" || reqPath == "/strings"
 		if isAPI {
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("null"))
+			_, _ = io.WriteString(w, "null")
 		} else {
 			w.WriteHeader(http.StatusGatewayTimeout)
-			_, _ = w.Write([]byte("TIMEOUT!"))
+			_, _ = io.WriteString(w, "TIMEOUT!")
 		}
 
 		return
@@ -34,7 +34,7 @@ func (s *Server) respond(ctx context.Context, w http.ResponseWriter, reqPath, co
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 	//nolint:gosec // Content-Type is explicitly set and responses are serialized JSON or static templates
-	_, _ = w.Write([]byte(body))
+	_, _ = io.WriteString(w, body)
 }
 
 func (s *Server) lookupPWFacingSensor(ctx context.Context, sub string) (any, bool) {

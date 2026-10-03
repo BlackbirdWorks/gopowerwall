@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"maps"
 	"net/http"
 	"runtime/metrics"
 	"time"
 
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
+	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 var (
@@ -24,6 +26,7 @@ const (
 	secondsPerHour   = 3600
 	secondsPerMinute = 60
 	kiloByte         = 1024
+	keyVint          = "vint"
 )
 
 func (s *Server) handleCoreAPIRoutes(ctx context.Context, w http.ResponseWriter, reqPath string) bool {
@@ -124,6 +127,11 @@ func (s *Server) handleSystemManagementRoutes(ctx context.Context, w http.Respon
 
 		return true
 
+	case "/metrics":
+		s.handleMetrics(ctx, w)
+
+		return true
+
 	case "/help":
 		s.handleHelp(ctx, w)
 
@@ -141,18 +149,26 @@ func (s *Server) handleSystemManagementRoutes(ctx context.Context, w http.Respon
 
 func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
+	if s.PW == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			keyVersion: "SolarOnly",
+			keyVint:    0,
+		})
+
+		return
+	}
 	verStr, err := s.PW.Version(ctx)
 	if err != nil || verStr == "" {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			keyVersion: "SolarOnly",
-			"vint":     0,
+			keyVint:    0,
 		})
 
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		keyVersion: verStr,
-		"vint":     version.ParseVersion(verStr),
+		keyVint:    version.ParseVersion(verStr),
 	})
 }
 
@@ -183,11 +199,21 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 		memKB = sample[0].Value.Uint64() / kiloByte
 	}
 
-	siteName, siteNameErr := s.PW.SiteName(ctx)
+	var mode powerwall.ConnectionMode
+	var isCloud, isFleetAPI, isTEDAPI bool
+	var siteName any
+	if s.PW != nil {
+		mode = s.PW.Mode()
+		isCloud = s.PW.IsCloud()
+		isFleetAPI = s.PW.IsFleetAPI()
+		isTEDAPI = s.PW.IsTEDAPI()
+		sn, snErr := s.PW.SiteName(ctx)
+		siteName = orNil(sn, snErr)
+	}
 
 	stats := map[string]any{
 		"pypowerwall": fmt.Sprintf("%s Proxy %s", version.Version, Build),
-		"mode":        s.PW.Mode(),
+		"mode":        mode,
 		"gets":        gets,
 		"posts":       posts,
 		"errors":      errs,
@@ -198,10 +224,10 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 		"clear":       clearTS,
 		"uptime":      uptime,
 		"mem":         memKB,
-		keySiteName:   orNil(siteName, siteNameErr),
-		"cloudmode":   s.PW.IsCloud(),
-		"fleetapi":    s.PW.IsFleetAPI(),
-		"tedapi":      s.PW.IsTEDAPI(),
+		keySiteName:   siteName,
+		"cloudmode":   isCloud,
+		"fleetapi":    isFleetAPI,
+		"tedapi":      isTEDAPI,
 		"config": map[string]any{
 			"PW_BIND_ADDRESS":        s.Config.BindAddress,
 			"PW_HOST":                s.Config.Host,
@@ -268,11 +294,218 @@ func (s *Server) handleHealth(_ context.Context, w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(health)
 }
 
-func (s *Server) handleHelp(_ context.Context, w http.ResponseWriter) {
+type helpData struct {
+	mode     string
+	uptime   string
+	solar    float64
+	battery  float64
+	grid     float64
+	load     float64
+	soe      float64
+	gets     int
+	posts    int
+	errs     int
+	timeouts int
+}
+
+func (s *Server) collectHelpData(ctx context.Context) helpData {
+	s.statsMu.RLock()
+	delta := int(time.Since(s.StartTime).Seconds())
+	uptime := fmt.Sprintf(
+		"%02d:%02d:%02d",
+		delta/secondsPerHour,
+		(delta%secondsPerHour)/secondsPerMinute,
+		delta%secondsPerMinute,
+	)
+	gets := s.statsGets
+	posts := s.statsPost
+	errs := s.statsErr
+	timeouts := s.statsTime
+	s.statsMu.RUnlock()
+
+	mode := "unknown"
+	var solar, battery, grid, load, soe float64
+	if s.PW != nil {
+		mode = string(s.PW.Mode())
+		snap := s.PW.Snapshot(ctx)
+		solar = snap.Solar
+		battery = snap.Battery
+		grid = snap.Grid
+		load = snap.Home
+		soe = snap.BatteryLevel
+	}
+
+	return helpData{
+		solar:    solar,
+		battery:  battery,
+		grid:     grid,
+		load:     load,
+		soe:      soe,
+		gets:     gets,
+		posts:    posts,
+		errs:     errs,
+		timeouts: timeouts,
+		mode:     mode,
+		uptime:   uptime,
+	}
+}
+
+const helpHTMLTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pyPowerwall Proxy</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f8fafc; --card-bg: #ffffff; --text: #0f172a; --text-muted: #64748b;
+  --border: #e2e8f0; --accent: #2563eb; --green: #16a34a; --amber: #d97706;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f172a; --card-bg: #1e293b; --text: #f8fafc; --text-muted: #94a3b8;
+    --border: #334155; --accent: #3b82f6; --green: #22c55e; --amber: #f59e0b;
+  }
+}
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 24px;
+  line-height: 1.5;
+}
+.container { max-width: 960px; margin: 0 auto; }
+header { margin-bottom: 24px; }
+h1 { margin: 0 0 8px 0; font-size: 1.75rem; }
+.badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+}
+.card-title {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.card-value { font-size: 1.75rem; font-weight: 700; }
+.links a {
+  display: inline-block;
+  margin: 4px 8px 4px 0;
+  padding: 6px 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+.links a:hover { border-color: var(--accent); }
+footer { margin-top: 32px; font-size: 0.85rem; color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+  <h1>pyPowerwall Proxy <span class="badge">%s</span></h1>
+  <p style="color:var(--text-muted);margin:0;">
+    Version %s &bull; Mode: <strong>%s</strong> &bull; Uptime: <strong>%s</strong>
+  </p>
+</header>
+
+<div class="grid">
+  <div class="card">
+    <div class="card-title">Solar</div>
+    <div class="card-value" style="color:var(--amber);">%.1f W</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Battery</div>
+    <div class="card-value" style="color:var(--green);">%.1f W (%.1f%%)</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Grid</div>
+    <div class="card-value">%.1f W</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Home Load</div>
+    <div class="card-value">%.1f W</div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:24px;">
+  <div class="card-title">Proxy Statistics</div>
+  <p style="margin:4px 0;">
+    <strong>Gets:</strong> %d &bull;
+    <strong>Posts:</strong> %d &bull;
+    <strong>Errors:</strong> %d &bull;
+    <strong>Timeouts:</strong> %d
+  </p>
+</div>
+
+<div class="card links">
+  <div class="card-title">Endpoints</div>
+  <a href="/aggregates">/aggregates</a>
+  <a href="/soe">/soe</a>
+  <a href="/vitals">/vitals</a>
+  <a href="/pod">/pod</a>
+  <a href="/freq">/freq</a>
+  <a href="/metrics">/metrics (Prometheus)</a>
+  <a href="/stats">/stats</a>
+  <a href="/health">/health</a>
+  <a href="/csv">/csv</a>
+  <a href="/version">/version</a>
+</div>
+
+<footer>
+  <p>
+    <a href="https://github.com/jasonacox/pypowerwall" style="color:var(--accent);">
+      Documentation & API Reference
+    </a>
+  </p>
+</footer>
+</div>
+</body>
+</html>`
+
+func renderHelpHTML(w io.Writer, d helpData) {
+	fmt.Fprintf(w, helpHTMLTemplate,
+		Build,
+		html.EscapeString(version.Version),
+		html.EscapeString(d.mode),
+		html.EscapeString(d.uptime),
+		d.solar,
+		d.battery,
+		d.soe,
+		d.grid,
+		d.load,
+		d.gets,
+		d.posts,
+		d.errs,
+		d.timeouts,
+	)
+}
+
+func (s *Server) handleHelp(ctx context.Context, w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<html><head><title>pyPowerwall Proxy</title></head><body>
-<h1>pyPowerwall [%s] Proxy [%s]</h1>
-<p>Proxy running in mode: %s</p>
-<p><a href="https://github.com/jasonacox/pypowerwall">Documentation & API Reference</a></p>
-</body></html>`, html.EscapeString(version.Version), Build, html.EscapeString(string(s.PW.Mode())))
+	data := s.collectHelpData(ctx)
+	renderHelpHTML(w, data)
 }

@@ -637,8 +637,25 @@ func (p *PyPowerwallTEDAPI) Authenticate(ctx context.Context) error {
 	return nil
 }
 
+// Close releases Client resources.
+func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.cache != nil {
+		c.cache.Close()
+	}
+	if c.client != nil {
+		c.client.CloseIdleConnections()
+	}
+}
+
 // Close closes connections.
 func (p *PyPowerwallTEDAPI) Close(_ context.Context) error {
+	if p.client != nil {
+		p.client.Close()
+	}
+
 	return nil
 }
 
