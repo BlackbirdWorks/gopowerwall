@@ -263,8 +263,14 @@ func (p *Powerwall) Close(ctx context.Context) error {
 		_ = p.tedapi.Close(ctx)
 		p.tedapi = nil
 	}
-	p.cloud = nil
-	p.fleetapi = nil
+	if p.cloud != nil {
+		_ = p.cloud.Close(ctx)
+		p.cloud = nil
+	}
+	if p.fleetapi != nil {
+		_ = p.fleetapi.Close(ctx)
+		p.fleetapi = nil
+	}
 
 	return nil
 }

@@ -12,8 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/cache"
+	"github.com/blackbirdworks/gopowerwall/pkgs/compress"
 	"github.com/blackbirdworks/gopowerwall/pkgs/influx"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/powerwall"
@@ -112,15 +115,18 @@ func isDisabled(reqPath string) bool {
 type Server struct {
 	StartTime     time.Time
 	ClearTime     time.Time
-	statsURI      map[string]int
-	RateLimiter   *cache.RateLimiter
-	EndpointStats *EndpointStatsTracker
+	pwGroup       singleflight.Group
+	routeGroup    singleflight.Group
 	Health        *ConnectionHealth
+	compressor    *compress.Compressor
 	PW            *powerwall.Powerwall
 	PerfCache     *cache.PerformanceCache
 	DegradedCache *cache.DegradationCache
 	InfluxClient  *influx.Client
 	localGWClient *http.Client
+	statsURI      map[string]int
+	RateLimiter   *cache.RateLimiter
+	EndpointStats *EndpointStatsTracker
 	WebRoot       string
 	Config        Config
 	statsTime     int
@@ -188,6 +194,7 @@ func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server
 		RateLimiter:   cache.NewRateLimiter(),
 		InfluxClient:  influxClient,
 		localGWClient: localGWClient,
+		compressor:    compress.NewCompressor(),
 		StartTime:     now,
 		ClearTime:     now,
 		statsURI:      make(map[string]int),
@@ -239,7 +246,14 @@ func (s *Server) safePWCall(
 		}
 	}
 
-	res, err := fn()
+	res, err, _ := s.pwGroup.Do(endpoint, func() (any, error) {
+		r, e := fn()
+		if e != nil || r == nil {
+			return nil, e
+		}
+
+		return r, nil
+	})
 	success := err == nil && res != nil
 	s.EndpointStats.Record(endpoint, success)
 
@@ -262,6 +276,35 @@ func (s *Server) safePWCall(
 	return nil, false
 }
 
+func (s *Server) fetchRoute(
+	ctx context.Context,
+	endpoint string,
+	generator func(context.Context) (string, error),
+) (any, error) {
+	if s.Config.CacheExpire > 0 {
+		if val, ok := s.PerfCache.Get(endpoint); ok {
+			return val, nil
+		}
+	}
+
+	val, genErr := generator(ctx)
+	if genErr != nil || val == "" {
+		if s.Config.GracefulDegradation {
+			if degVal, ok, _ := s.DegradedCache.Get(endpoint); ok {
+				return degVal, nil
+			}
+		}
+
+		return "", genErr
+	}
+
+	if s.Config.CacheExpire > 0 {
+		s.PerfCache.Set(endpoint, val)
+	}
+
+	return val, nil
+}
+
 func (s *Server) cachedRouteHandler(
 	ctx context.Context,
 	endpoint string,
@@ -273,22 +316,15 @@ func (s *Server) cachedRouteHandler(
 		}
 	}
 
-	val, err := generator(ctx)
-	if err != nil || val == "" {
-		if s.Config.GracefulDegradation {
-			if degVal, ok, _ := s.DegradedCache.Get(endpoint); ok {
-				return degVal, true
-			}
-		}
+	res, err, _ := s.routeGroup.Do(endpoint, func() (any, error) {
+		return s.fetchRoute(ctx, endpoint, generator)
+	})
 
-		return "", false
+	if str, ok := res.(string); ok && str != "" && err == nil {
+		return str, true
 	}
 
-	if s.Config.CacheExpire > 0 {
-		s.PerfCache.Set(endpoint, val)
-	}
-
-	return val, true
+	return "", false
 }
 
 // ServeHTTP dispatches incoming HTTP requests to handlers.
@@ -329,7 +365,7 @@ func (s *Server) Start(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:              addr,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
-		Handler:           s,
+		Handler:           s.compressor.Handler(s),
 		ReadHeaderTimeout: defaultServerTimeout,
 		ReadTimeout:       defaultServerTimeout,
 		WriteTimeout:      defaultServerTimeout,
@@ -358,11 +394,29 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultServerTimeout)
 		defer cancel()
+		defer func() { _ = s.Close(shutdownCtx) }()
 
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		_ = s.Close(context.Background())
+
 		return err
 	}
+}
+
+// Close releases resources held by the Server.
+func (s *Server) Close(ctx context.Context) error {
+	if s.PerfCache != nil {
+		s.PerfCache.Close()
+	}
+	if s.localGWClient != nil {
+		s.localGWClient.CloseIdleConnections()
+	}
+	if s.PW != nil {
+		_ = s.PW.Close(ctx)
+	}
+
+	return nil
 }
 
 func (s *Server) runInfluxExporter(ctx context.Context) {

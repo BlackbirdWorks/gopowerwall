@@ -302,6 +302,16 @@ func toBackupReservePercent(v any) (int, bool) {
 
 // Close closes any open sessions.
 func (f *Client) Close(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.cache != nil {
+		f.cache.Close()
+	}
+	if f.client != nil {
+		f.client.CloseIdleConnections()
+	}
+
 	return nil
 }
 

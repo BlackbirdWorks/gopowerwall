@@ -297,6 +297,12 @@ func (l *Client) Close(ctx context.Context) error {
 	if l.tedapiClient != nil {
 		_ = l.tedapiClient.Close(ctx)
 	}
+	if l.cache != nil {
+		l.cache.Close()
+	}
+	if l.client != nil {
+		l.client.CloseIdleConnections()
+	}
 
 	return nil
 }

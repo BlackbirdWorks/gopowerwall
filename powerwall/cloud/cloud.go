@@ -400,6 +400,16 @@ func (c *Client) findEnergySite(ctx context.Context) (string, error) {
 
 // Close closes any open sessions.
 func (c *Client) Close(_ context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.cache != nil {
+		c.cache.Close()
+	}
+	if c.client != nil {
+		c.client.CloseIdleConnections()
+	}
+
 	return nil
 }
 
