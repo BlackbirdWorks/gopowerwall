@@ -71,6 +71,15 @@ func TestTrivialCommands(t *testing.T) {
 				return cmd.Run(&Context{Context: t.Context()})
 			},
 		},
+		{
+			name: "register command with authpath",
+			run: func(t *testing.T) error {
+				t.Helper()
+				cmd := RegisterCmd{AuthPath: "/custom/path"}
+
+				return cmd.Run(&Context{Context: t.Context()})
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

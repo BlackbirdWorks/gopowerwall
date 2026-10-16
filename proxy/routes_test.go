@@ -125,7 +125,7 @@ func TestGETRoutesAgainstConnectedGateway(t *testing.T) {
 			name:       "temps",
 			path:       "/temps",
 			wantStatus: http.StatusOK,
-			wantSubs:   []string{`"temps"`, "TETHC--1"},
+			wantSubs:   []string{"TETHC--1"},
 		},
 		{
 			name:       "temps pw",

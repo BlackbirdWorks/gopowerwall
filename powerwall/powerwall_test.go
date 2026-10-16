@@ -30,6 +30,7 @@ func TestPowerwallDisconnectedDegradation(t *testing.T) {
 		powerwall.WithHost("127.0.0.1:9"), // non-routable port: nothing listens here
 		powerwall.WithPassword("test"),
 		powerwall.WithCloudMode(false),
+		powerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
 	)
 	var connectErr *powerwall.ConnectError
 	require.ErrorAs(t, err, &connectErr)

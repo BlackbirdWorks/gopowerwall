@@ -717,7 +717,8 @@ func TestPowerwallStatusAndViews(t *testing.T) {
 				t.Helper()
 				temps := pw.Temps(ctx)
 				require.NotEmpty(t, temps.Temps)
-				assert.InDelta(t, 22.5, temps.Temps["TETHC--123"], 0.001)
+				require.NotNil(t, temps.Temps["TETHC--123"])
+				assert.InDelta(t, 22.5, *temps.Temps["TETHC--123"], 0.001)
 			},
 		},
 		{

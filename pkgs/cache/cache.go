@@ -129,6 +129,12 @@ func (c *ResponseCache) Invalidate(api string) {
 	}
 }
 
+// Delete removes a key and its raw representation from the cache.
+func (c *ResponseCache) Delete(key string) {
+	c.cache.Delete(key)
+	c.cache.Delete(RawKey(key))
+}
+
 // Clear clears all cache entries.
 func (c *ResponseCache) Clear() {
 	c.cache.DeleteAll()

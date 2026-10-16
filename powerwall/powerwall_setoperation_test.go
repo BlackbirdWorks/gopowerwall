@@ -1,6 +1,7 @@
 package powerwall_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -22,12 +23,13 @@ import (
 // live values after seeding the poll cache, proving a forced re-read
 // observes the CURRENT value rather than a stale cached one.
 type operationGateway struct {
-	realMode string
-	posts    []map[string]any
-	reserve  float64
-	getCount int
-	mu       sync.Mutex
-	failGet  bool
+	realMode    string
+	posts       []map[string]any
+	reserve     float64
+	getCount    int
+	mu          sync.Mutex
+	failGet     bool
+	nullReserve bool
 }
 
 // newOperationGateway builds a gateway seeded with the reserve/mode values
@@ -41,6 +43,12 @@ func (g *operationGateway) setState(reserve float64, realMode string) {
 	defer g.mu.Unlock()
 	g.reserve = reserve
 	g.realMode = realMode
+}
+
+func (g *operationGateway) setNullReserve(null bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.nullReserve = null
 }
 
 func (g *operationGateway) setFailGet(fail bool) {
@@ -72,6 +80,7 @@ func (g *operationGateway) handleGetOperation(w http.ResponseWriter) {
 	fail := g.failGet
 	reserve := g.reserve
 	mode := g.realMode
+	nullReserve := g.nullReserve
 	g.mu.Unlock()
 
 	if fail {
@@ -80,10 +89,15 @@ func (g *operationGateway) handleGetOperation(w http.ResponseWriter) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	body, _ := json.Marshal(map[string]any{
-		"backup_reserve_percent": reserve,
-		"real_mode":              mode,
-	})
+	payload := map[string]any{
+		"real_mode": mode,
+	}
+	if !nullReserve {
+		payload["backup_reserve_percent"] = reserve
+	} else {
+		payload["backup_reserve_percent"] = nil
+	}
+	body, _ := json.Marshal(payload)
 	_, _ = w.Write(body)
 }
 
@@ -284,10 +298,12 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 			name: "cloud mode",
 			connect: func(t *testing.T) *powerwall.Powerwall {
 				t.Helper()
+				authDir := t.TempDir()
 				pw, err := powerwall.New(
 					t.Context(),
 					powerwall.WithCloudMode(true),
-					powerwall.WithAuthPath(t.TempDir()),
+					powerwall.WithAuthPath(authDir),
+					powerwall.WithCacheFile(filepath.Join(authDir, ".powerwall")),
 				)
 				// No auth file exists in this fresh temp dir, so the
 				// connection attempt itself fails; New still returns a
@@ -303,10 +319,12 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 			name: "fleetapi mode",
 			connect: func(t *testing.T) *powerwall.Powerwall {
 				t.Helper()
+				authDir := t.TempDir()
 				pw, err := powerwall.New(
 					t.Context(),
 					powerwall.WithFleetAPI(true),
-					powerwall.WithAuthPath(t.TempDir()),
+					powerwall.WithAuthPath(authDir),
+					powerwall.WithCacheFile(filepath.Join(authDir, ".powerwall")),
 				)
 				require.Error(t, err)
 				require.False(t, pw.IsLocal())
@@ -323,6 +341,72 @@ func TestSetOperationNonLocalModeSkipsBackfill(t *testing.T) {
 			_, err := pw.SetReserve(t.Context(), 30)
 			require.ErrorIs(t, err, powerwall.ErrSetOperationFailed)
 			assert.NotErrorIs(t, err, powerwall.ErrOperationBackfillFailed)
+		})
+	}
+}
+
+func TestSolarOnlyReserveHandling(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		run  func(t *testing.T, ctx context.Context, pw *powerwall.Powerwall)
+		name string
+	}
+
+	gw := newOperationGateway()
+	gw.setNullReserve(true)
+	ts := httptest.NewTLSServer(gw.handler())
+	t.Cleanup(ts.Close)
+
+	pw, err := powerwall.New(
+		t.Context(),
+		powerwall.WithHost(ts.Listener.Addr().String()),
+		powerwall.WithPassword("password"),
+		powerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
+	)
+	require.NoError(t, err)
+
+	for _, tc := range []testCase{
+		{
+			name: "GetReserve returns ErrFieldMissing on null reserve",
+			run: func(t *testing.T, ctx context.Context, pw *powerwall.Powerwall) {
+				t.Helper()
+				val, getErr := pw.GetReserve(ctx)
+				require.ErrorIs(t, getErr, powerwall.ErrFieldMissing)
+				assert.Zero(t, val)
+			},
+		},
+		{
+			name: "GetReserveScaled returns ErrFieldMissing on null reserve",
+			run: func(t *testing.T, ctx context.Context, pw *powerwall.Powerwall) {
+				t.Helper()
+				val, getErr := pw.GetReserveScaled(ctx)
+				require.ErrorIs(t, getErr, powerwall.ErrFieldMissing)
+				assert.Zero(t, val)
+			},
+		},
+		{
+			name: "GetReserveForced returns ErrFieldMissing on null reserve",
+			run: func(t *testing.T, ctx context.Context, pw *powerwall.Powerwall) {
+				t.Helper()
+				val, getErr := pw.GetReserveForced(ctx)
+				require.ErrorIs(t, getErr, powerwall.ErrFieldMissing)
+				assert.Zero(t, val)
+			},
+		},
+		{
+			name: "Operation returns nil BackupReservePercent",
+			run: func(t *testing.T, ctx context.Context, pw *powerwall.Powerwall) {
+				t.Helper()
+				op, opErr := pw.Operation(ctx)
+				require.NoError(t, opErr)
+				assert.Nil(t, op.BackupReservePercent)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.run(t, t.Context(), pw)
 		})
 	}
 }

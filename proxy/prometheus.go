@@ -91,7 +91,9 @@ func writeTemperatureMetrics(ctx context.Context, b *strings.Builder, pw *powerw
 	b.WriteString("# HELP powerwall_temperature_celsius Temperature readings in degrees Celsius.\n")
 	b.WriteString("# TYPE powerwall_temperature_celsius gauge\n")
 	for _, k := range slices.Sorted(maps.Keys(temps)) {
-		fmt.Fprintf(b, "powerwall_temperature_celsius{device=%q} %.2f\n", k, temps[k])
+		if val := temps[k]; val != nil {
+			fmt.Fprintf(b, "powerwall_temperature_celsius{device=%q} %.2f\n", k, *val)
+		}
 	}
 	b.WriteString("\n")
 }

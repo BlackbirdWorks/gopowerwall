@@ -180,3 +180,20 @@ func (p *Powerwall) Post(ctx context.Context, api string, payload any, din ...st
 
 	return res
 }
+
+// GetTariff returns the site's utility tariff (available in Cloud and FleetAPI modes,
+// returning an empty mock map in TEDAPI mode and nil in Local mode).
+func (p *Powerwall) GetTariff(ctx context.Context, opts ...PollOption) any {
+	return p.Poll(ctx, "/api/tesla/tariff_rate", opts...)
+}
+
+// SetTariff updates the site's Time-of-Use tariff settings (available in Cloud and
+// FleetAPI modes).
+func (p *Powerwall) SetTariff(ctx context.Context, touSettings any) (any, error) {
+	res := p.Post(ctx, "/api/tesla/time_of_use_settings", map[string]any{"tou_settings": touSettings})
+	if res == nil {
+		return nil, ErrUnsupported
+	}
+
+	return res, nil
+}

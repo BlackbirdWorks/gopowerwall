@@ -5,16 +5,21 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/powerwall"
 )
 
 var (
-	ErrV1rMissingGwPwd  = errors.New("-v1r requires -gw_pwd <gateway_password>")
-	ErrV1rMissingHost   = errors.New("-v1r requires -host <gateway_ip>")
-	ErrTedapiMissingGw  = errors.New("-tedapi requires -gw_pwd <gateway_password>")
-	ErrLocalMissingHost = errors.New("-local requires -host <gateway_ip>")
+	ErrV1rMissingGwPwd              = errors.New("-v1r requires -gw_pwd <gateway_password>")
+	ErrV1rMissingHost               = errors.New("-v1r requires -host <gateway_ip>")
+	ErrTedapiMissingGw              = errors.New("-tedapi requires -gw_pwd <gateway_password>")
+	ErrLocalMissingHost             = errors.New("-local requires -host <gateway_ip>")
+	ErrTedapiOptsRequireTedapiOrV1r = errors.New("-tedapi_api_version and -tedapi_auth_mode require -tedapi or -v1r")
+	ErrTedapiAuthModeRequiresTedapi = errors.New(
+		"-tedapi_auth_mode applies to -tedapi only (v1r signs with its RSA key)",
+	)
 )
 
 // ConnectionFlags holds shared connection flags for commands interacting with a Powerwall.
@@ -28,6 +33,10 @@ type ConnectionFlags struct {
 	RsaKeyPath string `env:"PW_RSA_KEY_PATH" help:"RSA private key PEM path [v1r]" name:"rsa_key_path"`
 
 	AuthPath string `env:"PW_AUTH_PATH" help:"Auth path" name:"authpath"`
+
+	TEDAPIApiVersion string `env:"PW_TEDAPI_API_VERSION" help:"TEDAPI query set [tedapi/v1r]" name:"tedapi_api_version"`
+
+	TEDAPIAuthMode string `env:"PW_TEDAPI_AUTH_MODE" help:"TEDAPI auth mode [tedapi]" name:"tedapi_auth_mode"`
 
 	workDir string
 
@@ -68,30 +77,21 @@ func (c *ConnectionFlags) WithLogger(ctx context.Context) context.Context {
 	return logger.Into(ctx, logger.New(os.Stderr, logger.LevelFor(c.Debug)))
 }
 
-// BuildPowerwall constructs a Powerwall client based on flags.
-//
-// A non-nil error here always means the flags themselves were invalid -
-// a bad mode combination (see resolveModeOptions) or a [powerwall.Config]
-// validation failure. A failed *connection* attempt is deliberately not
-// surfaced as an error: [powerwall.New] wraps that case in a
-// [powerwall.ConnectError], but every command built on BuildPowerwall
-// already reports "not connected" itself, with its own message, after
-// checking [powerwall.Powerwall.IsConnected] - see GetCmd.Run and
-// SetCmd.Run. Propagating New's ConnectError here as well would just
-// duplicate that reporting with a second, differently-worded error, so
-// BuildPowerwall discards it and returns the constructed (but possibly
-// disconnected) *Powerwall with a nil error instead, preserving the
-// existing "build, then check IsConnected" flow.
-func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*powerwall.Powerwall, error) {
+func (c *ConnectionFlags) validateTedapiFlags() error {
+	if (c.TEDAPIApiVersion != "" || c.TEDAPIAuthMode != "") && (!c.TEDAPI && !c.V1r) {
+		return ErrTedapiOptsRequireTedapiOrV1r
+	}
+	if c.TEDAPIAuthMode != "" && c.V1r {
+		return ErrTedapiAuthModeRequiresTedapi
+	}
+
+	return nil
+}
+
+func (c *ConnectionFlags) baseOptions() []powerwall.Option {
 	var opts []powerwall.Option
 
 	if c.AuthPath != "" {
-		// The proxy server (see proxy.DefaultConfig) already relocates its
-		// session-cache file under AuthPath when one is configured; the CLI
-		// commands built through BuildPowerwall did not, so -authpath had no
-		// effect on where a local-mode connection wrote its session cache -
-		// it always fell back to the process's working directory. Mirror the
-		// proxy's behaviour so -authpath consistently controls both.
 		opts = append(opts,
 			powerwall.WithAuthPath(c.AuthPath),
 			powerwall.WithCacheFile(filepath.Join(c.AuthPath, ".powerwall")),
@@ -109,6 +109,36 @@ func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*powerwall.Powerw
 	if rsaKey := c.resolveRSAKey(); rsaKey != "" {
 		opts = append(opts, powerwall.WithRSAKeyPath(rsaKey))
 	}
+	if c.TEDAPIApiVersion != "" {
+		opts = append(opts, powerwall.WithTEDAPIApiVersion(powerwall.CoerceTEDAPIApiVersion(c.TEDAPIApiVersion)))
+	}
+	if c.TEDAPIAuthMode != "" {
+		opts = append(opts, powerwall.WithTEDAPIAuthMode(powerwall.AuthMode(strings.ToLower(c.TEDAPIAuthMode))))
+	}
+
+	return opts
+}
+
+// BuildPowerwall constructs a Powerwall client based on flags.
+//
+// A non-nil error here always means the flags themselves were invalid -
+// a bad mode combination (see resolveModeOptions) or a [powerwall.Config]
+// validation failure. A failed *connection* attempt is deliberately not
+// surfaced as an error: [powerwall.New] wraps that case in a
+// [powerwall.ConnectError], but every command built on BuildPowerwall
+// already reports "not connected" itself, with its own message, after
+// checking [powerwall.Powerwall.IsConnected] - see GetCmd.Run and
+// SetCmd.Run. Propagating New's ConnectError here as well would just
+// duplicate that reporting with a second, differently-worded error, so
+// BuildPowerwall discards it and returns the constructed (but possibly
+// disconnected) *Powerwall with a nil error instead, preserving the
+// existing "build, then check IsConnected" flow.
+func (c *ConnectionFlags) BuildPowerwall(ctx context.Context) (*powerwall.Powerwall, error) {
+	if err := c.validateTedapiFlags(); err != nil {
+		return nil, err
+	}
+
+	opts := c.baseOptions()
 
 	modeOpts, err := c.resolveModeOptions()
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 	"github.com/blackbirdworks/gopowerwall/pkgs/version"
 	"github.com/blackbirdworks/gopowerwall/powerwall"
@@ -79,6 +80,8 @@ func collectMetrics(ctx context.Context, pw *powerwall.Powerwall) map[string]any
 		gridCharging   any
 		gridExportMode any
 		timeRemaining  any
+		temps          models.PowerwallTemps
+		fans           map[string]models.FanSpeedEntry
 	)
 
 	wg.Go(func() { siteName = lookup.OrNil(pw.SiteName(ctx)) })
@@ -103,9 +106,11 @@ func collectMetrics(ctx context.Context, pw *powerwall.Powerwall) map[string]any
 		tr, err := pw.GetTimeRemaining(ctx)
 		timeRemaining = lookup.OrNil(tr.Hours(), err)
 	})
+	wg.Go(func() { temps = pw.Temps(ctx) })
+	wg.Go(func() { fans = pw.GetFanSpeeds(ctx) })
 	wg.Wait()
 
-	return map[string]any{
+	out := map[string]any{
 		"site":             siteName,
 		"site_id":          siteName,
 		"din":              din,
@@ -122,6 +127,45 @@ func collectMetrics(ctx context.Context, pw *powerwall.Powerwall) map[string]any
 		"grid_export_mode": gridExportMode,
 		"time_remaining":   timeRemaining,
 	}
+
+	if len(temps.Temps) > 0 {
+		tm := make(map[string]any, len(temps.Temps))
+		for k, v := range temps.Temps {
+			tm[k] = v
+		}
+		out["temps"] = tm
+	}
+
+	if len(fans) > 0 {
+		fm := make(map[string]any, len(fans))
+		for k, entry := range fans {
+			em := fanSpeedEntryToMap(entry)
+			if len(em) > 0 {
+				fm[k] = em
+			}
+		}
+		if len(fm) > 0 {
+			out["fans"] = fm
+		}
+	}
+
+	return out
+}
+
+func fanSpeedEntryToMap(entry models.FanSpeedEntry) map[string]any {
+	m := make(map[string]any)
+	if entry.ActualRPM != nil || entry.TargetRPM != nil {
+		m["PVAC_Fan_Speed_Actual_RPM"] = entry.ActualRPM
+		m["PVAC_Fan_Speed_Target_RPM"] = entry.TargetRPM
+	}
+	if entry.FanSpeedA != nil || entry.FanSpeedB != nil || entry.FanDutyA != nil || entry.FanDutyB != nil {
+		m["PCH_FanDuty_A"] = entry.FanDutyA
+		m["PCH_FanDuty_B"] = entry.FanDutyB
+		m["PCH_FanSpeed_A"] = entry.FanSpeedA
+		m["PCH_FanSpeed_B"] = entry.FanSpeedB
+	}
+
+	return m
 }
 
 func printJSON(w io.Writer, out map[string]any) error {
@@ -134,12 +178,27 @@ func printJSON(w io.Writer, out map[string]any) error {
 	return nil
 }
 
+func flatten(data map[string]any, prefix string) map[string]any {
+	flat := make(map[string]any)
+	for k, v := range data {
+		fullKey := prefix + k
+		if m, ok := v.(map[string]any); ok {
+			maps.Copy(flat, flatten(m, fullKey+"."))
+		} else {
+			flat[fullKey] = v
+		}
+	}
+
+	return flat
+}
+
 func printCSV(w io.Writer, out map[string]any) error {
-	keys := slices.Sorted(maps.Keys(out))
+	flat := flatten(out, "")
+	keys := slices.Sorted(maps.Keys(flat))
 	fmt.Fprintln(w, strings.Join(keys, ","))
 	vals := make([]string, 0, len(keys))
 	for _, k := range keys {
-		vals = append(vals, formatMetricValue(out[k]))
+		vals = append(vals, formatMetricValue(flat[k]))
 	}
 	fmt.Fprintln(w, strings.Join(vals, ","))
 
@@ -151,6 +210,8 @@ func printText(w io.Writer, out map[string]any) error {
 		"site_id": "Site ID",
 		"din":     "DIN",
 		"soc":     "Battery Level",
+		"temps":   "Temperatures",
+		"fans":    "Fans",
 	}
 	keys := slices.Sorted(maps.Keys(out))
 	for _, item := range keys {
@@ -158,7 +219,27 @@ func printText(w io.Writer, out map[string]any) error {
 		if name == "" {
 			name = strings.ReplaceAll(item, "_", " ")
 		}
-		fmt.Fprintf(w, "  %-18s%s\n", name, formatMetricValue(out[item]))
+		val := out[item]
+		if m, ok := val.(map[string]any); ok {
+			fmt.Fprintf(w, "  %s\n", name)
+			subKeys := slices.Sorted(maps.Keys(m))
+			for _, subKey := range subKeys {
+				reading := m[subKey]
+				if subM, isSubM := reading.(map[string]any); isSubM {
+					readingSigKeys := slices.Sorted(maps.Keys(subM))
+					parts := make([]string, 0, len(readingSigKeys))
+					for _, rk := range readingSigKeys {
+						parts = append(parts, fmt.Sprintf("%s=%s", rk, formatMetricValue(subM[rk])))
+					}
+					fmt.Fprintf(w, "    %-38s%s\n", subKey, strings.Join(parts, ", "))
+				} else {
+					fmt.Fprintf(w, "    %-38s%s\n", subKey, formatMetricValue(reading))
+				}
+			}
+
+			continue
+		}
+		fmt.Fprintf(w, "  %-18s%s\n", name, formatMetricValue(val))
 	}
 	fmt.Fprintln(w)
 
