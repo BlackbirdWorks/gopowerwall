@@ -12,6 +12,8 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
 
+// SiteName returns the configured site name, or an error if it could not be
+// retrieved.
 func (p *Powerwall) SiteName(ctx context.Context) (string, error) {
 	data, err := p.pollInternal(ctx, "/api/site_info/site_name", false, false, false)
 	if err != nil {

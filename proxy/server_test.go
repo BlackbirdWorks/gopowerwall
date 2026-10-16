@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -277,6 +278,46 @@ func TestDegradedCacheSerialization(t *testing.T) {
 			got, ok, _ := srv.DegradedCache.Get("/test-ep")
 			require.True(t, ok)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestHealthNilPowerwall(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name     string
+		wantMode string
+		nilPW    bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:     "nil PW does not panic and serializes empty mode",
+			nilPW:    true,
+			wantMode: `"mode":""`,
+		},
+		{
+			name:     "non-nil PW includes mode",
+			nilPW:    false,
+			wantMode: `"mode":"local"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := proxy.NewServer(t.Context(), baseTestConfig(), newDisconnectedPowerwall(t))
+			if tc.nilPW {
+				srv.PW = nil
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "/health", nil)
+			require.NoError(t, err)
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.wantMode)
 		})
 	}
 }

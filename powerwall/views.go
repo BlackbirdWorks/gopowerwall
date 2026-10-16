@@ -13,6 +13,9 @@ import (
 	"github.com/blackbirdworks/gopowerwall/models"
 )
 
+// AggregatesOption customizes a single call to [Powerwall.Aggregates] (and,
+// transitively, [Powerwall.Snapshot], which builds on the same corrections).
+// Build one with [WithSiteZeroThreshold] or [WithNegativeSolarCorrection].
 type AggregatesOption func(*aggregatesConfig)
 
 type aggregatesConfig struct {

@@ -40,7 +40,7 @@ const rawKeyPrefix = "raw\x00"
 // endpoint must use RawKey(api) for the raw one and api itself for the
 // parsed one - never the same key for both - otherwise a type assertion on
 // the cached value can fail depending on which representation was cached
-// most recently. See backend/local for the caller-side handling this
+// most recently. See powerwall/local for the caller-side handling this
 // requires for negative caching to stay consistent across both keyspaces.
 func RawKey(key string) string {
 	return rawKeyPrefix + key

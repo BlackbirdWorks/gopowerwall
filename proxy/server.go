@@ -240,7 +240,7 @@ func (s *Server) safePWCall(
 	endpoint string,
 	fn func() (any, error),
 ) (any, bool) {
-	if s.Config.FailFastMode && s.Health.IsDegraded {
+	if s.Config.FailFastMode && s.Health.Degraded() {
 		if val, ok, _ := s.DegradedCache.Get(endpoint); ok {
 			return val, true
 		}

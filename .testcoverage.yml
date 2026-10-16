@@ -10,5 +10,5 @@ threshold:
 # are excluded from the coverage denominator.
 exclude:
   paths:
-    - ^proto/
+    - ^powerwall/proto/
     - ^test/

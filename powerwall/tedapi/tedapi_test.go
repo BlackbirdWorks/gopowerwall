@@ -1011,8 +1011,8 @@ func TestBackendVitals(t *testing.T) {
 	// This is the regression test for the TEDAPI vitals synthesis bug: the
 	// PW3Query/ComponentsQuery GraphQL query already requests the raw
 	// PCH_PvState_<n>/PCH_PvVoltage<n>/PCH_PvCurrent<n> component signals
-	// (backend/tedapi/queries/V2024_06.json and V2026_06.json), but nothing
-	// in backend/tedapi ever parsed the response into the PVAC_PvState_<n>/
+	// (powerwall/tedapi/queries/V2024_06.json and V2026_06.json), but nothing
+	// in powerwall/tedapi ever parsed the response into the PVAC_PvState_<n>/
 	// PVAC_PVMeasuredVoltage_<n>/PVAC_PVCurrent_<n>/PVAC_PVMeasuredPower_<n>
 	// field names pypowerwall's facade (and Powerwall.Strings) expect - see
 	// pypowerwall/tedapi/__init__.py:1032-1069. Before the fix, Vitals never
@@ -1407,7 +1407,7 @@ func TestBackendMaxBackupDelegationErrorPropagation(t *testing.T) {
 // TestExtractFanSpeeds is the regression test for /fans and /fans/pw: no
 // fan-speed extraction existed anywhere in this package before this change
 // (docs/parity-matrix.md's /fans row - confirmed by grep, zero matches for
-// "Fan_Speed" under backend/tedapi/*.go). It is a byte-for-byte port of
+// "Fan_Speed" under powerwall/tedapi/*.go). It is a byte-for-byte port of
 // pypowerwall's extract_fan_speeds (pypowerwall/tedapi/__init__.py:
 // 1879-1903), deliberately including the static ambiguity documented on
 // [tedapi.ExtractFanSpeeds]: these cases exercise the function's own

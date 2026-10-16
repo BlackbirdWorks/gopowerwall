@@ -106,6 +106,10 @@ func New(ctx context.Context, opts ...Option) (*Powerwall, error) {
 	return pw, nil
 }
 
+// Mode returns the active [ConnectionMode]. This can differ from what the
+// caller configured: [Powerwall.Connect]'s circular fallback may have moved
+// p to a different mode than the one [New] started with, so check Mode
+// rather than assuming it still matches the [Option] values passed to New.
 func (p *Powerwall) Mode() ConnectionMode {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -124,6 +128,7 @@ func (p *Powerwall) TEDAPIMode() TEDAPIMode {
 	return p.tedapiMode
 }
 
+// IsConnected reports whether p currently holds a live backend client.
 func (p *Powerwall) IsConnected() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -179,10 +184,3 @@ func (p *Powerwall) Poller() *poller.Poller {
 
 	return p.poller
 }
-
-// Close releases the active backend's resources and clears it, leaving p
-// disconnected ([Powerwall.IsConnected] false afterward). It always returns
-// nil; the return value exists so Powerwall satisfies patterns expecting an
-// io.Closer-shaped Close, not because closing can currently fail. Close does
-// not stop a New from being usable again - call [Powerwall.Connect] to
-// reconnect the same instance.

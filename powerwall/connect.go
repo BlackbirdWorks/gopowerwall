@@ -44,10 +44,6 @@ func (p *Powerwall) setClientLocked(c Client) {
 	}
 }
 
-// Mode returns the active [ConnectionMode]. This can differ from what the
-// caller configured: [Powerwall.Connect]'s circular fallback may have moved
-// p to a different mode than the one [New] started with, so check Mode
-// rather than assuming it still matches the [Option] values passed to New.
 func (p *Powerwall) connectLocal(ctx context.Context) bool {
 	cfg := p.config
 
@@ -135,6 +131,8 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 			localBackend.SetTEDAPIClient(tedBackend, false)
 			p.tedapiMode = TEDAPIHybrid
 			p.tedapiFlag = true
+		} else {
+			tedClient.Close()
 		}
 	}
 
@@ -146,6 +144,10 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 
 		return true
 	}
+
+	_ = localBackend.Close(ctx)
+	p.tedapiMode = TEDAPIOff
+	p.tedapiFlag = false
 
 	return false
 }
@@ -163,6 +165,8 @@ func (p *Powerwall) connectFleetAPI(ctx context.Context) bool {
 		return true
 	}
 
+	_ = fb.Close(ctx)
+
 	return false
 }
 
@@ -178,6 +182,8 @@ func (p *Powerwall) connectCloud(ctx context.Context) bool {
 
 		return true
 	}
+
+	_ = cb.Close(ctx)
 
 	return false
 }
@@ -274,6 +280,3 @@ func (p *Powerwall) Close(ctx context.Context) error {
 
 	return nil
 }
-
-// PollOption customizes a single call to [Powerwall.Poll], [Powerwall.PollRaw],
-// or [Powerwall.PollJSON]. Build one with [WithForce] or [WithRaw].

@@ -11,6 +11,15 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
 
+// Vitals returns per-device vitals keyed by device name (e.g. "TETHC--1",
+// "PVAC--2"), each device's own fields keyed by field name (e.g.
+// "THC_AmbientTemp", "PVAC_Vsolar0"). Only [ModeLocal], [ModeTEDAPI], and
+// [ModeV1r] support this; cloud and FleetAPI connections silently return an
+// empty [models.VitalsData] with a nil error, since Tesla's cloud APIs do
+// not expose per-device vitals - a nil error does not mean the site
+// genuinely has no devices, so check [Powerwall.Mode] first if that
+// distinction matters. An error is returned only when the active backend
+// does have a client but that client's own Vitals call failed.
 func (p *Powerwall) Vitals(ctx context.Context) (models.VitalsData, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -73,7 +82,7 @@ func collectDeviceAlerts(devices map[string]map[string]any, alertSet map[string]
 			}
 		case []string:
 			// The local backend stores the protobuf accessor's []string result
-			// directly (see backend/local.go's devMap["alerts"] assignment).
+			// directly (see powerwall/local/vitals.go's devMap["alerts"] assignment).
 			for _, a := range rawAlerts {
 				alertSet[a] = struct{}{}
 			}

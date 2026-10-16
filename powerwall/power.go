@@ -8,6 +8,13 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
 )
 
+// Level returns the battery's raw state-of-charge percentage, as the gateway
+// reports it, or an error if the value could not be retrieved - no
+// connection, a network error, and a missing/unexpected field in the
+// gateway's response are distinguished via [ErrNoClient], the poll's own
+// error, and [ErrFieldMissing] respectively. See [Powerwall.LevelScaled] for
+// the rescaled percentage pypowerwall calls "scale=True" and the gopowerwall
+// CLI displays by default.
 func (p *Powerwall) Level(ctx context.Context) (float64, error) {
 	data, err := p.pollInternal(ctx, "/api/system_status/soe", false, false, false)
 	if err != nil {

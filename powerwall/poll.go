@@ -6,6 +6,8 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/poller"
 )
 
+// PollOption customizes a single call to [Powerwall.Poll], [Powerwall.PollRaw],
+// or [Powerwall.PollJSON]. Build one with [WithForce] or [WithRaw].
 type PollOption func(*pollConfig)
 
 type pollConfig struct {
@@ -178,11 +180,3 @@ func (p *Powerwall) Post(ctx context.Context, api string, payload any, din ...st
 
 	return res
 }
-
-// Level returns the battery's raw state-of-charge percentage, as the gateway
-// reports it, or an error if the value could not be retrieved - no
-// connection, a network error, and a missing/unexpected field in the
-// gateway's response are distinguished via [ErrNoClient], the poll's own
-// error, and [ErrFieldMissing] respectively. See [Powerwall.LevelScaled] for
-// the rescaled percentage pypowerwall calls "scale=True" and the gopowerwall
-// CLI displays by default.

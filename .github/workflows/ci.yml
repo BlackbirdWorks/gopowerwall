@@ -127,7 +127,7 @@ jobs:
       - name: Verify generated protobuf bindings are up to date
         run: |
           make proto
-          if ! git diff --exit-code -- proto/; then
+          if ! git diff --exit-code -- powerwall/proto/; then
             echo "::error::Generated protobuf bindings are stale. Run 'make proto' and commit the result."
             exit 1
           fi

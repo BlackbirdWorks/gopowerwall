@@ -35,6 +35,7 @@ func (c *GetCmd) Run(cmdCtx *Context) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = pw.Close(ctx) }()
 
 	if !pw.IsConnected() {
 		return ErrUnableToConnectGet

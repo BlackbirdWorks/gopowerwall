@@ -61,7 +61,7 @@ type simulator struct {
 
 // insecureTLSConfig trusts pwsimulator's self-signed certificate, exactly as
 // gopowerwall's local and TEDAPI backends do by design when talking to a
-// real gateway (see backend/local/local.go and backend/tedapi/tedapi.go).
+// real gateway (see powerwall/local/local.go and powerwall/tedapi/tedapi.go).
 func insecureTLSConfig() *tls.Config {
 	return &tls.Config{InsecureSkipVerify: true}
 }
