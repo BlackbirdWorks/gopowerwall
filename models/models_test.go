@@ -334,3 +334,209 @@ func TestHandwrittenRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestComponentSignals(t *testing.T) {
+	t.Parallel()
+
+	fVal := 42.5
+	bVal := true
+	sVal := "Active"
+
+	type testCase struct {
+		wantAny  any
+		name     string
+		signal   models.ComponentSignal
+		wantStr  string
+		wantF    float64
+		wantB    bool
+		hasFloat bool
+		hasStr   bool
+		hasBool  bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:     "float value signal",
+			signal:   models.ComponentSignal{Name: "freq", Value: &fVal},
+			wantAny:  42.5,
+			wantF:    42.5,
+			hasFloat: true,
+		},
+		{
+			name:    "bool value signal",
+			signal:  models.ComponentSignal{Name: "ready", BoolValue: &bVal},
+			wantAny: true,
+			wantB:   true,
+			hasBool: true,
+		},
+		{
+			name:    "text value signal",
+			signal:  models.ComponentSignal{Name: "state", TextValue: &sVal},
+			wantAny: "Active",
+			wantStr: "Active",
+			hasStr:  true,
+		},
+		{
+			name:   "empty signal",
+			signal: models.ComponentSignal{Name: "empty"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.wantAny, tc.signal.AnyValue())
+
+			f, okF := tc.signal.FloatValue()
+			assert.Equal(t, tc.hasFloat, okF)
+			if tc.hasFloat {
+				assert.InDelta(t, tc.wantF, f, 0.001)
+			}
+
+			s, okS := tc.signal.StringValue()
+			assert.Equal(t, tc.hasStr, okS)
+			if tc.hasStr {
+				assert.Equal(t, tc.wantStr, s)
+			}
+
+			b, okB := tc.signal.BooleanValue()
+			assert.Equal(t, tc.hasBool, okB)
+			if tc.hasBool {
+				assert.Equal(t, tc.wantB, b)
+			}
+		})
+	}
+}
+
+func TestComponentList(t *testing.T) {
+	t.Parallel()
+
+	fVal := 120.0
+	comp1 := models.Component{
+		SerialNumber: "SN-1",
+		PartNumber:   "PN-1",
+		Signals: []models.ComponentSignal{
+			{Name: "volts", Value: &fVal},
+		},
+	}
+	comp2 := models.Component{
+		SerialNumber: "SN-2",
+		PartNumber:   "PN-2",
+		Signals: []models.ComponentSignal{
+			{Name: "mode", TextValue: new("Grid")},
+		},
+	}
+	cl := models.ComponentList{comp1, comp2}
+
+	type testCase struct {
+		wantAny    any
+		name       string
+		sigName    string
+		wantSerial string
+		wantF      float64
+		hasFloat   bool
+		foundComp  bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:       "finds float signal on first component",
+			sigName:    "volts",
+			wantAny:    120.0,
+			wantF:      120.0,
+			hasFloat:   true,
+			wantSerial: "SN-1",
+			foundComp:  true,
+		},
+		{
+			name:       "finds text signal on second component",
+			sigName:    "mode",
+			wantAny:    "Grid",
+			wantSerial: "SN-2",
+			foundComp:  true,
+		},
+		{
+			name:       "returns nil for missing signal",
+			sigName:    "unknown",
+			wantSerial: "SN-NONEXISTENT",
+			foundComp:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.wantAny, cl.SignalValue(tc.sigName))
+			f, okF := cl.SignalFloat(tc.sigName)
+			assert.Equal(t, tc.hasFloat, okF)
+			if tc.hasFloat {
+				assert.InDelta(t, tc.wantF, f, 0.001)
+			}
+
+			found, okC := cl.FindBySerialNumber(tc.wantSerial)
+			assert.Equal(t, tc.foundComp, okC)
+			if tc.foundComp {
+				assert.Equal(t, tc.wantSerial, found.SerialNumber)
+			}
+		})
+	}
+}
+
+func TestParseComponents(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		input        any
+		name         string
+		wantPCHCount int
+		wantMSACount int
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:  "nil input returns empty map",
+			input: nil,
+		},
+		{
+			name: "nested components map",
+			input: map[string]any{
+				"components": map[string]any{
+					"pch": []any{
+						map[string]any{
+							"serialNumber": "PCH-1",
+							"signals": []any{
+								map[string]any{"name": "PCH_FanSpeed_A", "value": 1500.0},
+							},
+						},
+					},
+					"msa": []any{
+						map[string]any{
+							"serialNumber": "MSA-1",
+							"signals": []any{
+								map[string]any{"name": "SYNC_Uptime", "value": 60000.0},
+							},
+						},
+					},
+				},
+			},
+			wantPCHCount: 1,
+			wantMSACount: 1,
+		},
+		{
+			name: "flat components map",
+			input: map[string]any{
+				"pch": []any{
+					map[string]any{"serialNumber": "PCH-2"},
+				},
+			},
+			wantPCHCount: 1,
+			wantMSACount: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cm := models.ParseComponents(tc.input)
+			assert.Len(t, cm.PCH, tc.wantPCHCount)
+			assert.Len(t, cm.MSA, tc.wantMSACount)
+		})
+	}
+}

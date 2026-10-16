@@ -786,27 +786,20 @@ const (
 	gatewayUptimeResetMs      = 10_000.0
 	gatewayStartTimeTolerance = 600 * time.Second
 	gatewayStartTimeFormat    = "2006-01-02 15:04:05 -0700"
+	wattsPerKilowatt          = 1000.0
 )
 
-func findSyncUptimeSignal(msaList []any, serial string) float64 {
-	for _, compAny := range msaList {
-		comp, ok := compAny.(map[string]any)
-		if !ok || comp["serialNumber"] != serial {
-			continue
-		}
-		signals, _ := comp["signals"].([]any)
-		for _, sigAny := range signals {
-			sig, okSig := sigAny.(map[string]any)
-			if !okSig || sig["name"] != "SYNC_Uptime" {
-				continue
-			}
-			if v, okNum := sig["value"].(float64); okNum && !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 {
-				return v
-			}
-		}
+func findSyncUptimeSignal(msa models.ComponentList, serial string) float64 {
+	comp, ok := msa.FindBySerialNumber(serial)
+	if !ok {
+		return -1
+	}
+	v, okVal := comp.SignalFloat("SYNC_Uptime")
+	if !okVal || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return -1
 	}
 
-	return -1
+	return v
 }
 
 func parseGatewaySystemTime(timeStr string) (time.Time, error) {
@@ -843,8 +836,8 @@ func (p *PyPowerwallTEDAPI) getGatewayUptime(ctx context.Context, force bool) *g
 	if serial == "" {
 		return nil
 	}
-	msaList, _ := lookup.Lookup(controller, "components", "msa").([]any)
-	uptimeMs := findSyncUptimeSignal(msaList, serial)
+	components := models.ParseComponents(controller)
+	uptimeMs := findSyncUptimeSignal(components.MSA, serial)
 	if uptimeMs < 0 {
 		return nil
 	}
@@ -1109,52 +1102,26 @@ func (p *PyPowerwallTEDAPI) getAPISystemStatusSOE(ctx context.Context, force boo
 //nolint:gochecknoglobals // Read-only constant table, not mutated.
 var pchStringLetters = []string{"A", "B", "C", "D", "E", "F"}
 
-// pchSignalValue extracts a signal's numeric "value" as a float64, matching
-// pypowerwall's own guard (pypowerwall/tedapi/__init__.py:1041-1046): a
-// missing, null, or non-positive reading is treated as 0 rather than
-// passed through, since a disconnected string reports a nonsensical
-// negative or zero raw value.
-func pchSignalValue(sig map[string]any) float64 {
-	if v, ok := sig["value"].(float64); ok && v > 0 {
-		return v
-	}
-
-	return 0
-}
-
 // scanPCHStringSignals finds string letter n's PCH_PvState_<n>,
 // PCH_PvVoltage<n>, and PCH_PvCurrent<n> signals across every "pch"
 // component, returning the raw state text (default "Unknown" if never
 // found) and clamped voltage/current readings.
-func scanPCHStringSignals(pchList []any, n string) (string, float64, float64) {
+func scanPCHStringSignals(pchList models.ComponentList, n string) (string, float64, float64) {
 	pvState := "Unknown"
 
 	var pvVoltage, pvCurrent float64
 
-	for _, compAny := range pchList {
-		comp, okComp := compAny.(map[string]any)
-		if !okComp {
-			continue
+	for _, comp := range pchList {
+		if sig, ok := comp.Signal("PCH_PvState_" + n); ok {
+			if s, okS := sig.StringValue(); okS {
+				pvState = s
+			}
 		}
-
-		signals, _ := comp["signals"].([]any)
-		for _, sigAny := range signals {
-			sig, okSig := sigAny.(map[string]any)
-			if !okSig {
-				continue
-			}
-
-			name, _ := sig["name"].(string)
-			switch name {
-			case "PCH_PvState_" + n:
-				if tv, okTV := sig["textValue"].(string); okTV {
-					pvState = tv
-				}
-			case "PCH_PvVoltage" + n:
-				pvVoltage = pchSignalValue(sig)
-			case "PCH_PvCurrent" + n:
-				pvCurrent = pchSignalValue(sig)
-			}
+		if sig, ok := comp.Signal("PCH_PvVoltage" + n); ok && sig.Value != nil && *sig.Value > 0 {
+			pvVoltage = *sig.Value
+		}
+		if sig, ok := comp.Signal("PCH_PvCurrent" + n); ok && sig.Value != nil && *sig.Value > 0 {
+			pvCurrent = *sig.Value
 		}
 	}
 
@@ -1173,9 +1140,8 @@ func scanPCHStringSignals(pchList []any, n string) (string, float64, float64) {
 // data at all (e.g. non-PW3 hardware, or a query the gateway did not
 // answer), so callers can skip adding synthesized devices entirely rather
 // than fabricating an all-"Unknown"/all-zero PVAC/PVS pair.
-func synthesizeStringVitals(components map[string]any) (map[string]any, map[string]any) {
-	pchList, ok := lookup.Lookup(components, "components", "pch").([]any)
-	if !ok || len(pchList) == 0 {
+func synthesizeStringVitals(components models.ComponentsMap) (map[string]any, map[string]any) {
+	if len(components.PCH) == 0 {
 		return nil, nil
 	}
 
@@ -1183,7 +1149,7 @@ func synthesizeStringVitals(components map[string]any) (map[string]any, map[stri
 	pvs := make(map[string]any, len(pchStringLetters))
 
 	for _, n := range pchStringLetters {
-		pvState, pvVoltage, pvCurrent := scanPCHStringSignals(pchList, n)
+		pvState, pvVoltage, pvCurrent := scanPCHStringSignals(components.PCH, n)
 
 		pvac["PVAC_PvState_"+n] = pvState
 		pvac["PVAC_PVMeasuredVoltage_"+n] = pvVoltage
@@ -1192,78 +1158,42 @@ func synthesizeStringVitals(components map[string]any) (map[string]any, map[stri
 		pvs["PVS_String"+n+"_Connected"] = strings.Contains(pvState, "Pv_Active")
 	}
 
+	if f, ok := components.PCH.SignalFloat("PCH_AcFrequency"); ok {
+		pvac["PVAC_Fout"] = f
+	}
+	if v, ok := components.PCH.SignalFloat("PCH_AcVoltageAN"); ok {
+		pvac["PVAC_VL1Ground"] = v
+	}
+	if v, ok := components.PCH.SignalFloat("PCH_AcVoltageBN"); ok {
+		pvac["PVAC_VL2Ground"] = v
+	}
+	if v, ok := components.PCH.SignalFloat("PCH_AcVoltageAB"); ok {
+		pvac["PVAC_Vout"] = v
+	}
+	if p, ok := components.PCH.SignalFloat("PCH_BatteryPower"); ok {
+		pvac["PVAC_Pout"] = p
+	}
+	if state := components.PCH.SignalValue("PCH_AcMode"); state != nil {
+		pvac["PVAC_State"] = state
+	}
+
 	return pvac, pvs
 }
 
-// fanSpeedSignalValue extracts a signal's numeric "value" as a *float64,
-// returning nil when absent or null - mirroring pypowerwall's own
-// `signal.get("value") is not None` guard (pypowerwall/tedapi/__init__.py:
-// 1895-1897), which passes a found value through untouched rather than
-// clamping or zeroing it the way [pchSignalValue] does for solar-string
-// readings.
-func fanSpeedSignalValue(sig map[string]any) *float64 {
-	if v, ok := sig["value"].(float64); ok {
-		return &v
-	}
-
-	return nil
-}
-
-// ExtractFanSpeeds scans data's "components.msa" component list for
-// PVAC_Fan_Speed_Actual_RPM/PVAC_Fan_Speed_Target_RPM signals, returning one
-// [models.FanSpeedEntry] per component that reported at least one of them,
-// keyed by "PVAC--<partNumber>--<serialNumber>" - a byte-for-byte port of
-// pypowerwall's extract_fan_speeds (pypowerwall/tedapi/__init__.py:
-// 1879-1903), including its ambiguity: the "msa" alias in this project's
-// own DeviceControllerQuery text (powerwall/tedapi/queries/V2026_06.json,
-// V2024_06.json) requests only MSA_*/METER_Z_* signal names, never
-// PVAC_Fan_Speed_*, and upstream's own query text has the identical gap -
-// the fan-speed signals live instead under the same response's
-// esCan.bus.PVAC.PVAC_Logging block. Reading them from there instead would
-// make this function work where upstream's does not, silently diverging
-// from pypowerwall's documented (if seemingly buggy) behavior on real
-// hardware. This function therefore faithfully reproduces the ambiguity
-// rather than working around it: it is expected to return an empty map
-// against real gateways today. Confirming whether get_fan_speeds() ever
-// returns real data in practice needs a live V2026_06-firmware gateway, not
-// more static analysis - see docs/parity-matrix.md's /fans row.
-func componentSignalValue(components []any, name string) any {
-	for _, compAny := range components {
-		comp, ok := compAny.(map[string]any)
-		if !ok {
-			continue
-		}
-		signals, _ := comp["signals"].([]any)
-		for _, sigAny := range signals {
-			sig, okSig := sigAny.(map[string]any)
-			if !okSig || sig["name"] != name {
-				continue
-			}
-			for _, k := range []string{"value", "boolValue", "textValue"} {
-				if v, exists := sig[k]; exists && v != nil {
-					return v
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func extractPW3FanSpeeds(components map[string]any, din string) map[string]models.FanSpeedEntry {
-	pchList, _ := lookup.Lookup(components, "components", "pch").([]any)
-	if len(pchList) == 0 {
+func extractPW3FanSpeeds(components models.ComponentsMap, din string) map[string]models.FanSpeedEntry {
+	if len(components.PCH) == 0 {
 		return nil
 	}
 	var entry models.FanSpeedEntry
 	hasAny := false
 
 	fanSpeedSignal := func(name string) *float64 {
-		val := componentSignalValue(pchList, name)
-		if f, ok := val.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) {
-			hasAny = true
+		if val, ok := components.PCH.SignalFloat(name); ok {
+			if !math.IsNaN(val) && !math.IsInf(val, 0) {
+				hasAny = true
 
-			return &f
+				return &val
+			}
 		}
 
 		return nil
@@ -1283,25 +1213,37 @@ func extractPW3FanSpeeds(components map[string]any, din string) map[string]model
 	}
 }
 
-func synthesizePW3Pods(bmsList, hvpList []any, din string, out map[string]any) {
-	for idx, bmsAny := range bmsList {
-		bmsComp, ok := bmsAny.(map[string]any)
-		if !ok {
-			continue
-		}
-		var hvpComp map[string]any
-		if idx < len(hvpList) {
-			hvpComp, _ = hvpList[idx].(map[string]any)
+func synthesizePW3Pods(components models.ComponentsMap, din string, out map[string]any) {
+	bmsExtraSignals := []string{
+		"BMS_LOG_tempOutOfBounds",
+		"BMS_LOG_tempOutOfBoundsCharge",
+		"BMS_kwhDischargeTotal",
+		"BMS_LOG_ahDischargeTotal",
+		"BMS_LOG_cacAvg",
+		"BMS_LOG_numFullBattCycles",
+		"BMS_LOG_overDischargeCounter",
+		"BMS_LOG_selfDischargeRate",
+	}
+	hvpExtraSignals := []string{
+		"HVP_PackTempMax",
+		"HVP_PackTempMin",
+		"HVP_ShuntTemperature",
+		"HVP_SafetyBiDisconnectState",
+		"HVP_a061_LockoutOnIsoFaultRetry",
+	}
+
+	for idx, bmsComp := range components.BMS {
+		var hvpComp models.Component
+		if idx < len(components.HVP) {
+			hvpComp = components.HVP[idx]
 		}
 		podDIN := din
-		if idx > 0 && hvpComp != nil {
-			if s, okS := hvpComp["serialNumber"].(string); okS && s != "" {
-				podDIN = s
-			}
+		if idx > 0 && hvpComp.SerialNumber != "" {
+			podDIN = hvpComp.SerialNumber
 		}
 
-		fullPack, _ := componentSignalValue([]any{bmsComp}, "BMS_nominalFullPackEnergy").(float64)
-		remaining, _ := componentSignalValue([]any{bmsComp}, "BMS_nominalEnergyRemaining").(float64)
+		fullPack, _ := bmsComp.SignalFloat("BMS_nominalFullPackEnergy")
+		remaining, _ := bmsComp.SignalFloat("BMS_nominalEnergyRemaining")
 
 		pod := map[string]any{
 			"POD_nom_energy_remaining":     remaining,
@@ -1309,44 +1251,22 @@ func synthesizePW3Pods(bmsList, hvpList []any, din string, out map[string]any) {
 			"POD_nom_energy_to_be_charged": fullPack - remaining,
 		}
 
-		bmsExtraSignals := []string{
-			"BMS_LOG_tempOutOfBounds",
-			"BMS_LOG_tempOutOfBoundsCharge",
-			"BMS_kwhDischargeTotal",
-			"BMS_LOG_ahDischargeTotal",
-			"BMS_LOG_cacAvg",
-			"BMS_LOG_numFullBattCycles",
-			"BMS_LOG_overDischargeCounter",
-			"BMS_LOG_selfDischargeRate",
-		}
 		for _, name := range bmsExtraSignals {
-			pod[name] = componentSignalValue([]any{bmsComp}, name)
+			pod[name] = bmsComp.SignalValue(name)
 		}
 
-		var hvpSlice []any
-		if hvpComp != nil {
-			hvpSlice = []any{hvpComp}
-		}
-		hvpExtraSignals := []string{
-			"HVP_PackTempMax",
-			"HVP_PackTempMin",
-			"HVP_ShuntTemperature",
-			"HVP_SafetyBiDisconnectState",
-			"HVP_a061_LockoutOnIsoFaultRetry",
-		}
 		for _, name := range hvpExtraSignals {
-			pod[name] = componentSignalValue(hvpSlice, name)
+			pod[name] = hvpComp.SignalValue(name)
 		}
 
 		out["TEPOD--"+podDIN] = pod
 	}
 }
 
-func synthesizePW3Inverter(pchList, pwsList, baggrList []any, din string, out map[string]any) {
-	if len(pchList) == 0 && len(pwsList) == 0 && len(baggrList) == 0 {
+func synthesizePW3Inverter(components models.ComponentsMap, din string, out map[string]any) {
+	if len(components.PCH) == 0 && len(components.PWS) == 0 && len(components.BAGGR) == 0 {
 		return
 	}
-	tepinv := make(map[string]any)
 	pchExtraSignals := []string{
 		"PCH_AmbientTemp",
 		"PCH_heatsinkTemp",
@@ -1360,10 +1280,6 @@ func synthesizePW3Inverter(pchList, pwsList, baggrList []any, din string, out ma
 		"PCH_pcbaId",
 		"PCH_usageId",
 	}
-	for _, name := range pchExtraSignals {
-		tepinv[name] = componentSignalValue(pchList, name)
-	}
-
 	pwsExtraSignals := []string{
 		"PWS_ExtSwitch_State",
 		"PWS_RSDSelfTest_Result",
@@ -1373,31 +1289,48 @@ func synthesizePW3Inverter(pchList, pwsList, baggrList []any, din string, out ma
 		"PWS_pcbaId",
 		"PWS_reversePolarityStrings",
 	}
-	for _, name := range pwsExtraSignals {
-		tepinv[name] = componentSignalValue(pwsList, name)
-	}
-
 	baggrExtraSignals := []string{
 		"BAGGR_ExpectedEnergyRemaining",
 		"BAGGR_ExpectedFullPackEnergy",
 		"BAGGR_OperationType",
 	}
+
+	tepinv := make(map[string]any)
+	for _, name := range pchExtraSignals {
+		tepinv[name] = components.PCH.SignalValue(name)
+	}
+	for _, name := range pwsExtraSignals {
+		tepinv[name] = components.PWS.SignalValue(name)
+	}
 	for _, name := range baggrExtraSignals {
-		tepinv[name] = componentSignalValue(baggrList, name)
+		tepinv[name] = components.BAGGR.SignalValue(name)
+	}
+
+	if f, ok := components.PCH.SignalFloat("PCH_AcFrequency"); ok {
+		tepinv["PINV_Fout"] = f
+	}
+	if v, ok := components.PCH.SignalFloat("PCH_AcVoltageAN"); ok {
+		tepinv["PINV_VSplit1"] = v
+	}
+	if v, ok := components.PCH.SignalFloat("PCH_AcVoltageBN"); ok {
+		tepinv["PINV_VSplit2"] = v
+	}
+	if v, ok := components.PCH.SignalFloat("PCH_AcVoltageAB"); ok {
+		tepinv["PINV_Vout"] = v
+	}
+	if p, ok := components.PCH.SignalFloat("PCH_BatteryPower"); ok {
+		tepinv["PINV_Pout"] = p / wattsPerKilowatt
+	}
+	if state := components.PCH.SignalValue("PCH_AcMode"); state != nil {
+		tepinv["PINV_State"] = state
 	}
 
 	out["TEPINV--"+din] = tepinv
 }
 
-func synthesizePW3Vitals(components map[string]any, din string, out map[string]any) {
-	bmsList, _ := lookup.Lookup(components, "components", "bms").([]any)
-	hvpList, _ := lookup.Lookup(components, "components", "hvp").([]any)
-	pchList, _ := lookup.Lookup(components, "components", "pch").([]any)
-	pwsList, _ := lookup.Lookup(components, "components", "pws").([]any)
-	baggrList, _ := lookup.Lookup(components, "components", "baggr").([]any)
-
-	synthesizePW3Pods(bmsList, hvpList, din, out)
-	synthesizePW3Inverter(pchList, pwsList, baggrList, din, out)
+func synthesizePW3Vitals(components models.ComponentsMap, din string, out map[string]any) {
+	synthesizePW3Pods(components, din, out)
+	synthesizePW3Inverter(components, din, out)
 }
 
 func extractPVACBusFans(data map[string]any, result map[string]models.FanSpeedEntry) {
@@ -1426,40 +1359,26 @@ func extractPVACBusFans(data map[string]any, result map[string]models.FanSpeedEn
 		if v, okV := logging["PVAC_Fan_Speed_Target_RPM"].(float64); okV {
 			entry.TargetRPM = &v
 		}
+
 		if entry.ActualRPM != nil || entry.TargetRPM != nil {
 			result["PVAC--"+part+"--"+serial] = entry
 		}
 	}
 }
 
-func extractMSAFans(data map[string]any, result map[string]models.FanSpeedEntry) {
-	msaList, _ := lookup.Lookup(data, "components", "msa").([]any)
-	for _, compAny := range msaList {
-		comp, ok := compAny.(map[string]any)
-		if !ok {
-			continue
-		}
-		partNumber, _ := comp["partNumber"].(string)
-		serialNumber, _ := comp["serialNumber"].(string)
-		key := "PVAC--" + partNumber + "--" + serialNumber
+func extractMSAFans(components models.ComponentsMap, result map[string]models.FanSpeedEntry) {
+	for _, comp := range components.MSA {
+		key := "PVAC--" + comp.PartNumber + "--" + comp.SerialNumber
 		if _, exists := result[key]; exists {
 			continue
 		}
 
 		var entry models.FanSpeedEntry
-		signals, _ := comp["signals"].([]any)
-		for _, sigAny := range signals {
-			sig, okSig := sigAny.(map[string]any)
-			if !okSig {
-				continue
-			}
-
-			switch sig["name"] {
-			case "PVAC_Fan_Speed_Actual_RPM":
-				entry.ActualRPM = fanSpeedSignalValue(sig)
-			case "PVAC_Fan_Speed_Target_RPM":
-				entry.TargetRPM = fanSpeedSignalValue(sig)
-			}
+		if actual, ok := comp.SignalFloat("PVAC_Fan_Speed_Actual_RPM"); ok {
+			entry.ActualRPM = &actual
+		}
+		if target, ok := comp.SignalFloat("PVAC_Fan_Speed_Target_RPM"); ok {
+			entry.TargetRPM = &target
 		}
 
 		if entry.ActualRPM != nil || entry.TargetRPM != nil {
@@ -1474,7 +1393,7 @@ func extractMSAFans(data map[string]any, result map[string]models.FanSpeedEntry)
 func ExtractFanSpeeds(data map[string]any) map[string]models.FanSpeedEntry {
 	result := make(map[string]models.FanSpeedEntry)
 	extractPVACBusFans(data, result)
-	extractMSAFans(data, result)
+	extractMSAFans(models.ParseComponents(data), result)
 
 	return result
 }
@@ -1485,7 +1404,8 @@ func (p *PyPowerwallTEDAPI) GetFanSpeeds(ctx context.Context, force bool) map[st
 	controller := p.client.GetDeviceController(ctx, force)
 	result := ExtractFanSpeeds(controller)
 
-	components := p.client.GetComponents(ctx, force)
+	componentsData := p.client.GetComponents(ctx, force)
+	components := models.ParseComponents(componentsData)
 	din := p.client.din
 	if din == "" {
 		cfg := p.client.GetConfig(ctx, false)
@@ -1526,7 +1446,8 @@ func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) 
 	}
 	out["TESYNC--None--None"] = syncMap
 
-	if components := p.client.GetComponents(ctx, false); components != nil {
+	if componentsData := p.client.GetComponents(ctx, false); componentsData != nil {
+		components := models.ParseComponents(componentsData)
 		if pvac, pvs := synthesizeStringVitals(components); pvac != nil {
 			out["PVAC--"+din] = pvac
 			out["PVS--"+din] = pvs
