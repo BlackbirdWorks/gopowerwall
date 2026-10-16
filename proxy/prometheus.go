@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -89,13 +90,8 @@ func writeTemperatureMetrics(ctx context.Context, b *strings.Builder, pw *powerw
 
 	b.WriteString("# HELP powerwall_temperature_celsius Temperature readings in degrees Celsius.\n")
 	b.WriteString("# TYPE powerwall_temperature_celsius gauge\n")
-	keys := make([]string, 0, len(temps))
-	for k := range temps {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		fmt.Fprintf(b, "powerwall_temperature_celsius{device=\"%s\"} %.2f\n", k, temps[k])
+	for _, k := range slices.Sorted(maps.Keys(temps)) {
+		fmt.Fprintf(b, "powerwall_temperature_celsius{device=%q} %.2f\n", k, temps[k])
 	}
 	b.WriteString("\n")
 }

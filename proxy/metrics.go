@@ -52,6 +52,14 @@ func (h *ConnectionHealth) Reset() {
 	h.LastSuccessTime = time.Now()
 }
 
+// Degraded reports whether the connection is currently marked degraded.
+func (h *ConnectionHealth) Degraded() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	return h.IsDegraded
+}
+
 func (h *ConnectionHealth) Snapshot() map[string]any {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

@@ -31,8 +31,8 @@ FROM scratch
 
 WORKDIR /app
 
-# CA certificates for verified TLS to Tesla's cloud/Fleet APIs (backend/cloud
-# and backend/fleetapi do not skip certificate verification, unlike the
+# CA certificates for verified TLS to Tesla's cloud/Fleet APIs (powerwall/cloud
+# and powerwall/fleetapi do not skip certificate verification, unlike the
 # local gateway backends, which talk to a self-signed device on the LAN).
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 

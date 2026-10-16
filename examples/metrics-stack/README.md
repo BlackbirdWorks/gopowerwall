@@ -13,8 +13,8 @@ Option B (Telegraf): Tesla Cloud API <-- OAuth2 -- gopowerwall proxy <-- scrape 
 
 **In Tesla Cloud mode (and FleetAPI mode), Tesla's API exposes no per-device
 vitals.** `/vitals`, `/strings`, `/temps` and `/alerts` return empty or stub
-data - `backend/cloud`'s and `backend/fleetapi`'s `Vitals()` return an empty
-map, and several `/api/*` endpoints are served from `backend/stubs`. Only
+data - `powerwall/cloud`'s and `powerwall/fleetapi`'s `Vitals()` return an empty
+map, and several `/api/*` endpoints are served from `powerwall/stubs`. Only
 **aggregate power** (`/aggregates`, `/json`), **state of charge**, and
 **grid status** (`/api/system_status/*`) are real in cloud/FleetAPI mode.
 This is an upstream Tesla limitation shared with

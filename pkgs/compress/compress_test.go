@@ -97,6 +97,26 @@ func TestNegotiate(t *testing.T) {
 			acceptEncoding: "snappy, lz4",
 			wantEncoding:   "",
 		},
+		{
+			name:           "substring containing br does not false match",
+			acceptEncoding: "x-broken, subr",
+			wantEncoding:   "",
+		},
+		{
+			name:           "q=0 excludes encoding",
+			acceptEncoding: "zstd;q=0, br;q=0.0, gzip;q=0.8",
+			wantEncoding:   compress.EncodingGzip,
+		},
+		{
+			name:           "all supported encodings have q=0",
+			acceptEncoding: "zstd;q=0.00, br;q=0.000, gzip;q=0",
+			wantEncoding:   "",
+		},
+		{
+			name:           "case insensitive tokens and parameters",
+			acceptEncoding: "GZIP;level=1;Q=0.5, BR;Q=1.0",
+			wantEncoding:   compress.EncodingBrotli,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -235,6 +255,50 @@ func TestMiddleware(t *testing.T) {
 
 			decompressed := decompressResponse(t, tc.wantEncoding, body)
 			assert.Equal(t, tc.responseBody, string(decompressed))
+		})
+	}
+}
+
+func TestCompressedWriterInterfaces(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name           string
+		acceptEncoding string
+	}
+
+	for _, tc := range []testCase{
+		{name: "zstd flush unwrap and hijack", acceptEncoding: "zstd"},
+		{name: "brotli flush unwrap and hijack", acceptEncoding: "br"},
+		{name: "gzip flush unwrap and hijack", acceptEncoding: "gzip"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := httptest.NewRecorder()
+			handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true}`))
+
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+
+				rc := http.NewResponseController(w)
+				assert.NoError(t, rc.Flush())
+
+				if hijacker, ok := w.(http.Hijacker); ok {
+					_, _, err := hijacker.Hijack()
+					assert.ErrorIs(t, err, compress.ErrHijackNotSupported)
+				}
+			})
+
+			c := compress.NewCompressor()
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/test", nil)
+			req.Header.Set("Accept-Encoding", tc.acceptEncoding)
+
+			c.Handler(handler).ServeHTTP(rec, req)
+			assert.True(t, rec.Flushed)
 		})
 	}
 }

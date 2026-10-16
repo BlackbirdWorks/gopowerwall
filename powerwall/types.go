@@ -13,7 +13,7 @@ const (
 	// ModeUnknown.
 	ModeUnknown ConnectionMode = "unknown"
 	// ModeLocal selects the gateway's own local HTTPS REST API
-	// (backend/local), authenticated with the short customer password.
+	// (powerwall/local), authenticated with the short customer password.
 	ModeLocal ConnectionMode = "local"
 	// ModeHybrid marks a local-mode connection that has also layered a
 	// TEDAPI client on top (see [TEDAPIHybrid]). Powerwall.mode itself never
@@ -21,17 +21,17 @@ const (
 	// not as a value New or Connect assigns to a Powerwall.
 	ModeHybrid ConnectionMode = "hybrid"
 	// ModeTEDAPI selects a pure TEDAPI connection over the gateway's WiFi
-	// access point (backend/tedapi), authenticated with the full gateway
+	// access point (powerwall/tedapi), authenticated with the full gateway
 	// WiFi password rather than the local customer password.
 	ModeTEDAPI ConnectionMode = "tedapi"
 	// ModeV1r selects the RSA-signed TEDAPI variant used by Powerwall 3 over
-	// the wired LAN (backend/tedapi's v1r.go), authenticated with an RSA
+	// the wired LAN (powerwall/tedapi's v1r.go), authenticated with an RSA
 	// private key plus the last five characters of the gateway password.
 	ModeV1r ConnectionMode = "v1r"
-	// ModeCloud selects the Tesla Owner API (backend/cloud), authenticated
+	// ModeCloud selects the Tesla Owner API (powerwall/cloud), authenticated
 	// from an existing OAuth2 token file rather than a gateway on the LAN.
 	ModeCloud ConnectionMode = "cloud"
-	// ModeFleetAPI selects the official Tesla Fleet API (backend/fleetapi),
+	// ModeFleetAPI selects the official Tesla Fleet API (powerwall/fleetapi),
 	// authenticated from an existing FleetAPI config file.
 	ModeFleetAPI ConnectionMode = "fleetapi"
 )

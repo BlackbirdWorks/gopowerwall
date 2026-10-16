@@ -9,6 +9,11 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 )
 
+// Operation returns the decoded "/api/operation" response - the current
+// real mode and backup reserve percentage - as a [models.Operation], using
+// the poll cache. Like [Powerwall.SystemStatus], it returns [ErrNotFound]
+// for "no data" (which includes "no connection") and a wrapped JSON error
+// on a decode failure.
 func (p *Powerwall) Operation(ctx context.Context) (models.Operation, error) {
 	return p.readOperation(ctx, false)
 }

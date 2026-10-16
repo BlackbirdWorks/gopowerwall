@@ -409,6 +409,7 @@ func Scan(ctx context.Context, opts models.ScanOptions, out io.Writer) ([]models
 		DialContext:     (&net.Dialer{Timeout: clientTimeout}).DialContext,
 	}
 	httpClient := &http.Client{Transport: tr, Timeout: clientTimeout}
+	defer httpClient.CloseIdleConnections()
 
 	threads := opts.MaxHosts
 	if threads <= 0 {

@@ -258,9 +258,14 @@ func (s *Server) handleHealth(_ context.Context, w http.ResponseWriter) {
 	timeouts := s.statsTime
 	s.statsMu.RUnlock()
 
+	var mode powerwall.ConnectionMode
+	if s.PW != nil {
+		mode = s.PW.Mode()
+	}
+
 	health := map[string]any{
 		"pypowerwall":                   fmt.Sprintf("%s Proxy %s", version.Version, Build),
-		"mode":                          s.PW.Mode(),
+		"mode":                          mode,
 		"pypowerwall_cache_expire":      s.Config.CacheExpire,
 		"degradation_cache_ttl_seconds": s.Config.CacheTTL,
 		"graceful_degradation":          s.Config.GracefulDegradation,

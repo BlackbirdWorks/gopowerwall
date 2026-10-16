@@ -15,14 +15,14 @@ import (
 )
 
 // TestTEDAPIProtocolCompatibility talks TEDAPI protobuf directly to
-// pwsimulator via backend/tedapi.Client - bypassing the Powerwall facade -
+// pwsimulator via powerwall/tedapi.Client - bypassing the Powerwall facade -
 // to answer the question this suite most needed a real emulator for: does
-// gopowerwall's vendored proto/tedapi definitions actually round-trip
+// gopowerwall's vendored powerwall/proto/tedapi definitions actually round-trip
 // against a real gateway's protobuf wire format, not just against
 // hand-built fixtures?
 //
 // They do. pwsimulator's stub.py vendors Tesla's own tedapi_pb2.py and
-// switches on exactly the fields backend/tedapi.go populates
+// switches on exactly the fields powerwall/tedapi/tedapi.go populates
 // (message.config.send.file for config reads, message.payload.send for the
 // GraphQL-style status query), returning the same tedapi_config/
 // tedapi_status JSON either way. That confirms TEDAPI mode is protocol-
@@ -39,6 +39,7 @@ func TestTEDAPIProtocolCompatibility(t *testing.T) {
 		10*time.Second, 5*time.Second, 5,
 		powerwall.TEDAPIVersion2024_06, powerwall.AuthModeBasic,
 	)
+	t.Cleanup(client.Close)
 
 	require.True(t, client.Connect(t.Context()), "TEDAPI config round trip should succeed against the simulator")
 
@@ -107,7 +108,7 @@ func TestTEDAPIModeDispatchFixed(t *testing.T) {
 	vitals, err := pw.Vitals(t.Context())
 	require.NoError(t, err)
 	// TEDAPI's Vitals always synthesizes at least a TESLA--None entry
-	// carrying the gateway DIN (see backend/tedapi.PyPowerwallTEDAPI.Vitals),
+	// carrying the gateway DIN (see powerwall/tedapi/tedapi.go Client.Vitals),
 	// so a real dispatch should never come back empty.
 	require.NotEmpty(t, vitals.Devices)
 	tesla, ok := vitals.Devices["TESLA--None"]

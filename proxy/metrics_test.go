@@ -45,6 +45,7 @@ func TestConnectionHealth(t *testing.T) {
 			}
 
 			assert.Equal(t, tc.wantDegraded, health.IsDegraded)
+			assert.Equal(t, tc.wantDegraded, health.Degraded())
 			assert.Equal(t, tc.failures, health.TotalFailures)
 		})
 	}

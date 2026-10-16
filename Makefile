@@ -46,13 +46,6 @@ install-deps:
 			brew upgrade golangci-lint || true; \
 		fi \
 	fi
-	@echo "Checking for fieldalignment..."
-	@if ! command -v fieldalignment >/dev/null 2>&1; then \
-		echo "Installing fieldalignment..."; \
-		go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@latest; \
-	else \
-		echo "fieldalignment is already installed."; \
-	fi
 
 lint: install-deps
 	golangci-lint run --timeout 10m --build-tags=integration ./...
@@ -60,7 +53,7 @@ lint: install-deps
 
 lint-fix: install-deps
 	@echo "Running fieldalignment..."
-	fieldalignment -fix ./... || true
+	go tool fieldalignment -fix ./... || true
 	@echo "Running golangci-lint with --fix..."
 	golangci-lint run --fix --build-tags=integration ./...
 
@@ -106,7 +99,8 @@ clean:
 	rm -rf bin/ coverage.out coverage.html
 
 upgrade:
-	go get -u ./...
+	go get -u -t -tags=integration ./...
+	go get -u tool
 	go mod tidy
 
 all:

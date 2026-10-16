@@ -282,13 +282,15 @@ func (l *Client) Close(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	url := fmt.Sprintf("https://%s/api/logout", l.host)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err == nil {
-		l.applyAuth(req)
-		resp, doErr := l.client.Do(req)
-		if doErr == nil {
-			_ = resp.Body.Close()
+	if l.authToken != "" || len(l.authCookies) > 0 {
+		url := fmt.Sprintf("https://%s/api/logout", l.host)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err == nil {
+			l.applyAuth(req)
+			resp, doErr := l.client.Do(req)
+			if doErr == nil {
+				_ = resp.Body.Close()
+			}
 		}
 	}
 

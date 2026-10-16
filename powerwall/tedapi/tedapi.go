@@ -642,6 +642,9 @@ func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.v1r != nil {
+		c.v1r.Close()
+	}
 	if c.cache != nil {
 		c.cache.Close()
 	}
@@ -1042,7 +1045,7 @@ func fanSpeedSignalValue(sig map[string]any) *float64 {
 // keyed by "PVAC--<partNumber>--<serialNumber>" - a byte-for-byte port of
 // pypowerwall's extract_fan_speeds (pypowerwall/tedapi/__init__.py:
 // 1879-1903), including its ambiguity: the "msa" alias in this project's
-// own DeviceControllerQuery text (backend/tedapi/queries/V2026_06.json,
+// own DeviceControllerQuery text (powerwall/tedapi/queries/V2026_06.json,
 // V2024_06.json) requests only MSA_*/METER_Z_* signal names, never
 // PVAC_Fan_Speed_*, and upstream's own query text has the identical gap -
 // the fan-speed signals live instead under the same response's

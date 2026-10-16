@@ -107,23 +107,58 @@ func (c *Compressor) acquireWriter(w io.Writer, encoding string) (io.WriteCloser
 	return nil, nil
 }
 
+type writerFlusher interface {
+	Flush() error
+}
+
+func isZeroQuality(params string) bool {
+	for param := range strings.SplitSeq(params, ";") {
+		k, v, ok := strings.Cut(strings.TrimSpace(param), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+			continue
+		}
+		q := strings.TrimSpace(v)
+		if q == "0" || q == "0.0" || q == "0.00" || q == "0.000" {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Negotiate selects the preferred encoding based on the Accept-Encoding header.
-// Preference order: zstd > br > gzip.
+// Preference order: zstd > br > gzip. Encodings with q=0 are excluded.
 func Negotiate(acceptEncoding string) string {
 	if acceptEncoding == "" {
 		return ""
 	}
-	if strings.Contains(acceptEncoding, EncodingZstd) {
-		return EncodingZstd
-	}
-	if strings.Contains(acceptEncoding, EncodingBrotli) {
-		return EncodingBrotli
-	}
-	if strings.Contains(acceptEncoding, EncodingGzip) {
-		return EncodingGzip
+
+	var hasZstd, hasBrotli, hasGzip bool
+	for part := range strings.SplitSeq(acceptEncoding, ",") {
+		token, params, hasParams := strings.Cut(part, ";")
+		if hasParams && isZeroQuality(params) {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(token)) {
+		case EncodingZstd:
+			hasZstd = true
+		case EncodingBrotli:
+			hasBrotli = true
+		case EncodingGzip:
+			hasGzip = true
+		}
 	}
 
-	return ""
+	switch {
+	case hasZstd:
+		return EncodingZstd
+	case hasBrotli:
+		return EncodingBrotli
+	case hasGzip:
+		return EncodingGzip
+	default:
+		return ""
+	}
 }
 
 // IsCompressible reports whether the MIME type is compressible.
@@ -131,7 +166,8 @@ func IsCompressible(contentType string) bool {
 	if contentType == "" {
 		return true
 	}
-	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	rawMedia, _, _ := strings.Cut(contentType, ";")
+	mediaType := strings.ToLower(strings.TrimSpace(rawMedia))
 	if strings.HasPrefix(mediaType, "text/") {
 		return true
 	}
@@ -152,6 +188,10 @@ type compressedWriter struct {
 	releaseFn  func()
 	encoding   string
 	wroteHead  bool
+}
+
+func (cw *compressedWriter) Unwrap() http.ResponseWriter {
+	return cw.ResponseWriter
 }
 
 func (cw *compressedWriter) initCompression() {
@@ -202,6 +242,9 @@ func (cw *compressedWriter) Close() error {
 }
 
 func (cw *compressedWriter) Flush() {
+	if f, ok := cw.writer.(writerFlusher); ok {
+		_ = f.Flush()
+	}
 	if flusher, ok := cw.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}

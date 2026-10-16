@@ -141,6 +141,16 @@ func NewTEDAPIv1r(host, password, rsaKeyPath string, timeout time.Duration, pool
 	}, nil
 }
 
+// Close releases idle HTTP connections held by the v1r transport.
+func (v *TEDAPIv1r) Close() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.client != nil {
+		v.client.CloseIdleConnections()
+	}
+}
+
 // Login authenticates with the gateway via /api/login/Basic to obtain a Bearer token.
 func (v *TEDAPIv1r) Login(ctx context.Context) error {
 	v.mu.Lock()

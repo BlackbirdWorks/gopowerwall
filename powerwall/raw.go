@@ -4,6 +4,10 @@ import (
 	"context"
 )
 
+// GetFileStoreConfig returns the TEDAPI FileStore configuration as a
+// map[string]any - there is no typed model for this data yet. Only a
+// TEDAPI-based connection ([ModeTEDAPI] or [ModeV1r]) supports this; other
+// modes return [ErrUnsupported].
 func (p *Powerwall) GetFileStoreConfig(ctx context.Context) (map[string]any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -122,7 +126,3 @@ func (p *Powerwall) GetFleetAPIStatus(ctx context.Context) (any, error) {
 
 	return nil, ErrUnsupported
 }
-
-// AggregatesOption customizes a single call to [Powerwall.Aggregates] (and,
-// transitively, [Powerwall.Snapshot], which builds on the same corrections).
-// Build one with [WithSiteZeroThreshold] or [WithNegativeSolarCorrection].

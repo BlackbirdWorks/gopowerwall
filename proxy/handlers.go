@@ -139,19 +139,21 @@ func (s *Server) handlePWFacing(ctx context.Context, w http.ResponseWriter, reqP
 }
 
 func (s *Server) renderIndexHTML(ctx context.Context, content []byte) []byte {
-	htmlStr := string(content)
 	ver, hash := "", ""
 	if st, err := s.PW.Status(ctx); err == nil {
 		ver = st.Version
 		hash = st.GitHash
 	}
-	htmlStr = strings.ReplaceAll(htmlStr, "{VERSION}", ver)
-	htmlStr = strings.ReplaceAll(htmlStr, "{HASH}", hash)
-	htmlStr = strings.ReplaceAll(htmlStr, "{EMAIL}", s.Config.Email)
 	assetPrefix := s.Config.APIBaseURL + "viz-static/"
-	htmlStr = strings.ReplaceAll(htmlStr, "{STYLE}", assetPrefix+s.Config.Style)
-	htmlStr = strings.ReplaceAll(htmlStr, "{ASSET_PREFIX}", assetPrefix)
-	htmlStr = strings.ReplaceAll(htmlStr, "{API_BASE_URL}", s.Config.APIBaseURL+"api")
+	replacer := strings.NewReplacer(
+		"{VERSION}", ver,
+		"{HASH}", hash,
+		"{EMAIL}", s.Config.Email,
+		"{STYLE}", assetPrefix+s.Config.Style,
+		"{ASSET_PREFIX}", assetPrefix,
+		"{API_BASE_URL}", s.Config.APIBaseURL+"api",
+	)
+	htmlStr := replacer.Replace(string(content))
 
 	return InjectJS([]byte(htmlStr), s.Config.Style)
 }
