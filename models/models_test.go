@@ -111,7 +111,20 @@ func TestFixtureRoundTrip(t *testing.T) {
 				var op models.Operation
 				require.NoError(t, json.Unmarshal(raw, &op))
 				assert.Equal(t, "self_consumption", op.RealMode)
-				assert.InDelta(t, 81.0, op.BackupReservePercent, 0.001)
+				require.NotNil(t, op.BackupReservePercent)
+				assert.InDelta(t, 81.0, *op.BackupReservePercent, 0.001)
+			},
+		},
+		{
+			name: "Operation decodes solar-only /api/operation with null reserve",
+			verify: func(t *testing.T, _ []byte) {
+				t.Helper()
+
+				var op models.Operation
+				raw := []byte(`{"real_mode":"self_consumption","backup_reserve_percent":null}`)
+				require.NoError(t, json.Unmarshal(raw, &op))
+				assert.Equal(t, "self_consumption", op.RealMode)
+				assert.Nil(t, op.BackupReservePercent)
 			},
 		},
 		{
@@ -204,7 +217,11 @@ func TestFixtureRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			tc.verify(t, readFixture(t, tc.fixture))
+			var raw []byte
+			if tc.fixture != "" {
+				raw = readFixture(t, tc.fixture)
+			}
+			tc.verify(t, raw)
 		})
 	}
 }
@@ -251,8 +268,12 @@ func TestHandwrittenRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name:  "PowerwallTemps",
-			model: models.PowerwallTemps{Temps: map[string]float64{"TETHC--1": 28.5}},
+			name: "PowerwallTemps",
+			model: func() models.PowerwallTemps {
+				t := 28.5
+
+				return models.PowerwallTemps{Temps: map[string]*float64{"TETHC--1": &t}}
+			}(),
 		},
 		{
 			name:  "PowerSummary",

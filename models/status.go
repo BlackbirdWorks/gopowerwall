@@ -57,16 +57,18 @@ type GridStatusResponse struct {
 
 // GatewayStatus represents /api/status.
 type GatewayStatus struct {
-	DIN              string `json:"din"`
-	StartTime        string `json:"start_time"`
-	UpTimeSeconds    string `json:"up_time_seconds"`
-	Version          string `json:"version"`
-	GitHash          string `json:"git_hash"`
-	DeviceType       string `json:"device_type"`
-	TEGType          string `json:"teg_type"`
-	SyncType         string `json:"sync_type"`
-	CommissionCount  int    `json:"commission_count"`
-	IsNew            bool   `json:"is_new"`
-	CellularDisabled bool   `json:"cellular_disabled"`
-	CanReboot        bool   `json:"can_reboot"`
+	TEGType               string `json:"teg_type"`
+	BatteryCommissionDate string `json:"battery_commission_date,omitempty"`
+	UpTimeSeconds         string `json:"up_time_seconds"`
+	Version               string `json:"version"`
+	GitHash               string `json:"git_hash"`
+	DeviceType            string `json:"device_type"`
+	InstallationDate      string `json:"installation_date,omitempty"`
+	DIN                   string `json:"din"`
+	StartTime             string `json:"start_time"`
+	SyncType              string `json:"sync_type"`
+	CommissionCount       int    `json:"commission_count"`
+	CellularDisabled      bool   `json:"cellular_disabled"`
+	CanReboot             bool   `json:"can_reboot"`
+	IsNew                 bool   `json:"is_new"`
 }

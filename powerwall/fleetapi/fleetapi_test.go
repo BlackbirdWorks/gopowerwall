@@ -1499,3 +1499,77 @@ func TestFleetAPIAuthenticateRefresh(t *testing.T) {
 		},
 	)
 }
+
+func TestFleetAPITariff(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		handler http.HandlerFunc
+		call    func(t *testing.T, f *fleetapi.Client)
+		name    string
+	}
+
+	for _, tc := range []testCase{
+		{
+			name: "GET tariff_rate extracts tariff_content from site_info",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/1/energy_sites/"+testSiteID+"/site_info" {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"response": map[string]any{
+							"tariff_content": map[string]any{
+								"name": "Super Tariff",
+							},
+						},
+					})
+
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			},
+			call: func(t *testing.T, f *fleetapi.Client) {
+				t.Helper()
+				res, err := f.Poll(t.Context(), "/api/tesla/tariff_rate", true, false, false)
+				require.NoError(t, err)
+				m, ok := res.(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, "Super Tariff", m["name"])
+			},
+		},
+		{
+			name: "POST time_of_use_settings forwards payload",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/1/energy_sites/"+testSiteID+"/time_of_use_settings" && r.Method == http.MethodPost {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"response": map[string]any{"updated": true},
+					})
+
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			},
+			call: func(t *testing.T, f *fleetapi.Client) {
+				t.Helper()
+				res, err := f.Post(
+					t.Context(),
+					"/api/tesla/time_of_use_settings",
+					map[string]any{"tou_settings": "custom"},
+					"",
+					false,
+					false,
+				)
+				require.NoError(t, err)
+				m, ok := res.(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, true, m["updated"])
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newTestServer(t, tc.handler)
+			f := newAuthenticatedBackend(t, srv)
+			tc.call(t, f)
+		})
+	}
+}

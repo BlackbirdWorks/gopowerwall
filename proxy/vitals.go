@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/blackbirdworks/gopowerwall/models"
 )
@@ -92,21 +93,46 @@ func (s *Server) handleStrings(ctx context.Context, w http.ResponseWriter, reqPa
 }
 
 // fanSpeedsPWJSON flattens the client's [models.FanSpeedEntry] map into the
-// simplified FAN{i}_actual/FAN{i}_target shape pypowerwall's /fans/pw route
-// emits (server.py:2488-2500): 1-based, ordered by sorting the fan-speed
-// map's own device-name keys - not by any inherent index, since the raw
-// map carries no ordering of its own on either side. A field is JSON null
-// (rather than absent) when the corresponding device never reported that
-// particular signal, matching upstream's `value.get(...)` returning None.
+// simplified FAN{i}_actual/FAN{i}_target/FAN{i}_duty shape pypowerwall's /fans/pw route
+// emits (server.py:2498-2522): Powerwall 2/+ fans first sorted by key, then two fans
+// (A and B) per PW3 inverter.
 func fanSpeedsPWJSON(speeds map[string]models.FanSpeedEntry) map[string]any {
-	keys := slices.Sorted(maps.Keys(speeds))
+	var pvacKeys []string
+	var tepinvKeys []string
+	for k := range speeds {
+		if strings.HasPrefix(k, "TEPINV--") {
+			tepinvKeys = append(tepinvKeys, k)
+		} else {
+			pvacKeys = append(pvacKeys, k)
+		}
+	}
+	slices.Sort(pvacKeys)
+	slices.Sort(tepinvKeys)
 
-	out := make(map[string]any, len(keys)*2) //nolint:mnd // two output keys (_actual/_target) per device.
-	for i, k := range keys {
+	out := make(map[string]any, len(pvacKeys)*2+len(tepinvKeys)*6)
+	for i, k := range pvacKeys {
 		entry := speeds[k]
 		prefix := fanPrefix(i + 1)
 		out[prefix+"_actual"] = entry.ActualRPM
 		out[prefix+"_target"] = entry.TargetRPM
+	}
+
+	n := len(pvacKeys)
+	for _, k := range tepinvKeys {
+		entry := speeds[k]
+		// Fan A
+		n++
+		prefixA := fanPrefix(n)
+		out[prefixA+"_actual"] = entry.FanSpeedA
+		out[prefixA+"_target"] = nil
+		out[prefixA+"_duty"] = entry.FanDutyA
+
+		// Fan B
+		n++
+		prefixB := fanPrefix(n)
+		out[prefixB+"_actual"] = entry.FanSpeedB
+		out[prefixB+"_target"] = nil
+		out[prefixB+"_duty"] = entry.FanDutyB
 	}
 
 	return out

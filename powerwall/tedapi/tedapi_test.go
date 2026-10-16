@@ -706,43 +706,85 @@ func TestBackendOperation(t *testing.T) {
 func TestBackendSiteInfo(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns site_info from config", func(t *testing.T) {
-		t.Parallel()
+	type testCase struct {
+		wantSiteName any
+		wantTimezone any
+		wantEnergy   any
+		wantGridCode any
+		name         string
+		configJSON   string
+		isNilConfig  bool
+	}
 
-		host, _ := newLegacyTEDAPIServer(t, `{"site_info":{"site_name":"MyHouse"}}`, `{}`)
-		p := newLegacyBackend(host)
+	cases := []testCase{
+		{
+			name: "returns mapped site_info from config",
+			configJSON: `{"site_info":{"site_name":"MyHouse","timezone":"America/Chicago",` +
+				`"nominal_system_energy_ac":13.5,"grid_code":"UL1741"}}`,
+			wantSiteName: "MyHouse",
+			wantTimezone: "America/Chicago",
+			wantEnergy:   13.5,
+			wantGridCode: "UL1741",
+		},
+		{
+			name:         "falls back to defaults when config is unavailable",
+			isNilConfig:  true,
+			wantSiteName: "Powerwall",
+			wantTimezone: "America/Los_Angeles",
+		},
+		{
+			name:         "site name reads nested site_info.site_name",
+			configJSON:   `{"site_info":{"site_name":"NestedName"}}`,
+			wantSiteName: "NestedName",
+		},
+		{
+			name:         "site name falls back to top-level site_name field",
+			configJSON:   `{"site_name":"TopLevelName"}`,
+			wantSiteName: "TopLevelName",
+		},
+	}
 
-		res, err := p.Poll(t.Context(), "/api/site_info", false, false, false)
-		require.NoError(t, err)
-		m, ok := res.(map[string]any)
-		require.True(t, ok)
-		assert.Equal(t, "MyHouse", m["site_name"])
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	t.Run("falls back to defaults when config is unavailable", func(t *testing.T) {
-		t.Parallel()
+			var p *tedapi.Driver
+			if tc.isNilConfig {
+				p = newLegacyBackend("127.0.0.1:1")
+			} else {
+				host, _ := newLegacyTEDAPIServer(t, tc.configJSON, `{}`)
+				p = newLegacyBackend(host)
+			}
 
-		p := newLegacyBackend("127.0.0.1:1")
+			res, err := p.Poll(t.Context(), "/api/site_info", false, false, false)
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
 
-		res, err := p.Poll(t.Context(), "/api/site_info", false, false, false)
-		require.NoError(t, err)
-		assert.Equal(t, map[string]any{"site_name": "Powerwall", "timezone": "America/Los_Angeles"}, res)
+			if tc.wantSiteName != nil {
+				assert.Equal(t, tc.wantSiteName, m["site_name"])
+			}
+			if tc.wantTimezone != nil {
+				assert.Equal(t, tc.wantTimezone, m["timezone"])
+			}
+			if tc.wantEnergy != nil {
+				assert.Equal(t, tc.wantEnergy, m["max_system_energy_kWh"])
+			}
+			if tc.wantGridCode != nil {
+				gc, okGC := m["grid_code"].(map[string]any)
+				require.True(t, okGC)
+				assert.Equal(t, tc.wantGridCode, gc["grid_code"])
+			}
 
-		nameRes, err := p.Poll(t.Context(), "/api/site_info/site_name", false, false, false)
-		require.NoError(t, err)
-		assert.Equal(t, map[string]any{"site_name": "Powerwall"}, nameRes)
-	})
-
-	t.Run("site name reads the top-level site_name field", func(t *testing.T) {
-		t.Parallel()
-
-		host, _ := newLegacyTEDAPIServer(t, `{"site_name":"TopLevelName"}`, `{}`)
-		p := newLegacyBackend(host)
-
-		res, err := p.Poll(t.Context(), "/api/site_info/site_name", false, false, false)
-		require.NoError(t, err)
-		assert.Equal(t, map[string]any{"site_name": "TopLevelName"}, res)
-	})
+			nameRes, err := p.Poll(t.Context(), "/api/site_info/site_name", false, false, false)
+			require.NoError(t, err)
+			nameMap, okName := nameRes.(map[string]any)
+			require.True(t, okName)
+			if tc.wantSiteName != nil {
+				assert.Equal(t, tc.wantSiteName, nameMap["site_name"])
+			}
+		})
+	}
 }
 
 func TestBackendSiteMaster(t *testing.T) {
@@ -801,19 +843,72 @@ func TestBackendSiteMaster(t *testing.T) {
 func TestBackendStatus(t *testing.T) {
 	t.Parallel()
 
-	t.Run("din falls back to config vin when client din is unset", func(t *testing.T) {
-		t.Parallel()
+	type testCase struct {
+		wantComm   any
+		wantStart  any
+		wantUptime any
+		name       string
+		configJSON string
+		queryJSON  string
+		wantDIN    string
+		wantVer    string
+	}
 
-		host, _ := newLegacyTEDAPIServer(t, `{"vin":"VIN-1","version":"24.4.0"}`, `{}`)
-		p := newLegacyBackend(host)
+	cases := []testCase{
+		{
+			name:       "din falls back to config vin when client din is unset",
+			configJSON: `{"vin":"VIN-1","version":"24.4.0"}`,
+			wantDIN:    "VIN-1",
+			wantVer:    "24.4.0",
+		},
+		{
+			name:       "battery commission date extracted from site_info",
+			configJSON: `{"vin":"VIN-2","version":"24.4.1","site_info":{"battery_commission_date":"2023-01-01T00:00:00Z"}}`,
+			wantDIN:    "VIN-2",
+			wantVer:    "24.4.1",
+			wantComm:   "2023-01-01T00:00:00Z",
+		},
+		{
+			name:       "gateway start_time and up_time_seconds computed from SYNC_Uptime",
+			configJSON: `{"vin":"VIN-3","version":"24.4.2"}`,
+			queryJSON: `{"esCan":{"bus":{"SYNC":{"packageSerialNumber":"SN-SYNC-1"}}},` +
+				`"components":{"msa":[{"serialNumber":"SN-SYNC-1","signals":[{"name":"SYNC_Uptime","value":3600000}]}]},` +
+				`"system":{"time":"2026-09-24T21:28:16-07:00"}}`,
+			wantDIN:    "VIN-3",
+			wantVer:    "24.4.2",
+			wantStart:  "2026-09-24 20:28:16 -0700",
+			wantUptime: "1h0m0s",
+		},
+	}
 
-		res, err := p.Poll(t.Context(), "/api/status", false, false, false)
-		require.NoError(t, err)
-		m, ok := res.(map[string]any)
-		require.True(t, ok)
-		assert.Equal(t, "VIN-1", m["din"])
-		assert.Equal(t, "24.4.0", m["version"])
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			qJSON := tc.queryJSON
+			if qJSON == "" {
+				qJSON = "{}"
+			}
+			host, _ := newLegacyTEDAPIServer(t, tc.configJSON, qJSON)
+			p := newLegacyBackend(host)
+
+			res, err := p.Poll(t.Context(), "/api/status", false, false, false)
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantDIN, m["din"])
+			assert.Equal(t, tc.wantVer, m["version"])
+			if tc.wantComm != nil {
+				assert.Equal(t, tc.wantComm, m["battery_commission_date"])
+			}
+			if tc.wantStart != nil {
+				assert.Equal(t, tc.wantStart, m["start_time"])
+			}
+			if tc.wantUptime != nil {
+				assert.Equal(t, tc.wantUptime, m["up_time_seconds"])
+			}
+		})
+	}
 }
 
 func TestBackendSystemStatus(t *testing.T) {

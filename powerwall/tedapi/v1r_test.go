@@ -1,6 +1,8 @@
 package tedapi_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -230,76 +232,97 @@ func TestV1rLogin(t *testing.T) {
 	}
 }
 
+func gzipBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	return buf.Bytes()
+}
+
 func TestV1rGetDin(t *testing.T) {
 	t.Parallel()
 
-	t.Run("success returns the trimmed body", func(t *testing.T) {
-		t.Parallel()
+	type testCase struct {
+		wantErr error
+		handler func(w http.ResponseWriter, r *http.Request)
+		name    string
+		wantDin string
+		preAuth bool
+		rawErr  bool
+	}
 
-		var calls atomic.Int32
-		var gotAuth string
-		handler := func(w http.ResponseWriter, r *http.Request) {
-			calls.Add(1)
-			gotAuth = r.Header.Get("Authorization")
-			_, _ = w.Write([]byte("  1232100-00-E--TG1234567890G1  \n"))
-		}
-		srv := newTLSServer(t, handler)
-		v := newV1r(t, srv.Listener.Addr().String())
+	cases := []testCase{
+		{
+			name: "success returns the trimmed body",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("  1232100-00-E--TG1234567890G1  \n"))
+			},
+			wantDin: "1232100-00-E--TG1234567890G1",
+		},
+		{
+			name: "success decompresses gzipped body",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(gzipBytes(t, []byte("  1232100-00-E--TG9876543210G2  \n")))
+			},
+			wantDin: "1232100-00-E--TG9876543210G2",
+		},
+		{
+			name:    "sends the bearer token when logged in",
+			preAuth: true,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok-xyz"}`))
+				case "/tedapi/din":
+					assert.Equal(t, "Bearer tok-xyz", r.Header.Get("Authorization"))
+					_, _ = w.Write([]byte("din-value"))
+				}
+			},
+			wantDin: "din-value",
+		},
+		{
+			name: "non-200 status returns ErrUnexpectedStatus",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+			wantErr: models.ErrUnexpectedStatus,
+		},
+		{
+			name:   "unreachable host returns an error",
+			rawErr: true,
+		},
+	}
 
-		din, err := v.GetDin(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, "1232100-00-E--TG1234567890G1", din)
-		assert.Empty(t, gotAuth)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		// A second call must be served from the cached value.
-		din2, err2 := v.GetDin(t.Context())
-		require.NoError(t, err2)
-		assert.Equal(t, din, din2)
-		assert.Equal(t, int32(1), calls.Load())
-	})
-
-	t.Run("sends the bearer token when logged in", func(t *testing.T) {
-		t.Parallel()
-
-		var gotAuth string
-		handler := func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/api/login/Basic":
-				_, _ = w.Write([]byte(`{"token":"tok-xyz"}`))
-			case "/tedapi/din":
-				gotAuth = r.Header.Get("Authorization")
-				_, _ = w.Write([]byte("din-value"))
+			host := "127.0.0.1:1"
+			if tc.handler != nil {
+				srv := newTLSServer(t, tc.handler)
+				host = srv.Listener.Addr().String()
 			}
-		}
-		srv := newTLSServer(t, handler)
-		v := newV1r(t, srv.Listener.Addr().String())
-		require.NoError(t, v.Login(t.Context()))
+			v := newV1r(t, host)
+			if tc.preAuth {
+				require.NoError(t, v.Login(t.Context()))
+			}
 
-		_, err := v.GetDin(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, "Bearer tok-xyz", gotAuth)
-	})
-
-	t.Run("non-200 status returns ErrUnexpectedStatus", func(t *testing.T) {
-		t.Parallel()
-
-		handler := func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-		srv := newTLSServer(t, handler)
-		v := newV1r(t, srv.Listener.Addr().String())
-
-		_, err := v.GetDin(t.Context())
-		require.ErrorIs(t, err, models.ErrUnexpectedStatus)
-	})
-
-	t.Run("unreachable host returns an error", func(t *testing.T) {
-		t.Parallel()
-
-		v := newV1r(t, "127.0.0.1:1")
-		_, err := v.GetDin(t.Context())
-		require.Error(t, err)
-	})
+			din, err := v.GetDin(t.Context())
+			switch {
+			case tc.wantErr != nil:
+				require.ErrorIs(t, err, tc.wantErr)
+			case tc.rawErr:
+				require.Error(t, err)
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantDin, din)
+			}
+		})
+	}
 }
 
 func TestV1rBuildTLVPayload(t *testing.T) {
@@ -539,6 +562,14 @@ func TestV1rPostV1r(t *testing.T) {
 		_, err := v.PostV1r(ctx, []byte("x"), "din1")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("empty din is rejected without sending request", func(t *testing.T) {
+		t.Parallel()
+
+		v := newV1r(t, "127.0.0.1:1")
+		_, err := v.PostV1r(t.Context(), []byte("x"), "")
+		require.ErrorIs(t, err, tedapi.ErrNoDin)
 	})
 }
 

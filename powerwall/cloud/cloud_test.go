@@ -864,8 +864,11 @@ func TestCloudNetworkBackedBehavior(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "cloud-din", m["din"])
 		assert.Equal(t, "1.2.3", m["version"])
-		// The fake git hash on the cloud status endpoint is a frozen parity value.
-		assert.Equal(t, "27626f98a66cad5c665bbe1d4d788cdb3e94fd34", m["git_hash"])
+		assert.Nil(t, m["git_hash"])
+		assert.Nil(t, m["start_time"])
+		assert.Nil(t, m["up_time_seconds"])
+		assert.Equal(t, "unknown", m["sync_type"])
+		assert.Equal(t, "2024-01-01", m["installation_date"])
 	})
 
 	t.Run("getAPIStatus defaults when config is unreachable", func(t *testing.T) {
@@ -1508,4 +1511,112 @@ func TestCloudAuthenticateBootstrapsFromEnv(t *testing.T) {
 		err := c.Authenticate(t.Context())
 		require.ErrorIs(t, err, models.ErrMissingAuthFile)
 	})
+
+	type tariffCase struct {
+		handler http.HandlerFunc
+		call    func(t *testing.T, c *cloud.Client)
+		name    string
+	}
+
+	for _, tc := range []tariffCase{
+		{
+			name: "GET tariff_rate queries energy_sites/:site/tariff_rate",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/1/energy_sites/"+testSiteID+"/tariff_rate" {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"response": map[string]any{"rate": 0.25},
+					})
+
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			},
+			call: func(t *testing.T, c *cloud.Client) {
+				t.Helper()
+				res, err := c.Poll(t.Context(), "/api/tesla/tariff_rate", true, false, false)
+				require.NoError(t, err)
+				m, ok := res.(map[string]any)
+				require.True(t, ok)
+				assert.InDelta(t, 0.25, m["rate"], 0.001)
+			},
+		},
+		{
+			name: "POST time_of_use_settings posts payload and invalidates cache",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/1/energy_sites/"+testSiteID+"/time_of_use_settings" && r.Method == http.MethodPost {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"response": map[string]any{"ok": true},
+					})
+
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			},
+			call: func(t *testing.T, c *cloud.Client) {
+				t.Helper()
+				res, err := c.Post(
+					t.Context(),
+					"/api/tesla/time_of_use_settings",
+					map[string]any{"tou": "settings"},
+					"",
+					false,
+					false,
+				)
+				require.NoError(t, err)
+				m, ok := res.(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, true, m["ok"])
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newAuthenticatedCloudBackend(t, newCloudTestServer(t, tc.handler))
+			tc.call(t, c)
+		})
+	}
+
+	type recoverSiteCase struct {
+		handler http.HandlerFunc
+		call    func(t *testing.T, c *cloud.Client)
+		name    string
+	}
+
+	for _, tc := range []recoverSiteCase{
+		{
+			name: "404 on site endpoint recovers to single product site",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/1/energy_sites/" + testSiteID + "/tariff_rate":
+					w.WriteHeader(http.StatusNotFound)
+				case "/api/1/products":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"response": []map[string]any{
+							{"energy_site_id": 8888, "site_name": "New Cloud Site"},
+						},
+					})
+				case "/api/1/energy_sites/8888/tariff_rate":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"response": map[string]any{
+							"rate": 0.30,
+						},
+					})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			},
+			call: func(t *testing.T, c *cloud.Client) {
+				t.Helper()
+				res, err := c.Poll(t.Context(), "/api/tesla/tariff_rate", true, false, false)
+				require.NoError(t, err)
+				m, ok := res.(map[string]any)
+				require.True(t, ok)
+				assert.InDelta(t, 0.30, m["rate"], 0.001)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newAuthenticatedCloudBackend(t, newCloudTestServer(t, tc.handler))
+			tc.call(t, c)
+		})
+	}
 }

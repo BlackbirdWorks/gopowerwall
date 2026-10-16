@@ -40,6 +40,26 @@ func TestBuildPowerwallModeValidation(t *testing.T) {
 			flags:   ConnectionFlags{Local: true},
 			wantErr: ErrLocalMissingHost,
 		},
+		{
+			name:    "tedapi_api_version without tedapi or v1r",
+			flags:   ConnectionFlags{TEDAPIApiVersion: "V2024_06"},
+			wantErr: ErrTedapiOptsRequireTedapiOrV1r,
+		},
+		{
+			name:    "tedapi_auth_mode without tedapi or v1r",
+			flags:   ConnectionFlags{TEDAPIAuthMode: "basic"},
+			wantErr: ErrTedapiOptsRequireTedapiOrV1r,
+		},
+		{
+			name: "tedapi_auth_mode with v1r",
+			flags: ConnectionFlags{
+				V1r:            true,
+				Host:           "127.0.0.1:9",
+				GwPwd:          "secret",
+				TEDAPIAuthMode: "basic",
+			},
+			wantErr: ErrTedapiAuthModeRequiresTedapi,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -64,8 +84,9 @@ func TestBuildPowerwallAppliesEveryConfiguredOption(t *testing.T) {
 	t.Parallel()
 
 	type testCase struct {
-		flags func(t *testing.T) ConnectionFlags
-		name  string
+		flags         func(t *testing.T) ConnectionFlags
+		name          string
+		wantConnected bool
 	}
 
 	for _, tc := range []testCase{
@@ -81,20 +102,39 @@ func TestBuildPowerwallAppliesEveryConfiguredOption(t *testing.T) {
 					AuthPath: t.TempDir(),
 				}
 			},
+			wantConnected: false,
 		},
 		{
-			name: "v1r mode with an explicit RSA key path",
+			name: "v1r mode with an explicit RSA key path and api version",
 			flags: func(t *testing.T) ConnectionFlags {
 				t.Helper()
 
 				return ConnectionFlags{
-					V1r:        true,
-					Host:       "127.0.0.1:9",
-					GwPwd:      "gatewaypwd",
-					RsaKeyPath: "explicit-key.pem",
-					AuthPath:   t.TempDir(),
+					V1r:              true,
+					Host:             "127.0.0.1:9",
+					GwPwd:            "gatewaypwd",
+					RsaKeyPath:       "explicit-key.pem",
+					AuthPath:         t.TempDir(),
+					TEDAPIApiVersion: "V2026_06",
 				}
 			},
+			wantConnected: false,
+		},
+		{
+			name: "tedapi mode with api version and auth mode",
+			flags: func(t *testing.T) ConnectionFlags {
+				t.Helper()
+
+				return ConnectionFlags{
+					TEDAPI:           true,
+					Host:             "127.0.0.1:9",
+					GwPwd:            "gatewaypwd",
+					AuthPath:         t.TempDir(),
+					TEDAPIApiVersion: "V2024_06",
+					TEDAPIAuthMode:   "bearer",
+				}
+			},
+			wantConnected: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,7 +144,7 @@ func TestBuildPowerwallAppliesEveryConfiguredOption(t *testing.T) {
 			pw, err := flags.BuildPowerwall(t.Context())
 			require.NoError(t, err)
 			require.NotNil(t, pw)
-			assert.False(t, pw.IsConnected())
+			assert.Equal(t, tc.wantConnected, pw.IsConnected())
 		})
 	}
 }

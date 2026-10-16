@@ -1,5 +1,7 @@
 package models
 
+import "encoding/json"
+
 // StringMetric represents solar string voltage, current, power, and the
 // gateway's own PV state string (e.g. "Pv_Active", "PV_Active_Parallel",
 // "Pv_Standby" - the exact spelling is firmware/backend-dependent, see
@@ -17,9 +19,33 @@ type SolarStrings struct {
 	Strings map[string]StringMetric `json:"strings"`
 }
 
-// PowerwallTemps maps device IDs to temperature in Celsius.
+// PowerwallTemps maps device IDs to temperature in Celsius, or nil if unavailable.
 type PowerwallTemps struct {
-	Temps map[string]float64 `json:"temps"`
+	Temps map[string]*float64 `json:"temps"`
+}
+
+// MarshalJSON marshals PowerwallTemps directly as its internal Temps map to preserve parity.
+func (pt PowerwallTemps) MarshalJSON() ([]byte, error) {
+	if pt.Temps == nil {
+		return []byte("{}"), nil
+	}
+
+	return json.Marshal(pt.Temps)
+}
+
+// UnmarshalJSON unmarshals either a direct map or an object with a "temps" key into PowerwallTemps.
+func (pt *PowerwallTemps) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &pt.Temps); err == nil {
+		return nil
+	}
+	type alias PowerwallTemps
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	pt.Temps = a.Temps
+
+	return nil
 }
 
 // AlertsList contains active alert strings.
@@ -38,15 +64,13 @@ type VitalsData struct {
 	Devices map[string]map[string]any `json:"devices"`
 }
 
-// FanSpeedEntry holds one PVAC device's cooling-fan speed readings in RPM,
-// mirroring pypowerwall's extract_fan_speeds/get_fan_speeds
-// (pypowerwall/tedapi/__init__.py:1879-1908). A field is nil - and, thanks
-// to the omitempty tag, entirely absent from a marshaled /fans response -
-// when the gateway's response did not carry that particular signal:
-// upstream's own dict comprehension only ever inserts a signal name it
-// found a non-null value for, so the JSON output omits a missing key
-// rather than emitting an explicit null for it.
+// FanSpeedEntry holds cooling-fan speed readings in RPM and duty cycle in percent,
+// mirroring pypowerwall's extract_fan_speeds/get_fan_speeds and PW3 inverter fans.
 type FanSpeedEntry struct {
 	ActualRPM *float64 `json:"PVAC_Fan_Speed_Actual_RPM,omitempty"`
 	TargetRPM *float64 `json:"PVAC_Fan_Speed_Target_RPM,omitempty"`
+	FanSpeedA *float64 `json:"PCH_FanSpeed_A,omitempty"`
+	FanSpeedB *float64 `json:"PCH_FanSpeed_B,omitempty"`
+	FanDutyA  *float64 `json:"PCH_FanDuty_A,omitempty"`
+	FanDutyB  *float64 `json:"PCH_FanDuty_B,omitempty"`
 }

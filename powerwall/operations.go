@@ -49,8 +49,11 @@ func (p *Powerwall) GetReserve(ctx context.Context) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if op.BackupReservePercent == nil {
+		return 0, ErrFieldMissing
+	}
 
-	return op.BackupReservePercent, nil
+	return *op.BackupReservePercent, nil
 }
 
 // GetReserveScaled returns the current backup reserve percentage rescaled
@@ -77,8 +80,11 @@ func (p *Powerwall) GetReserveForced(ctx context.Context) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if op.BackupReservePercent == nil {
+		return 0, ErrFieldMissing
+	}
 
-	return calc.ScaleBatteryLevel(op.BackupReservePercent), nil
+	return calc.ScaleBatteryLevel(*op.BackupReservePercent), nil
 }
 
 // GetMode returns the current real operating mode (e.g.
@@ -139,8 +145,10 @@ func (p *Powerwall) backfillLocalOperation(
 		return nil, nil, fmt.Errorf("%w: %w", models.ErrOperationBackfillFailed, err)
 	}
 	if !haveLevel {
-		backfillLevel := current.BackupReservePercent
-		level = &backfillLevel
+		if current.BackupReservePercent != nil {
+			backfillLevel := *current.BackupReservePercent
+			level = &backfillLevel
+		}
 	}
 	if !haveMode {
 		backfillMode := current.RealMode
@@ -198,7 +206,7 @@ func (p *Powerwall) SetOperation(ctx context.Context, level *float64, mode *stri
 
 	result := models.Operation{}
 	if level != nil {
-		result.BackupReservePercent = *level
+		result.BackupReservePercent = level
 	}
 	if mode != nil {
 		result.RealMode = *mode

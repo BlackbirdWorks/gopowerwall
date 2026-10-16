@@ -170,6 +170,8 @@ const (
 		`"current_time":1702756114429,"last_status_time":1702753309227,"version":"23.28.2 27626f98",` +
 		`"offline_updating":false,"offline_update_error":"","estimated_bytes_per_second":null}`
 	MockSolars = `[{"brand":"Tesla","model":"Solar Inverter 7.6","power_rating_watts":7600}]`
+	MockTariff = `{"code":"SIMULATOR-TOU","name":"Simulator Time-of-Use","utility":"Simulator",` +
+		`"currency":"USD","energy_charges":{"AllYear":{"OFF_PEAK":0.10,"ON_PEAK":0.25}}}`
 )
 
 // ParseJSON parses a canned JSON string into an any.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -44,24 +45,60 @@ func (p *Powerwall) Vitals(ctx context.Context) (models.VitalsData, error) {
 	return models.VitalsData{Devices: devices}, nil
 }
 
+func hasPW3TempReading(devices map[string]map[string]any) bool {
+	for dev, data := range devices {
+		if !strings.HasPrefix(dev, "TEPOD") {
+			continue
+		}
+		val, ok := data["HVP_PackTempMax"]
+		if !ok || val == nil {
+			continue
+		}
+		if vf, okFloat := val.(float64); okFloat && !math.IsNaN(vf) && !math.IsInf(vf, 0) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractDeviceTemp(dev string, data map[string]any, pw3HasReading bool) (*float64, bool) {
+	if strings.HasPrefix(dev, "TETHC") {
+		if t, ok := data["THC_AmbientTemp"].(float64); ok {
+			return &t, true
+		}
+	}
+	if pw3HasReading && strings.HasPrefix(dev, "TEPOD") {
+		if val, ok := data["HVP_PackTempMax"]; ok {
+			if t, okFloat := val.(float64); okFloat {
+				return &t, true
+			}
+
+			return nil, true
+		}
+	}
+
+	return nil, false
+}
+
 // Temps returns each Powerwall's ambient temperature in Celsius, keyed by
-// device name, read from the "THC_AmbientTemp" field of every device whose
-// name starts with "TETHC" in [Powerwall.Vitals]. It returns an empty
-// [models.PowerwallTemps] - never an error - if Vitals fails or the site
-// has no TETHC devices; the two cases are not distinguishable from the
-// result.
+// device name. For Powerwall 2/+, this is read from the "THC_AmbientTemp" field
+// of "TETHC" devices in [Powerwall.Vitals]. For Powerwall 3 (which lacks a thermal
+// controller), it reports the hottest battery-pack reading from "TEPOD" devices
+// ("HVP_PackTempMax"), matching upstream pypowerwall v0.17.4+ semantics.
+// It returns an empty [models.PowerwallTemps] if Vitals fails or no temperature
+// devices are present.
 func (p *Powerwall) Temps(ctx context.Context) models.PowerwallTemps {
 	vitals, err := p.Vitals(ctx)
 	if err != nil || len(vitals.Devices) == 0 {
-		return models.PowerwallTemps{Temps: make(map[string]float64)}
+		return models.PowerwallTemps{Temps: make(map[string]*float64)}
 	}
 
-	temps := make(map[string]float64, len(vitals.Devices))
+	pw3HasReading := hasPW3TempReading(vitals.Devices)
+	temps := make(map[string]*float64, len(vitals.Devices))
 	for dev, data := range vitals.Devices {
-		if strings.HasPrefix(dev, "TETHC") {
-			if t, ok := data["THC_AmbientTemp"].(float64); ok {
-				temps[dev] = t
-			}
+		if temp, ok := extractDeviceTemp(dev, data, pw3HasReading); ok {
+			temps[dev] = temp
 		}
 	}
 

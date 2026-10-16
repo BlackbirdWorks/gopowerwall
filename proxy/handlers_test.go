@@ -186,7 +186,7 @@ func TestHandleStatsFieldsAndConfig(t *testing.T) {
 	var stats map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&stats))
 
-	assert.Contains(t, stats["pypowerwall"], "Proxy t101")
+	assert.Contains(t, stats["pypowerwall"], "Proxy t106")
 	assert.Contains(t, stats, "uptime")
 	assert.Contains(t, stats, "ts")
 	assert.Contains(t, stats, "mem")

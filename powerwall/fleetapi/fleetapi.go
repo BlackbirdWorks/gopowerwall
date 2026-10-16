@@ -174,10 +174,14 @@ func (f *Client) initAPIMaps() {
 		"/api/solars": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSolars), nil
 		},
+		"/api/tesla/tariff_rate": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return f.getAPITariffRate(ctx, force)
+		},
 	}
 
 	f.postAPIMap = map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error){
-		"/api/operation": f.postAPIOperation,
+		"/api/operation":                  f.postAPIOperation,
+		"/api/tesla/time_of_use_settings": f.setAPITimeOfUseSettings,
 	}
 }
 
@@ -392,6 +396,70 @@ func (f *Client) getSiteConfig(ctx context.Context, force bool) (map[string]any,
 	return f.fetchSiteJSON(ctx, "SITE_CONFIG", url, force, siteConfigTTL)
 }
 
+func (f *Client) getAPITariffRate(ctx context.Context, force bool) (any, error) {
+	cfg, err := f.getSiteConfig(ctx, force)
+	if err != nil {
+		return nil, err
+	}
+	if resp, ok := cfg["response"].(map[string]any); ok {
+		if tariff, has := resp["tariff_content"]; has {
+			return tariff, nil
+		}
+	}
+	if tariff, ok := cfg["tariff_content"]; ok {
+		return tariff, nil
+	}
+
+	return nil, models.ErrFieldMissing
+}
+
+func (f *Client) setAPITimeOfUseSettings(
+	ctx context.Context,
+	payload any,
+	_ string,
+	_, _ bool,
+) (any, error) {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%w: payload must be map[string]any", models.ErrUnsupported)
+	}
+
+	bodyBytes, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/time_of_use_settings", f.baseURL, f.siteID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return nil, statusErr
+	}
+
+	var data map[string]any
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
+		return nil, decodeErr
+	}
+
+	f.cache.Delete("SITE_CONFIG")
+
+	if respData, hasResp := data["response"]; hasResp {
+		return respData, nil
+	}
+
+	return data, nil
+}
+
 // getSiteBattery fetches Tesla's "api/1/energy_sites/{site_id}/site_status"
 // endpoint - upstream's FleetAPI.get_site_status (fleetapi.py:593-597),
 // which total_pack_energy()/energy_left() read from (fleetapi.py:808-811) -
@@ -583,6 +651,7 @@ func (f *Client) getAPIStatus(ctx context.Context, force bool) (any, error) {
 	cfg, _ := f.getSiteConfig(ctx, force)
 	din := f.siteID
 	var version any = "23.28.2 27626f98"
+	var deviceType any = "teg"
 	if cfg != nil {
 		if d := lookup.Lookup(cfg, "response", "id"); d != nil {
 			din = fmt.Sprintf("%v", d)
@@ -590,21 +659,25 @@ func (f *Client) getAPIStatus(ctx context.Context, force bool) (any, error) {
 		if v := lookup.Lookup(cfg, "response", "version"); v != nil {
 			version = v
 		}
+		if dt := lookup.Lookup(cfg, "response", "components", "gateway"); dt != nil {
+			deviceType = dt
+		}
 	}
 
 	return map[string]any{
 		"din":               din,
-		"start_time":        lookup.Lookup(cfg, "response", "installation_date"),
+		"start_time":        nil,
 		"up_time_seconds":   nil,
 		"is_new":            false,
 		"version":           version,
-		"git_hash":          "27626f98a66cad5c665bbe1d4d788cdb3e94fd34",
+		"git_hash":          nil,
 		"commission_count":  0,
-		"device_type":       "teg",
+		"device_type":       deviceType,
 		"teg_type":          "unknown",
-		"sync_type":         "v2.1",
+		"sync_type":         "unknown",
 		"cellular_disabled": false,
 		"can_reboot":        true,
+		"installation_date": lookup.Lookup(cfg, "response", "installation_date"),
 	}, nil
 }
 

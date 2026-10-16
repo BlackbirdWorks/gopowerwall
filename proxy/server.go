@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	Build                = "t101"
+	Build                = "t106"
 	MaxPostBody          = 4096
 	URIStatsMax          = 100
 	defaultServerTimeout = 5 * time.Second

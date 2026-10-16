@@ -121,3 +121,51 @@ func TestGetQueryByName(t *testing.T) {
 		})
 	}
 }
+
+func TestExtraSignals(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name       string
+		role       string
+		wantSignal string
+	}
+
+	cases := []testCase{
+		{
+			name:       "components includes PCH_AmbientTemp",
+			role:       tedapi.QueryRoleComponents,
+			wantSignal: "PCH_AmbientTemp",
+		},
+		{
+			name:       "components includes PCH_FanSpeed_A",
+			role:       tedapi.QueryRoleComponents,
+			wantSignal: "PCH_FanSpeed_A",
+		},
+		{
+			name:       "components includes HVP_PackTempMax",
+			role:       tedapi.QueryRoleComponents,
+			wantSignal: "HVP_PackTempMax",
+		},
+		{
+			name:       "components includes BMS_kwhDischargeTotal",
+			role:       tedapi.QueryRoleComponents,
+			wantSignal: "BMS_kwhDischargeTotal",
+		},
+		{
+			name:       "device controller full includes SYNC_Uptime",
+			role:       tedapi.QueryRoleDeviceControllerFull,
+			wantSignal: "SYNC_Uptime",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			q := tedapi.GetQuery(tc.role, models.TEDAPIVersion2024_06)
+			require.NotNil(t, q)
+			assert.Contains(t, q.BValue, tc.wantSignal)
+		})
+	}
+}

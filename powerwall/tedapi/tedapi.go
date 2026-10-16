@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -164,19 +166,22 @@ func (c *Client) PostTEDAPI(ctx context.Context, pbBytes []byte) ([]byte, error)
 		return nil, err
 	}
 
-	// Check if gzipped (firmware 25.42.2+)
+	return decompressResponse(body), nil
+}
+
+func decompressResponse(body []byte) []byte {
 	if len(body) >= minGzipHeaderLen && body[0] == gzipMagicByte0 && body[1] == gzipMagicByte1 {
 		zr, gzipErr := gzip.NewReader(bytes.NewReader(body))
 		if gzipErr == nil {
 			defer func() { _ = zr.Close() }()
 			uncompressed, readErr := io.ReadAll(zr)
 			if readErr == nil {
-				body = uncompressed
+				return uncompressed
 			}
 		}
 	}
 
-	return body, nil
+	return body
 }
 
 func (c *Client) readV1rConfig(ctx context.Context, din string) map[string]any {
@@ -477,12 +482,21 @@ func (c *Client) GetFirmwareVersion(ctx context.Context, force bool) string {
 
 // ── PyPowerwallTEDAPI Facade Backend ───────────────────────────────────────
 
+type gatewayUptimeInfo struct {
+	gatewayTime time.Time
+	startTime   time.Time
+	uptimeMs    float64
+}
+
 // PyPowerwallTEDAPI provides the Backend interface over TEDAPI / v1r.
 type PyPowerwallTEDAPI struct {
-	client     *Client
-	v1r        *TEDAPIv1r
-	pollAPIMap map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
-	postAPIMap map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
+	client            *Client
+	v1r               *TEDAPIv1r
+	pollAPIMap        map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap        map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
+	lastGatewayUptime *gatewayUptimeInfo
+	cachedGitHash     string
+	uptimeMu          sync.Mutex
 }
 
 // Driver is an idiomatic alias for PyPowerwallTEDAPI.
@@ -621,10 +635,18 @@ func (p *PyPowerwallTEDAPI) initAPIMaps() {
 		"/api/solars": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSolars), nil
 		},
+		"/api/tesla/tariff_rate": func(_ context.Context, _, _, _ bool) (any, error) {
+			return map[string]any{}, nil
+		},
 	}
 
 	p.postAPIMap = map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error){
 		"/api/operation": p.postAPIOperation,
+		"/api/tesla/time_of_use_settings": func(
+			_ context.Context, _ any, _ string, _, _ bool,
+		) (any, error) {
+			return map[string]any{statusKey: statusSuccess}, nil
+		},
 	}
 }
 
@@ -760,17 +782,140 @@ func (p *PyPowerwallTEDAPI) postAPIOperation(ctx context.Context, payload any, _
 	return map[string]any{statusKey: statusSuccess}, nil
 }
 
+const (
+	gatewayUptimeResetMs      = 10_000.0
+	gatewayStartTimeTolerance = 600 * time.Second
+	gatewayStartTimeFormat    = "2006-01-02 15:04:05 -0700"
+)
+
+func findSyncUptimeSignal(msaList []any, serial string) float64 {
+	for _, compAny := range msaList {
+		comp, ok := compAny.(map[string]any)
+		if !ok || comp["serialNumber"] != serial {
+			continue
+		}
+		signals, _ := comp["signals"].([]any)
+		for _, sigAny := range signals {
+			sig, okSig := sigAny.(map[string]any)
+			if !okSig || sig["name"] != "SYNC_Uptime" {
+				continue
+			}
+			if v, okNum := sig["value"].(float64); okNum && !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 {
+				return v
+			}
+		}
+	}
+
+	return -1
+}
+
+func parseGatewaySystemTime(timeStr string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, timeStr); err == nil {
+		return t, nil
+	}
+
+	return time.Parse("2006-01-02T15:04:05-07:00", timeStr)
+}
+
+func stabilizeStartTime(last *gatewayUptimeInfo, start time.Time, uptimeMs float64) time.Time {
+	if last == nil {
+		return start
+	}
+	if uptimeMs > last.uptimeMs-gatewayUptimeResetMs {
+		diff := start.Sub(last.startTime)
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= gatewayStartTimeTolerance {
+			return last.startTime
+		}
+	}
+
+	return start
+}
+
+func (p *PyPowerwallTEDAPI) getGatewayUptime(ctx context.Context, force bool) *gatewayUptimeInfo {
+	controller := p.client.GetDeviceController(ctx, force)
+	if controller == nil {
+		return nil
+	}
+	serial, _ := lookup.Lookup(controller, "esCan", "bus", "SYNC", "packageSerialNumber").(string)
+	if serial == "" {
+		return nil
+	}
+	msaList, _ := lookup.Lookup(controller, "components", "msa").([]any)
+	uptimeMs := findSyncUptimeSignal(msaList, serial)
+	if uptimeMs < 0 {
+		return nil
+	}
+
+	timeStr, _ := lookup.Lookup(controller, "system", "time").(string)
+	if timeStr == "" {
+		return nil
+	}
+	now, err := parseGatewaySystemTime(timeStr)
+	if err != nil {
+		return nil
+	}
+
+	start := now.Add(-time.Duration(uptimeMs * float64(time.Millisecond)))
+
+	p.uptimeMu.Lock()
+	defer p.uptimeMu.Unlock()
+
+	last := p.lastGatewayUptime
+	if last != nil && now.Before(last.gatewayTime) {
+		return last
+	}
+	start = stabilizeStartTime(last, start, uptimeMs)
+
+	p.lastGatewayUptime = &gatewayUptimeInfo{
+		uptimeMs:    uptimeMs,
+		gatewayTime: now,
+		startTime:   start,
+	}
+
+	return p.lastGatewayUptime
+}
+
 func (p *PyPowerwallTEDAPI) getAPISiteInfo(ctx context.Context, force bool) (any, error) {
 	cfg := p.client.GetConfig(ctx, force)
-	if cfg != nil {
-		if siteInfo, ok := cfg["site_info"].(map[string]any); ok {
-			return siteInfo, nil
+	if cfg == nil {
+		return map[string]any{
+			siteNameKey: defaultSiteName,
+			"timezone":  defaultTimezone,
+		}, nil
+	}
+	siteInfo, _ := lookup.Lookup(cfg, "site_info").(map[string]any)
+	if siteInfo == nil {
+		siteInfo = map[string]any{}
+	}
+	siteName := siteInfo["site_name"]
+	if siteName == nil || siteName == "" {
+		if topName, ok := cfg["site_name"].(string); ok && topName != "" {
+			siteName = topName
 		}
 	}
 
 	return map[string]any{
-		siteNameKey: defaultSiteName,
-		"timezone":  defaultTimezone,
+		"max_system_energy_kWh":     siteInfo["nominal_system_energy_ac"],
+		"max_system_power_kW":       siteInfo["nominal_system_power_ac"],
+		"site_name":                 siteName,
+		"timezone":                  siteInfo["timezone"],
+		"max_site_meter_power_kW":   siteInfo["max_site_meter_power_ac"],
+		"min_site_meter_power_kW":   siteInfo["min_site_meter_power_ac"],
+		"nominal_system_energy_kWh": siteInfo["nominal_system_energy_ac"],
+		"nominal_system_power_kW":   siteInfo["nominal_system_power_ac"],
+		"panel_max_current":         siteInfo["panel_max_current"],
+		"grid_code": map[string]any{
+			"grid_code":            siteInfo["grid_code"],
+			"grid_voltage_setting": nil,
+			"grid_freq_setting":    nil,
+			"grid_phase_setting":   nil,
+			"country":              siteInfo["country"],
+			"state":                siteInfo["state"],
+			"utility":              siteInfo["utility"],
+		},
 	}, nil
 }
 
@@ -800,6 +945,11 @@ func (p *PyPowerwallTEDAPI) getAPISiteMaster(ctx context.Context, force bool) (a
 func (p *PyPowerwallTEDAPI) getAPISiteInfoSiteName(ctx context.Context, force bool) (any, error) {
 	cfg := p.client.GetConfig(ctx, force)
 	if cfg != nil {
+		if name := lookup.Lookup(cfg, "site_info", siteNameKey); name != nil {
+			if s, ok := name.(string); ok && s != "" {
+				return map[string]any{siteNameKey: s}, nil
+			}
+		}
 		if siteName, ok := cfg[siteNameKey].(string); ok && siteName != "" {
 			return map[string]any{siteNameKey: siteName}, nil
 		}
@@ -818,19 +968,39 @@ func (p *PyPowerwallTEDAPI) getAPIStatus(ctx context.Context, force bool) (any, 
 		}
 	}
 
+	var startTime any
+	var upTimeSeconds any
+	if uptime := p.getGatewayUptime(ctx, force); uptime != nil {
+		startTime = uptime.startTime.Format(gatewayStartTimeFormat)
+		upTimeSeconds = (time.Duration(uptime.uptimeMs) * time.Millisecond).String()
+	}
+
+	p.uptimeMu.Lock()
+	if hash, _ := lookup.Lookup(cfg, "system", "version", "githash").(string); hash != "" {
+		p.cachedGitHash = hash
+	}
+	gitHash := p.cachedGitHash
+	p.uptimeMu.Unlock()
+
+	var gitHashVal any
+	if gitHash != "" {
+		gitHashVal = gitHash
+	}
+
 	return map[string]any{
-		"din":               din,
-		"start_time":        lookup.Lookup(cfg, "site_info", "battery_commission_date"),
-		"up_time_seconds":   nil,
-		"is_new":            false,
-		"version":           version,
-		"git_hash":          nil,
-		"commission_count":  0,
-		"device_type":       nil,
-		"teg_type":          unknownStr,
-		"sync_type":         unknownStr,
-		"cellular_disabled": false,
-		"can_reboot":        true,
+		"din":                     din,
+		"start_time":              startTime,
+		"up_time_seconds":         upTimeSeconds,
+		"is_new":                  false,
+		"version":                 version,
+		"git_hash":                gitHashVal,
+		"commission_count":        0,
+		"device_type":             nil,
+		"teg_type":                unknownStr,
+		"sync_type":               unknownStr,
+		"cellular_disabled":       false,
+		"can_reboot":              true,
+		"battery_commission_date": lookup.Lookup(cfg, "site_info", "battery_commission_date"),
 	}, nil
 }
 
@@ -1057,18 +1227,226 @@ func fanSpeedSignalValue(sig map[string]any) *float64 {
 // against real gateways today. Confirming whether get_fan_speeds() ever
 // returns real data in practice needs a live V2026_06-firmware gateway, not
 // more static analysis - see docs/parity-matrix.md's /fans row.
-func ExtractFanSpeeds(data map[string]any) map[string]models.FanSpeedEntry {
-	msaList, _ := lookup.Lookup(data, "components", "msa").([]any)
-	result := make(map[string]models.FanSpeedEntry, len(msaList))
+func componentSignalValue(components []any, name string) any {
+	for _, compAny := range components {
+		comp, ok := compAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		signals, _ := comp["signals"].([]any)
+		for _, sigAny := range signals {
+			sig, okSig := sigAny.(map[string]any)
+			if !okSig || sig["name"] != name {
+				continue
+			}
+			for _, k := range []string{"value", "boolValue", "textValue"} {
+				if v, exists := sig[k]; exists && v != nil {
+					return v
+				}
+			}
+		}
+	}
 
+	return nil
+}
+
+func extractPW3FanSpeeds(components map[string]any, din string) map[string]models.FanSpeedEntry {
+	pchList, _ := lookup.Lookup(components, "components", "pch").([]any)
+	if len(pchList) == 0 {
+		return nil
+	}
+	var entry models.FanSpeedEntry
+	hasAny := false
+
+	fanSpeedSignal := func(name string) *float64 {
+		val := componentSignalValue(pchList, name)
+		if f, ok := val.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) {
+			hasAny = true
+
+			return &f
+		}
+
+		return nil
+	}
+
+	entry.FanSpeedA = fanSpeedSignal("PCH_FanSpeed_A")
+	entry.FanSpeedB = fanSpeedSignal("PCH_FanSpeed_B")
+	entry.FanDutyA = fanSpeedSignal("PCH_FanDuty_A")
+	entry.FanDutyB = fanSpeedSignal("PCH_FanDuty_B")
+
+	if !hasAny {
+		return nil
+	}
+
+	return map[string]models.FanSpeedEntry{
+		"TEPINV--" + din: entry,
+	}
+}
+
+func synthesizePW3Pods(bmsList, hvpList []any, din string, out map[string]any) {
+	for idx, bmsAny := range bmsList {
+		bmsComp, ok := bmsAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		var hvpComp map[string]any
+		if idx < len(hvpList) {
+			hvpComp, _ = hvpList[idx].(map[string]any)
+		}
+		podDIN := din
+		if idx > 0 && hvpComp != nil {
+			if s, okS := hvpComp["serialNumber"].(string); okS && s != "" {
+				podDIN = s
+			}
+		}
+
+		fullPack, _ := componentSignalValue([]any{bmsComp}, "BMS_nominalFullPackEnergy").(float64)
+		remaining, _ := componentSignalValue([]any{bmsComp}, "BMS_nominalEnergyRemaining").(float64)
+
+		pod := map[string]any{
+			"POD_nom_energy_remaining":     remaining,
+			"POD_nom_full_pack_energy":     fullPack,
+			"POD_nom_energy_to_be_charged": fullPack - remaining,
+		}
+
+		bmsExtraSignals := []string{
+			"BMS_LOG_tempOutOfBounds",
+			"BMS_LOG_tempOutOfBoundsCharge",
+			"BMS_kwhDischargeTotal",
+			"BMS_LOG_ahDischargeTotal",
+			"BMS_LOG_cacAvg",
+			"BMS_LOG_numFullBattCycles",
+			"BMS_LOG_overDischargeCounter",
+			"BMS_LOG_selfDischargeRate",
+		}
+		for _, name := range bmsExtraSignals {
+			pod[name] = componentSignalValue([]any{bmsComp}, name)
+		}
+
+		var hvpSlice []any
+		if hvpComp != nil {
+			hvpSlice = []any{hvpComp}
+		}
+		hvpExtraSignals := []string{
+			"HVP_PackTempMax",
+			"HVP_PackTempMin",
+			"HVP_ShuntTemperature",
+			"HVP_SafetyBiDisconnectState",
+			"HVP_a061_LockoutOnIsoFaultRetry",
+		}
+		for _, name := range hvpExtraSignals {
+			pod[name] = componentSignalValue(hvpSlice, name)
+		}
+
+		out["TEPOD--"+podDIN] = pod
+	}
+}
+
+func synthesizePW3Inverter(pchList, pwsList, baggrList []any, din string, out map[string]any) {
+	if len(pchList) == 0 && len(pwsList) == 0 && len(baggrList) == 0 {
+		return
+	}
+	tepinv := make(map[string]any)
+	pchExtraSignals := []string{
+		"PCH_AmbientTemp",
+		"PCH_heatsinkTemp",
+		"PCH_FanSpeed_A",
+		"PCH_FanSpeed_B",
+		"PCH_FanDuty_A",
+		"PCH_FanDuty_B",
+		"PCH_AcRealPowerSum",
+		"PCH_AcVoltageCN",
+		"PCH_AcVoltageLL",
+		"PCH_pcbaId",
+		"PCH_usageId",
+	}
+	for _, name := range pchExtraSignals {
+		tepinv[name] = componentSignalValue(pchList, name)
+	}
+
+	pwsExtraSignals := []string{
+		"PWS_ExtSwitch_State",
+		"PWS_RSDSelfTest_Result",
+		"PWS_RSDSelfTest_State",
+		"PWS_RSD_State",
+		"PWS_assemblyId",
+		"PWS_pcbaId",
+		"PWS_reversePolarityStrings",
+	}
+	for _, name := range pwsExtraSignals {
+		tepinv[name] = componentSignalValue(pwsList, name)
+	}
+
+	baggrExtraSignals := []string{
+		"BAGGR_ExpectedEnergyRemaining",
+		"BAGGR_ExpectedFullPackEnergy",
+		"BAGGR_OperationType",
+	}
+	for _, name := range baggrExtraSignals {
+		tepinv[name] = componentSignalValue(baggrList, name)
+	}
+
+	out["TEPINV--"+din] = tepinv
+}
+
+func synthesizePW3Vitals(components map[string]any, din string, out map[string]any) {
+	bmsList, _ := lookup.Lookup(components, "components", "bms").([]any)
+	hvpList, _ := lookup.Lookup(components, "components", "hvp").([]any)
+	pchList, _ := lookup.Lookup(components, "components", "pch").([]any)
+	pwsList, _ := lookup.Lookup(components, "components", "pws").([]any)
+	baggrList, _ := lookup.Lookup(components, "components", "baggr").([]any)
+
+	synthesizePW3Pods(bmsList, hvpList, din, out)
+	synthesizePW3Inverter(pchList, pwsList, baggrList, din, out)
+}
+
+func extractPVACBusFans(data map[string]any, result map[string]models.FanSpeedEntry) {
+	pvacList, _ := lookup.Lookup(data, "esCan", "bus", "PVAC").([]any)
+	for _, pvacAny := range pvacList {
+		pvac, ok := pvacAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isMIA, _ := pvac["isMIA"].(bool); isMIA {
+			continue
+		}
+		serial, _ := pvac["packageSerialNumber"].(string)
+		if serial == "" {
+			continue
+		}
+		part, _ := pvac["packagePartNumber"].(string)
+		logging, _ := pvac["PVAC_Logging"].(map[string]any)
+		if logging == nil {
+			continue
+		}
+		var entry models.FanSpeedEntry
+		if v, okV := logging["PVAC_Fan_Speed_Actual_RPM"].(float64); okV {
+			entry.ActualRPM = &v
+		}
+		if v, okV := logging["PVAC_Fan_Speed_Target_RPM"].(float64); okV {
+			entry.TargetRPM = &v
+		}
+		if entry.ActualRPM != nil || entry.TargetRPM != nil {
+			result["PVAC--"+part+"--"+serial] = entry
+		}
+	}
+}
+
+func extractMSAFans(data map[string]any, result map[string]models.FanSpeedEntry) {
+	msaList, _ := lookup.Lookup(data, "components", "msa").([]any)
 	for _, compAny := range msaList {
 		comp, ok := compAny.(map[string]any)
 		if !ok {
 			continue
 		}
+		partNumber, _ := comp["partNumber"].(string)
+		serialNumber, _ := comp["serialNumber"].(string)
+		key := "PVAC--" + partNumber + "--" + serialNumber
+		if _, exists := result[key]; exists {
+			continue
+		}
 
 		var entry models.FanSpeedEntry
-
 		signals, _ := comp["signals"].([]any)
 		for _, sigAny := range signals {
 			sig, okSig := sigAny.(map[string]any)
@@ -1084,24 +1462,42 @@ func ExtractFanSpeeds(data map[string]any) map[string]models.FanSpeedEntry {
 			}
 		}
 
-		if entry.ActualRPM == nil && entry.TargetRPM == nil {
-			continue
+		if entry.ActualRPM != nil || entry.TargetRPM != nil {
+			result[key] = entry
 		}
-
-		partNumber, _ := comp["partNumber"].(string)
-		serialNumber, _ := comp["serialNumber"].(string)
-		result["PVAC--"+partNumber+"--"+serialNumber] = entry
 	}
+}
+
+// ExtractFanSpeeds scans data's "esCan.bus.PVAC" and "components.msa" lists for
+// cooling fan signals, returning one [models.FanSpeedEntry] per component that
+// reported at least one of them, matching upstream extract_fan_speeds.
+func ExtractFanSpeeds(data map[string]any) map[string]models.FanSpeedEntry {
+	result := make(map[string]models.FanSpeedEntry)
+	extractPVACBusFans(data, result)
+	extractMSAFans(data, result)
 
 	return result
 }
 
 // GetFanSpeeds returns the raw cooling-fan speed readings reported by the
-// gateway's device controller, mirroring pypowerwall's get_fan_speeds
-// (pypowerwall/tedapi/__init__.py:1906-1908). See [ExtractFanSpeeds] for the
-// upstream ambiguity this faithfully reproduces.
+// gateway's device controller and inverters, mirroring upstream get_fan_speeds.
 func (p *PyPowerwallTEDAPI) GetFanSpeeds(ctx context.Context, force bool) map[string]models.FanSpeedEntry {
-	return ExtractFanSpeeds(p.client.GetDeviceController(ctx, force))
+	controller := p.client.GetDeviceController(ctx, force)
+	result := ExtractFanSpeeds(controller)
+
+	components := p.client.GetComponents(ctx, force)
+	din := p.client.din
+	if din == "" {
+		cfg := p.client.GetConfig(ctx, false)
+		if v, ok := cfg["vin"].(string); ok {
+			din = v
+		}
+	}
+	if pw3Fans := extractPW3FanSpeeds(components, din); len(pw3Fans) > 0 {
+		maps.Copy(result, pw3Fans)
+	}
+
+	return result
 }
 
 // Vitals returns Powerwall vitals in TEDAPI format.
@@ -1122,13 +1518,20 @@ func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) 
 	out["TESLA--None"] = map[string]any{
 		"componentParentDin": "STSTSM--" + din,
 	}
-	out["TESYNC--None--None"] = map[string]any{}
+	syncMap := map[string]any{}
+	if controller := p.client.GetDeviceController(ctx, false); controller != nil {
+		if uptime := p.getGatewayUptime(ctx, false); uptime != nil {
+			syncMap["SYNC_Uptime"] = uptime.uptimeMs
+		}
+	}
+	out["TESYNC--None--None"] = syncMap
 
 	if components := p.client.GetComponents(ctx, false); components != nil {
 		if pvac, pvs := synthesizeStringVitals(components); pvac != nil {
 			out["PVAC--"+din] = pvac
 			out["PVS--"+din] = pvs
 		}
+		synthesizePW3Vitals(components, din, out)
 	}
 
 	return out, nil

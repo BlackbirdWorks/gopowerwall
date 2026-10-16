@@ -134,17 +134,72 @@ func TestResponseCacheInvalidate(t *testing.T) {
 func TestResponseCacheClear(t *testing.T) {
 	t.Parallel()
 
-	c := cache.NewResponseCache(time.Second)
-	t.Cleanup(c.Close)
+	type testCase struct {
+		name string
+		keys []string
+	}
 
-	c.Set("/api/a", "a-val")
-	c.Set("/api/b", "b-val")
-	c.Clear()
+	for _, tc := range []testCase{
+		{
+			name: "clearing cache removes all keys",
+			keys: []string{"/api/a", "/api/b"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, foundA, _ := c.Get("/api/a")
-	_, foundB, _ := c.Get("/api/b")
-	assert.False(t, foundA)
-	assert.False(t, foundB)
+			c := cache.NewResponseCache(time.Second)
+			t.Cleanup(c.Close)
+
+			for _, k := range tc.keys {
+				c.Set(k, "val")
+			}
+			c.Clear()
+
+			for _, k := range tc.keys {
+				_, found, _ := c.Get(k)
+				assert.False(t, found)
+			}
+		})
+	}
+}
+
+func TestResponseCacheDelete(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name      string
+		toDelete  string
+		wantExist string
+		keysToSet []string
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:      "delete specific key preserves other keys",
+			keysToSet: []string{"/api/tariff", "/api/status"},
+			toDelete:  "/api/tariff",
+			wantExist: "/api/status",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := cache.NewResponseCache(time.Second)
+			t.Cleanup(c.Close)
+
+			for _, k := range tc.keysToSet {
+				c.Set(k, "val-"+k)
+			}
+			c.Delete(tc.toDelete)
+
+			_, foundDeleted, _ := c.Get(tc.toDelete)
+			assert.False(t, foundDeleted)
+
+			_, foundOther, _ := c.Get(tc.wantExist)
+			assert.True(t, foundOther)
+		})
+	}
 }
 
 func TestResponseCacheCooldown(t *testing.T) {

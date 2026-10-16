@@ -60,16 +60,17 @@ const (
 
 // Client implements the Tesla Cloud Owner API backend.
 type Client struct {
-	cache      *cache.ResponseCache
-	client     *http.Client
-	tokenData  map[string]any
-	pollAPIMap map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
-	postAPIMap map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
-	email      string
-	siteID     string
-	authPath   string
-	timeout    time.Duration
-	mu         sync.Mutex
+	lastRecovery time.Time
+	cache        *cache.ResponseCache
+	client       *http.Client
+	tokenData    map[string]any
+	pollAPIMap   map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap   map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
+	email        string
+	siteID       string
+	authPath     string
+	timeout      time.Duration
+	mu           sync.Mutex
 }
 
 // PyPowerwallCloud is an alias for Client.
@@ -164,10 +165,14 @@ func (c *Client) initAPIMaps() {
 		"/api/solars": func(_ context.Context, _, _, _ bool) (any, error) {
 			return stubs.ParseJSON(stubs.MockSolars), nil
 		},
+		"/api/tesla/tariff_rate": func(ctx context.Context, force, _, _ bool) (any, error) {
+			return c.getAPITariffRate(ctx, force)
+		},
 	}
 
 	c.postAPIMap = map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error){
-		"/api/operation": c.postAPIOperation,
+		"/api/operation":                  c.postAPIOperation,
+		"/api/tesla/time_of_use_settings": c.setAPITimeOfUseSettings,
 	}
 }
 
@@ -464,6 +469,14 @@ func (c *Client) fetchSiteJSON(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound && c.recoverStaleSite(ctx) {
+		newURL := fmt.Sprintf("%s/api/1/energy_sites/%s/%s", TeslaOwnerURL, c.siteID, filepath.Base(url))
+		if retryResp := c.retryStaleSite(ctx, newURL); retryResp != nil {
+			defer func() { _ = retryResp.Body.Close() }()
+			resp = retryResp
+		}
+	}
+
 	if statusErr := checkStatus(resp); statusErr != nil {
 		return nil, statusErr
 	}
@@ -474,6 +487,164 @@ func (c *Client) fetchSiteJSON(
 	}
 
 	c.cache.Set(cacheKey, data)
+
+	return data, nil
+}
+
+func (c *Client) retryStaleSite(ctx context.Context, newURL string) *http.Response {
+	retryReq, retryErr := http.NewRequestWithContext(ctx, http.MethodGet, newURL, nil)
+	if retryErr != nil {
+		return nil
+	}
+	retryResp, doErr := c.client.Do(retryReq)
+	if doErr != nil {
+		return nil
+	}
+
+	return retryResp
+}
+
+func (c *Client) fetchProducts(ctx context.Context) ([]map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, TeslaOwnerURL+"/api/1/products", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return nil, statusErr
+	}
+
+	var data productsResponse
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
+		return nil, decodeErr
+	}
+
+	return data.Response, nil
+}
+
+func extractProductID(prod map[string]any) string {
+	if energyID := lookup.Lookup(prod, "energy_site_id"); energyID != nil {
+		return fmt.Sprintf("%v", energyID)
+	}
+	if id := lookup.Lookup(prod, "id"); id != nil {
+		return fmt.Sprintf("%v", id)
+	}
+
+	return ""
+}
+
+func findReplacementSite(products []map[string]any, currentSiteID string) (string, string) {
+	for _, prod := range products {
+		if extractProductID(prod) == currentSiteID {
+			return "", ""
+		}
+	}
+	if len(products) != 1 {
+		return "", ""
+	}
+	prod := products[0]
+	name := ""
+	if n := lookup.Lookup(prod, "site_name"); n != nil {
+		name = fmt.Sprintf("%v", n)
+	}
+
+	return extractProductID(prod), name
+}
+
+func (c *Client) recoverStaleSite(ctx context.Context) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	if !c.lastRecovery.IsZero() && now.Sub(c.lastRecovery) < time.Minute {
+		return false
+	}
+	c.lastRecovery = now
+
+	products, err := c.fetchProducts(ctx)
+	if err != nil || len(products) == 0 {
+		return false
+	}
+
+	currentSiteID := c.siteID
+	replacementID, replacementName := findReplacementSite(products, currentSiteID)
+	if replacementID == "" {
+		return false
+	}
+
+	logger.Load(ctx).WarnContext(ctx, "Tesla site is no longer available; switching site",
+		"previous", currentSiteID, "new", replacementID, "name", replacementName)
+
+	c.siteID = replacementID
+	siteFilePath := filepath.Join(c.authPath, SiteFile)
+	_ = os.WriteFile(siteFilePath, []byte(replacementID), filePerm)
+	c.cache.Clear()
+
+	return true
+}
+
+func (c *Client) getAPITariffRate(ctx context.Context, force bool) (any, error) {
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/tariff_rate", TeslaOwnerURL, c.siteID)
+	data, err := c.fetchSiteJSON(ctx, "SITE_TARIFF", url, force)
+	if err != nil {
+		return nil, err
+	}
+	if resp, ok := data["response"]; ok {
+		return resp, nil
+	}
+
+	return data, nil
+}
+
+func (c *Client) setAPITimeOfUseSettings(
+	ctx context.Context,
+	payload any,
+	_ string,
+	_, _ bool,
+) (any, error) {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%w: payload must be map[string]any", models.ErrUnsupported)
+	}
+
+	bodyBytes, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/api/1/energy_sites/%s/time_of_use_settings", TeslaOwnerURL, c.siteID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if statusErr := checkStatus(resp); statusErr != nil {
+		return nil, statusErr
+	}
+
+	var data map[string]any
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
+		return nil, decodeErr
+	}
+
+	c.cache.Delete("SITE_TARIFF")
+
+	if respData, hasResp := data["response"]; hasResp {
+		return respData, nil
+	}
 
 	return data, nil
 }
@@ -681,6 +852,7 @@ func (c *Client) getAPIStatus(ctx context.Context, force bool) (any, error) {
 	cfg, _ := c.getSiteConfig(ctx, force)
 	din := c.siteID
 	var version any = "23.28.2 27626f98"
+	var deviceType any = "teg"
 	if cfg != nil {
 		if d := lookup.Lookup(cfg, "response", "id"); d != nil {
 			din = fmt.Sprintf("%v", d)
@@ -688,22 +860,25 @@ func (c *Client) getAPIStatus(ctx context.Context, force bool) (any, error) {
 		if v := lookup.Lookup(cfg, "response", "version"); v != nil {
 			version = v
 		}
+		if dt := lookup.Lookup(cfg, "response", "components", "gateway"); dt != nil {
+			deviceType = dt
+		}
 	}
 
-	// Frozen public API invariant: cloud status returns hard-coded fake git hash
 	return map[string]any{
 		"din":               din,
-		"start_time":        lookup.Lookup(cfg, "response", "installation_date"),
+		"start_time":        nil,
 		"up_time_seconds":   nil,
 		"is_new":            false,
 		"version":           version,
-		"git_hash":          "27626f98a66cad5c665bbe1d4d788cdb3e94fd34",
+		"git_hash":          nil,
 		"commission_count":  0,
-		"device_type":       "teg",
+		"device_type":       deviceType,
 		"teg_type":          "unknown",
-		"sync_type":         "v2.1",
+		"sync_type":         "unknown",
 		"cellular_disabled": false,
 		"can_reboot":        true,
+		"installation_date": lookup.Lookup(cfg, "response", "installation_date"),
 	}, nil
 }
 

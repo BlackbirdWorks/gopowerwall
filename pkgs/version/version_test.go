@@ -54,7 +54,9 @@ func TestConstants(t *testing.T) {
 
 	for _, tc := range []testCase{
 		{name: "library version", got: version.Version, want: "0.12.0"},
-		{name: "proxy build tag", got: version.Build, want: "t101"},
+		{name: "proxy build tag", got: version.Build, want: "t106"},
+		{name: "upstream version", got: version.UpstreamVersion, want: "0.20.0"},
+		{name: "upstream commit", got: version.UpstreamCommit, want: "6c7fdbe3617300cbf90e80709da650f00c50fc7b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

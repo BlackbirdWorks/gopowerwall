@@ -90,13 +90,23 @@ func (c *TedapiCmd) Run(cmdCtx *Context) error {
 }
 
 // RegisterCmd provides RSA key registration instructions.
-type RegisterCmd struct{}
+type RegisterCmd struct {
+	AuthPath string `env:"PW_AUTH_PATH" help:"Auth path" name:"authpath"`
+}
 
 // Run executes the register command.
 func (c *RegisterCmd) Run(cmdCtx *Context) error {
 	w := cmdCtx.Output()
 	fmt.Fprintf(w, "gopowerwall [%s] - Fleet API Key Registration\n\n", version.Version)
 	fmt.Fprintln(w, "Registering public RSA key for v1r LAN TEDAPI access...")
+	if c.AuthPath != "" {
+		fmt.Fprintf(w, "Using auth path: %s\n", c.AuthPath)
+	}
+	fmt.Fprintln(w, "\nKey states:")
+	fmt.Fprintln(w, "  1: PENDING_VERIFICATION")
+	fmt.Fprintln(w, "  2: PENDING_VERIFICATION_TIMEOUT (verification window closed; re-register to reopen)")
+	fmt.Fprintln(w, "  3: VERIFIED")
+	fmt.Fprintln(w, "  4: REMOVED")
 
 	return nil
 }

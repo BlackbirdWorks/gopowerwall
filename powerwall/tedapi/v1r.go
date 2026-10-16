@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -66,6 +67,9 @@ const (
 	// IslandModeOffGrid is mode 6: open the contactor to physically island off-grid.
 	IslandModeOffGrid = 6
 )
+
+// ErrNoDin is returned when a signed v1r request is attempted without a known DIN.
+var ErrNoDin = errors.New("v1r: no DIN (not connected) - unable to sign request")
 
 // TEDAPIv1r implements RSA-signed transport for Powerwall 3 LAN TEDAPI (/tedapi/v1r).
 type TEDAPIv1r struct {
@@ -232,7 +236,7 @@ func (v *TEDAPIv1r) GetDin(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	din := strings.TrimSpace(string(b))
+	din := strings.TrimSpace(string(decompressResponse(b)))
 
 	v.mu.Lock()
 	v.din = din
@@ -294,8 +298,7 @@ func (v *TEDAPIv1r) Sign(tlvPayload []byte) ([]byte, error) {
 	return rsa.SignPKCS1v15(rand.Reader, v.privateKey, crypto.SHA512, hashed[:])
 }
 
-// PostV1r wraps envelopeBytes in an RSA-signed RoutableMessage and POSTs to /tedapi/v1r.
-func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din string) ([]byte, error) {
+func (v *TEDAPIv1r) signPayload(din string, envelopeBytes []byte) ([]byte, error) {
 	routable := &combined.RoutableMessage{
 		ToDestination: &combined.Destination{
 			SubDestination: &combined.Destination_Domain{
@@ -345,6 +348,20 @@ func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din strin
 		return nil, fmt.Errorf("v1r marshal error: %w", err)
 	}
 
+	return wireBytes, nil
+}
+
+// PostV1r wraps envelopeBytes in an RSA-signed RoutableMessage and POSTs to /tedapi/v1r.
+func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din string) ([]byte, error) {
+	if din == "" {
+		return nil, ErrNoDin
+	}
+
+	wireBytes, err := v.signPayload(din, envelopeBytes)
+	if err != nil {
+		return nil, err
+	}
+
 	url := fmt.Sprintf("https://%s/tedapi/v1r", v.host)
 	resp, err := v.doPost(ctx, url, wireBytes)
 	if err != nil {
@@ -352,7 +369,7 @@ func (v *TEDAPIv1r) PostV1r(ctx context.Context, envelopeBytes []byte, din strin
 	}
 	defer resp.Body.Close()
 
-	if retryResp := v.retryAfterReAuth(ctx, resp, url, wireBytes); retryResp != nil {
+	if retryResp := v.retryAfterReAuth(ctx, resp, url, din, envelopeBytes); retryResp != nil {
 		defer retryResp.Body.Close()
 		resp = retryResp
 	}
@@ -405,7 +422,8 @@ func (v *TEDAPIv1r) retryAfterReAuth(
 	ctx context.Context,
 	resp *http.Response,
 	url string,
-	wireBytes []byte,
+	din string,
+	envelopeBytes []byte,
 ) *http.Response {
 	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
 		return nil
@@ -416,7 +434,12 @@ func (v *TEDAPIv1r) retryAfterReAuth(
 		return nil
 	}
 
-	retryResp, err := v.doPost(ctx, url, wireBytes)
+	retryWireBytes, err := v.signPayload(din, envelopeBytes)
+	if err != nil {
+		return nil
+	}
+
+	retryResp, err := v.doPost(ctx, url, retryWireBytes)
 	if err != nil {
 		return nil
 	}

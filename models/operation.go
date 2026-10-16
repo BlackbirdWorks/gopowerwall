@@ -2,12 +2,12 @@ package models
 
 // Operation represents /api/operation mode and reserve data.
 type Operation struct {
-	RealMode             string  `json:"real_mode"`
-	GridExport           string  `json:"grid_export,omitempty"`
-	BackupReservePercent float64 `json:"backup_reserve_percent"`
-	TimeRemainingHours   float64 `json:"time_remaining_hours,omitempty"`
-	GridCharging         bool    `json:"grid_charging"`
-	StormMode            bool    `json:"storm_mode,omitempty"`
+	BackupReservePercent *float64 `json:"backup_reserve_percent"`
+	RealMode             string   `json:"real_mode"`
+	GridExport           string   `json:"grid_export,omitempty"`
+	TimeRemainingHours   float64  `json:"time_remaining_hours,omitempty"`
+	GridCharging         bool     `json:"grid_charging"`
+	StormMode            bool     `json:"storm_mode,omitempty"`
 }
 
 // SiteInfo represents /api/site_info site details.
