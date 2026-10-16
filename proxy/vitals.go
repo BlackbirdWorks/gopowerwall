@@ -109,7 +109,7 @@ func fanSpeedsPWJSON(speeds map[string]models.FanSpeedEntry) map[string]any {
 	slices.Sort(pvacKeys)
 	slices.Sort(tepinvKeys)
 
-	out := make(map[string]any, len(pvacKeys)*2+len(tepinvKeys)*6)
+	out := make(map[string]any)
 	for i, k := range pvacKeys {
 		entry := speeds[k]
 		prefix := fanPrefix(i + 1)
