@@ -30,6 +30,8 @@ func TestDefaultConfigDefaults(t *testing.T) {
 	assert.True(t, cfg.GracefulDegradation)
 	assert.True(t, cfg.HealthCheckEnabled)
 	assert.True(t, cfg.TedapiRecoveryEnabled)
+	assert.True(t, cfg.Failover)
+	assert.Empty(t, cfg.FleetAPIHTTP)
 	assert.False(t, cfg.DebugMode)
 	assert.False(t, cfg.FailFastMode)
 	assert.Equal(t, "/", cfg.APIBaseURL)
@@ -110,6 +112,18 @@ func TestDefaultConfigEnvOverrides(t *testing.T) {
 		{
 			name: "site zero threshold", envKey: "PW_SITE_ZERO_THRESHOLD", envVal: "50",
 			check: func(t *testing.T, cfg proxy.Config) { t.Helper(); assert.Equal(t, 50, cfg.SiteZeroThreshold) },
+		},
+		{
+			name: "failover off via no", envKey: "PW_FAILOVER", envVal: "no",
+			check: func(t *testing.T, cfg proxy.Config) { t.Helper(); assert.False(t, cfg.Failover) },
+		},
+		{
+			name: "failover on via yes", envKey: "PW_FAILOVER", envVal: "yes",
+			check: func(t *testing.T, cfg proxy.Config) { t.Helper(); assert.True(t, cfg.Failover) },
+		},
+		{
+			name: "fleetapi http override", envKey: "PW_FLEETAPI_HTTP", envVal: "1.1",
+			check: func(t *testing.T, cfg proxy.Config) { t.Helper(); assert.Equal(t, "1.1", cfg.FleetAPIHTTP) },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

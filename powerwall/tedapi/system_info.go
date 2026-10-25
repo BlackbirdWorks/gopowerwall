@@ -69,8 +69,8 @@ func (s *SystemInfo) ToDetailsDict() map[string]any {
 
 	return map[string]any{
 		"gateway": map[string]string{
-			"partNumber":   s.PartNumber,
-			"serialNumber": s.SerialNumber,
+			keyPartNumber:   s.PartNumber,
+			keySerialNumber: s.SerialNumber,
 		},
 		"version": map[string]string{
 			"text":    s.Version,

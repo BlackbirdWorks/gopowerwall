@@ -914,46 +914,180 @@ func TestBackendStatus(t *testing.T) {
 func TestBackendSystemStatus(t *testing.T) {
 	t.Parallel()
 
-	t.Run("v1r path returns the native response", func(t *testing.T) {
-		t.Parallel()
+	type testCase struct {
+		check      func(t *testing.T, m map[string]any)
+		name       string
+		configJSON string
+		queryJSON  string
+		useV1r     bool
+	}
 
-		handler := func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/api/login/Basic":
-				_, _ = w.Write([]byte(`{"token":"tok"}`))
-			case "/tedapi/din":
-				_, _ = w.Write([]byte("din-1"))
-			case "/api/system_status":
-				_, _ = w.Write([]byte(`{"command_source":"native"}`))
+	cases := []testCase{
+		{
+			name:   "v1r path returns the native response",
+			useV1r: true,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.Equal(t, "native", m["command_source"])
+			},
+		},
+		{
+			name:       "legacy config vin populates a synthetic battery block",
+			configJSON: `{"vin":"VIN-2"}`,
+			queryJSON:  `{}`,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				blocks, ok := m["battery_blocks"].([]any)
+				require.True(t, ok)
+				require.Len(t, blocks, 1)
+				block, okB := blocks[0].(map[string]any)
+				require.True(t, okB)
+				assert.Equal(t, "VIN-2", block["PackageSerialNumber"])
+				assert.InDelta(t, 0.0, m["inverter_nominal_usable_power"], 0.001)
+				assert.Nil(t, m["max_charge_power"])
+			},
+		},
+		{
+			name: "system power limits derived from nameplate and active PINVs",
+			configJSON: `{
+				"vin": "VIN-3",
+				"site_info": {"nominal_system_power_ac": 13.5}
+			}`,
+			queryJSON: `{
+				"esCan": {
+					"bus": {
+						"PINV": [
+							{
+								"PINV_PowerCapability": {
+									"PINV_Pnom": 5000.0,
+									"isMIA": false
+								}
+							},
+							{
+								"PINV_PowerCapability": {
+									"PINV_Pnom": 5000.0,
+									"isMIA": false
+								}
+							},
+							{
+								"PINV_PowerCapability": {
+									"PINV_Pnom": 5000.0,
+									"isMIA": true
+								}
+							}
+						]
+					}
+				}
+			}`,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.InDelta(t, 10000.0, m["inverter_nominal_usable_power"], 0.001)
+				maxCharge, ok := m["max_charge_power"].(*float64)
+				require.True(t, ok)
+				require.NotNil(t, maxCharge)
+				assert.InDelta(t, 10000.0, *maxCharge, 0.001)
+
+				maxDischarge, ok := m["max_discharge_power"].(*float64)
+				require.True(t, ok)
+				require.NotNil(t, maxDischarge)
+				assert.InDelta(t, 10000.0, *maxDischarge, 0.001)
+
+				maxApparent, ok := m["max_apparent_power"].(*float64)
+				require.True(t, ok)
+				require.NotNil(t, maxApparent)
+				assert.InDelta(t, 10000.0, *maxApparent, 0.001)
+			},
+		},
+		{
+			name: "system power limits use nameplate when smaller than inverter power",
+			configJSON: `{
+				"vin": "VIN-4",
+				"site_info": {"nominal_system_power_ac": 7.0}
+			}`,
+			queryJSON: `{
+				"esCan": {
+					"bus": {
+						"PINV": [
+							{
+								"PINV_PowerCapability": {
+									"PINV_Pnom": 10000.0,
+									"isMIA": false
+								}
+							}
+						]
+					}
+				}
+			}`,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.InDelta(t, 10000.0, m["inverter_nominal_usable_power"], 0.001)
+				maxCharge, ok := m["max_charge_power"].(*float64)
+				require.True(t, ok)
+				require.NotNil(t, maxCharge)
+				assert.InDelta(t, 7000.0, *maxCharge, 0.001)
+			},
+		},
+		{
+			name:       "instantaneous power calculated from valid TEPOD components",
+			configJSON: `{"vin":"VIN-5"}`,
+			queryJSON: `{
+				"components": {
+					"msa": [
+						{
+							"serialNumber": "MOD-1",
+							"signals": [
+								{"name": "POD_available_charge_power", "value": 7000.0},
+								{"name": "POD_available_dischg_power", "value": 8000.0}
+							]
+						},
+						{
+							"serialNumber": "MOD-2",
+							"signals": [
+								{"name": "POD_available_charge_power", "value": 7000.0},
+								{"name": "POD_available_dischg_power", "value": 7570.0}
+							]
+						}
+					]
+				}
+			}`,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.InDelta(t, 14000.0, m["instantaneous_max_charge_power"], 0.001)
+				assert.InDelta(t, 15570.0, m["instantaneous_max_discharge_power"], 0.001)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var p *tedapi.Driver
+			if tc.useV1r {
+				handler := func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/api/login/Basic":
+						_, _ = w.Write([]byte(`{"token":"tok"}`))
+					case "/tedapi/din":
+						_, _ = w.Write([]byte("din-1"))
+					case "/api/system_status":
+						_, _ = w.Write([]byte(`{"command_source":"native"}`))
+					}
+				}
+				srv := newTLSServer(t, handler)
+				p = newV1rBackend(t, hostOf(srv))
+			} else {
+				host, _ := newLegacyTEDAPIServer(t, tc.configJSON, tc.queryJSON)
+				p = newLegacyBackend(host)
 			}
-		}
-		srv := newTLSServer(t, handler)
-		p := newV1rBackend(t, hostOf(srv))
 
-		res, err := p.Poll(t.Context(), "/api/system_status", false, false, false)
-		require.NoError(t, err)
-		m, ok := res.(map[string]any)
-		require.True(t, ok)
-		assert.Equal(t, "native", m["command_source"])
-	})
-
-	t.Run("legacy config vin populates a synthetic battery block", func(t *testing.T) {
-		t.Parallel()
-
-		host, _ := newLegacyTEDAPIServer(t, `{"vin":"VIN-2"}`, `{}`)
-		p := newLegacyBackend(host)
-
-		res, err := p.Poll(t.Context(), "/api/system_status", false, false, false)
-		require.NoError(t, err)
-		m, ok := res.(map[string]any)
-		require.True(t, ok)
-		blocks, ok := m["battery_blocks"].([]any)
-		require.True(t, ok)
-		require.Len(t, blocks, 1)
-		block, ok := blocks[0].(map[string]any)
-		require.True(t, ok)
-		assert.Equal(t, "VIN-2", block["PackageSerialNumber"])
-	})
+			res, err := p.Poll(t.Context(), "/api/system_status", false, false, false)
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
+			tc.check(t, m)
+		})
+	}
 }
 
 func TestBackendGridStatus(t *testing.T) {
@@ -1183,6 +1317,193 @@ func TestBackendVitals(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotContains(t, out, "PVAC--VIN-10")
 		assert.NotContains(t, out, "PVS--VIN-10")
+	})
+
+	t.Run("synthesizes PW2 vitals from paired THC and PINV components", func(t *testing.T) {
+		t.Parallel()
+
+		type vitalsTestCase struct {
+			check     func(t *testing.T, out map[string]any)
+			name      string
+			queryJSON string
+		}
+
+		vCases := []vitalsTestCase{
+			{
+				name: "paired PW2 units synthesize TETHC, TEPOD, TEPINV and TESYNC",
+				queryJSON: `{
+					"components": {
+						"msa": [
+							{
+								"serialNumber": "SN-SYNC-1",
+								"signals": [
+									{"name": "SYNC_Uptime", "value": 7200000},
+									{"name": "SYNC_ExternallyPowered", "boolValue": true},
+									{"name": "SYNC_SiteSwitchEnabled", "boolValue": false}
+								]
+							},
+							{
+								"partNumber": "3012170-01-A",
+								"serialNumber": "PKG-1",
+								"signals": [
+									{"name": "THC_AmbientTemp", "value": 24.5},
+									{"name": "THC_State", "textValue": "THC_Running"}
+								]
+							},
+							{
+								"partNumber": "1112170-01-A",
+								"serialNumber": "MOD-1",
+								"signals": [
+									{"name": "PINV_EnergyCharged", "value": 1500.0},
+									{"name": "PINV_EnergyDischarged", "value": 1200.0},
+									{"name": "PINV_HeatsinkTemp", "value": 31.0},
+									{"name": "PINV_PllFrequency", "value": 60.01},
+									{"name": "PINV_PllLocked", "boolValue": true},
+									{"name": "PINV_Qout", "value": 50.0},
+									{"name": "PINV_ReadyForGridForming", "boolValue": true},
+									{"name": "PINV_HardwareEnableLine", "boolValue": true},
+									{"name": "PINV_PowerLimiter", "textValue": "None"}
+								]
+							},
+							{
+								"partNumber": "2212170-01-A",
+								"serialNumber": "MOD-1",
+								"signals": [
+									{"name": "POD_available_charge_power", "value": 7000.0},
+									{"name": "POD_available_dischg_power", "value": 8570.0}
+								]
+							}
+						]
+					},
+					"esCan": {
+						"bus": {
+							"THC": [
+								{
+									"packagePartNumber": "3012170-01-A",
+									"packageSerialNumber": "PKG-1",
+									"alerts": {"active": ["Alert1"]}
+								}
+							],
+							"POD": [
+								{
+									"POD_EnergyStatus": {
+										"POD_nom_energy_remaining": 10000.0,
+										"POD_nom_full_pack_energy": 13500.0
+									}
+								}
+							],
+							"PINV": [
+								{
+									"PINV_Status": {
+										"PINV_Fout": 60.0,
+										"PINV_Pout": 2500.0,
+										"PINV_Vout": 240.0,
+										"PINV_State": "Active",
+										"PINV_GridState": "GridConnected"
+									},
+									"PINV_PowerCapability": {
+										"PINV_Pnom": 5000.0
+									},
+									"alerts": {"active": []}
+								}
+							]
+						}
+					}
+				}`,
+				check: func(t *testing.T, out map[string]any) {
+					t.Helper()
+					// TESYNC signals
+					sync, ok := out["TESYNC--None--None"].(map[string]any)
+					require.True(t, ok)
+					assert.Equal(t, true, sync["SYNC_ExternallyPowered"])
+					assert.Equal(t, false, sync["SYNC_SiteSwitchEnabled"])
+
+					// TETHC
+					thc, ok := out["TETHC--3012170-01-A--PKG-1"].(map[string]any)
+					require.True(t, ok)
+					assert.InDelta(t, 24.5, thc["THC_AmbientTemp"], 0.001)
+					assert.Equal(t, "THC_Running", thc["THC_State"])
+					assert.Equal(t, "STSTSM--VIN-PW2", thc["componentParentDin"])
+
+					// TEPOD
+					pod, ok := out["TEPOD--3012170-01-A--PKG-1"].(map[string]any)
+					require.True(t, ok)
+					assert.InDelta(t, 10000.0, pod["POD_nom_energy_remaining"], 0.001)
+					assert.InDelta(t, 13500.0, pod["POD_nom_full_pack_energy"], 0.001)
+					assert.InDelta(t, 3500.0, pod["POD_nom_energy_to_be_charged"], 0.001)
+					assert.InDelta(t, 7000.0, pod["POD_available_charge_power"], 0.001)
+					assert.InDelta(t, 8570.0, pod["POD_available_dischg_power"], 0.001)
+
+					// TEPINV
+					pinv, ok := out["TEPINV--3012170-01-A--PKG-1"].(map[string]any)
+					require.True(t, ok)
+					assert.InDelta(t, 1500.0, pinv["PINV_EnergyCharged"], 0.001)
+					assert.InDelta(t, 1200.0, pinv["PINV_EnergyDischarged"], 0.001)
+					assert.InDelta(t, 31.0, pinv["PINV_HeatsinkTemp"], 0.001)
+					assert.InDelta(t, 60.01, pinv["PINV_PllFrequency"], 0.001)
+					assert.Equal(t, true, pinv["PINV_PllLocked"])
+					assert.InDelta(t, 50.0, pinv["PINV_Qout"], 0.001)
+					assert.Equal(t, true, pinv["PINV_ReadyForGridForming"])
+					assert.Equal(t, true, pinv["PINV_HardwareEnableLine"])
+					assert.Equal(t, "None", pinv["PINV_PowerLimiter"])
+					assert.InDelta(t, 5000.0, pinv["PINV_Pnom"], 0.001)
+					assert.InDelta(t, 2500.0, pinv["PINV_Pout"], 0.001)
+				},
+			},
+			{
+				name: "unpaired PW2 components leave PINV MSA signals nil",
+				queryJSON: `{
+					"components": {
+						"msa": [
+							{
+								"partNumber": "3012170-01-A",
+								"serialNumber": "PKG-UNKNOWN",
+								"signals": [
+									{"name": "THC_State", "textValue": "THC_Running"}
+								]
+							}
+						]
+					},
+					"esCan": {
+						"bus": {
+							"THC": [
+								{
+									"packagePartNumber": "3012170-01-A",
+									"packageSerialNumber": "PKG-2"
+								}
+							],
+							"PINV": [
+								{
+									"PINV_Status": {
+										"PINV_Pout": 3000.0
+									}
+								}
+							]
+						}
+					}
+				}`,
+				check: func(t *testing.T, out map[string]any) {
+					t.Helper()
+					pinv, ok := out["TEPINV--3012170-01-A--PKG-2"].(map[string]any)
+					require.True(t, ok)
+					assert.Nil(t, pinv["PINV_EnergyCharged"])
+					assert.InDelta(t, 3000.0, pinv["PINV_Pout"], 0.001)
+				},
+			},
+		}
+
+		for _, vc := range vCases {
+			t.Run(vc.name, func(t *testing.T) {
+				t.Parallel()
+
+				host, _ := newLegacyTEDAPIServer(t, `{"vin":"VIN-PW2"}`, vc.queryJSON)
+				p := newLegacyBackend(host)
+
+				out, err := p.Vitals(t.Context())
+				require.NoError(t, err)
+				vc.check(t, out)
+			})
+		}
 	})
 }
 

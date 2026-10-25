@@ -11,6 +11,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,27 @@ const (
 	customerParticipantLocal = 2
 	nominalPackEnergy        = 13500.0
 	minGzipHeaderLen         = 2
+
+	keyPartNumber            = "partNumber"
+	keySerialNumber          = "serialNumber"
+	keyAlerts                = "alerts"
+	keyComponentParentDin    = "componentParentDin"
+	keyFirmwareVersion       = "firmwareVersion"
+	keyLastCommunicationTime = "lastCommunicationTime"
+	keyManufacturer          = "manufacturer"
+	valTesla                 = "TESLA"
+	keyTeslaEnergyEcu        = "teslaEnergyEcuAttributes"
+	keyEcuType               = "ecuType"
+
+	ecuTypeTHC    = 224
+	ecuTypePOD    = 226
+	ecuTypePINV   = 253
+	ecuTypeSYNC   = 259
+	ecuTypeSTSTSM = 207
+	ecuTypeTEMSA  = 300
+
+	sigPodAvailableChargePower = "POD_available_charge_power"
+	sigPodAvailableDischgPower = "POD_available_dischg_power"
 )
 
 // Client connects to the Tesla TEDAPI interface over WiFi or LAN.
@@ -997,6 +1019,137 @@ func (p *PyPowerwallTEDAPI) getAPIStatus(ctx context.Context, force bool) (any, 
 	}, nil
 }
 
+func toPositiveFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, n > 0
+	case int:
+		return float64(n), n > 0
+	case int64:
+		return float64(n), n > 0
+	default:
+		return 0, false
+	}
+}
+
+func calculateInverterUsablePower(status map[string]any) float64 {
+	if status == nil {
+		return 0
+	}
+	pinvList, ok := lookup.Lookup(status, "esCan", "bus", "PINV").([]any)
+	if !ok {
+		return 0
+	}
+	var total float64
+	for _, pinvAny := range pinvList {
+		pinv, okP := pinvAny.(map[string]any)
+		if !okP {
+			continue
+		}
+		if isMIA, _ := lookup.Lookup(pinv, "PINV_PowerCapability", "isMIA").(bool); isMIA {
+			continue
+		}
+		if val, okVal := toPositiveFloat(lookup.Lookup(pinv, "PINV_PowerCapability", "PINV_Pnom")); okVal {
+			total += val
+		}
+	}
+
+	return total
+}
+
+func calculateSystemPowerLimits(cfg, status map[string]any) (float64, *float64) {
+	inverterUsable := calculateInverterUsablePower(status)
+
+	var limits []float64
+	if cfg != nil {
+		if nominalKW, ok := toPositiveFloat(lookup.Lookup(cfg, "site_info", "nominal_system_power_ac")); ok {
+			np := math.Round(nominalKW * wattsPerKilowatt)
+			if np > 0 {
+				limits = append(limits, np)
+			}
+		}
+	}
+	if inverterUsable > 0 {
+		limits = append(limits, inverterUsable)
+	}
+
+	if len(limits) == 0 {
+		return inverterUsable, nil
+	}
+
+	minP := limits[0]
+	for _, l := range limits[1:] {
+		if l < minP {
+			minP = l
+		}
+	}
+
+	return inverterUsable, &minP
+}
+
+func extractPodPowerSignals(msa models.ComponentList) map[string]map[string]float64 {
+	podPower := make(map[string]map[string]float64)
+	for _, c := range msa {
+		if c.SerialNumber == "" {
+			continue
+		}
+		for _, s := range c.Signals {
+			if s.Name != sigPodAvailableChargePower && s.Name != sigPodAvailableDischgPower {
+				continue
+			}
+			if podPower[c.SerialNumber] == nil {
+				podPower[c.SerialNumber] = make(map[string]float64)
+			}
+			if s.Value != nil && !math.IsNaN(*s.Value) && !math.IsInf(*s.Value, 0) && *s.Value >= 0 {
+				podPower[c.SerialNumber][s.Name] = *s.Value
+			}
+		}
+	}
+
+	return podPower
+}
+
+func sumPodPowerSignals(podPower map[string]map[string]float64) (float64, float64) {
+	if len(podPower) == 0 {
+		return 0, 0
+	}
+
+	chargeAll := true
+	dischargeAll := true
+	var totalCharge, totalDischarge float64
+	for _, signals := range podPower {
+		if chg, hasChg := signals[sigPodAvailableChargePower]; hasChg {
+			totalCharge += chg
+		} else {
+			chargeAll = false
+		}
+		if dis, hasDis := signals[sigPodAvailableDischgPower]; hasDis {
+			totalDischarge += dis
+		} else {
+			dischargeAll = false
+		}
+	}
+
+	var instCharge, instDischarge float64
+	if chargeAll {
+		instCharge = totalCharge
+	}
+	if dischargeAll {
+		instDischarge = totalDischarge
+	}
+
+	return instCharge, instDischarge
+}
+
+func calculateInstantaneousPower(controller map[string]any) (float64, float64) {
+	if controller == nil {
+		return 0, 0
+	}
+	components := models.ParseComponents(controller)
+
+	return sumPodPowerSignals(extractPodPowerSignals(components.MSA))
+}
+
 func (p *PyPowerwallTEDAPI) getAPISystemStatus(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
 		res, err := p.v1r.APIGet(ctx, "/api/system_status")
@@ -1006,6 +1159,19 @@ func (p *PyPowerwallTEDAPI) getAPISystemStatus(ctx context.Context, force bool) 
 	}
 	stub := stubs.SystemStatusStub()
 	cfg := p.client.GetConfig(ctx, force)
+	status := p.client.GetStatus(ctx, force)
+	controller := p.client.GetDeviceController(ctx, force)
+
+	inverterUsable, maxPower := calculateSystemPowerLimits(cfg, status)
+	instCharge, instDischarge := calculateInstantaneousPower(controller)
+
+	stub["inverter_nominal_usable_power"] = inverterUsable
+	stub["max_charge_power"] = maxPower
+	stub["max_discharge_power"] = maxPower
+	stub["max_apparent_power"] = maxPower
+	stub["instantaneous_max_charge_power"] = instCharge
+	stub["instantaneous_max_discharge_power"] = instDischarge
+
 	if cfg != nil {
 		if vin, ok := cfg["vin"].(string); ok {
 			stub["battery_blocks"] = []any{
@@ -1420,6 +1586,333 @@ func (p *PyPowerwallTEDAPI) GetFanSpeeds(ctx context.Context, force bool) map[st
 	return result
 }
 
+func msaFamily(comp models.Component) string {
+	families := make(map[string]struct{})
+	for _, s := range comp.Signals {
+		name := s.Name
+		idx := strings.IndexByte(name, '_')
+		if idx > 0 {
+			families[name[:idx]] = struct{}{}
+		} else if name != "" {
+			families[name] = struct{}{}
+		}
+	}
+	if len(families) == 1 {
+		for f := range families {
+			return f
+		}
+	}
+
+	return ""
+}
+
+func msaSignals(comp models.Component, prefix string) map[string]any {
+	res := make(map[string]any)
+	for _, s := range comp.Signals {
+		if strings.HasPrefix(s.Name, prefix) {
+			res[s.Name] = s.AnyValue()
+		}
+	}
+
+	return res
+}
+
+func pairNextComponent(
+	comp models.Component,
+	known, seen map[string]bool,
+	pending *string,
+	pairs map[string]models.Component,
+) (*string, bool) {
+	serial := comp.SerialNumber
+	if serial == "" {
+		return pending, true
+	}
+	switch msaFamily(comp) {
+	case "THC":
+		if pending != nil || seen[serial] || !known[serial] {
+			return nil, false
+		}
+		seen[serial] = true
+		s := serial
+
+		return &s, true
+	case "PINV":
+		if pending == nil || seen[serial] {
+			return nil, false
+		}
+		seen[serial] = true
+		pairs[*pending] = comp
+
+		return nil, true
+	default:
+		if pending != nil {
+			return nil, false
+		}
+
+		return pending, true
+	}
+}
+
+func pw2MsaModulePairing(msa models.ComponentList, packageSerials []string) map[string]models.Component {
+	known := make(map[string]bool, len(packageSerials))
+	for _, s := range packageSerials {
+		if s != "" {
+			known[s] = true
+		}
+	}
+	pairs := make(map[string]models.Component, len(packageSerials))
+	seen := make(map[string]bool)
+	var pending *string
+
+	for _, comp := range msa {
+		nextPending, ok := pairNextComponent(comp, known, seen, pending, pairs)
+		if !ok {
+			return nil
+		}
+		pending = nextPending
+	}
+
+	if pending != nil || len(pairs) != len(known) {
+		return nil
+	}
+
+	return pairs
+}
+
+func getActiveAlerts(m map[string]any) []any {
+	if a, ok := lookup.Lookup(m, "alerts", "active").([]any); ok && a != nil {
+		return a
+	}
+
+	return []any{}
+}
+
+func buildPW2TETHC(
+	din, part, serial string,
+	tMap, tempSensors map[string]any,
+	msaThc map[string]map[string]any,
+) map[string]any {
+	var thcState any
+	if m, okM := msaThc[serial]; okM {
+		thcState = m["THC_State"]
+	}
+
+	return map[string]any{
+		"THC_AmbientTemp":        tempSensors[serial],
+		"THC_State":              thcState,
+		keyAlerts:                getActiveAlerts(tMap),
+		keyComponentParentDin:    "STSTSM--" + din,
+		keyFirmwareVersion:       nil,
+		keyLastCommunicationTime: nil,
+		keyManufacturer:          valTesla,
+		keyPartNumber:            part,
+		keySerialNumber:          serial,
+		keyTeslaEnergyEcu: map[string]any{
+			keyEcuType: ecuTypeTHC,
+		},
+	}
+}
+
+func buildPW2TEPOD(parentName, part, serial string, tMap, pod, podMsa map[string]any) map[string]any {
+	energyRemaining, hasRem := toPositiveFloat(lookup.Lookup(pod, "POD_EnergyStatus", "POD_nom_energy_remaining"))
+	fullPackEnergy, hasFull := toPositiveFloat(lookup.Lookup(pod, "POD_EnergyStatus", "POD_nom_full_pack_energy"))
+	var energyToBeCharged any
+	if hasRem && hasFull {
+		energyToBeCharged = fullPackEnergy - energyRemaining
+	}
+
+	return map[string]any{
+		"POD_ActiveHeating":            nil,
+		"POD_CCVhold":                  nil,
+		"POD_ChargeComplete":           nil,
+		"POD_ChargeRequest":            nil,
+		"POD_DischargeComplete":        nil,
+		"POD_PermanentlyFaulted":       nil,
+		"POD_PersistentlyFaulted":      nil,
+		"POD_available_charge_power":   podMsa[sigPodAvailableChargePower],
+		"POD_available_dischg_power":   podMsa[sigPodAvailableDischgPower],
+		"POD_enable_line":              nil,
+		"POD_nom_energy_remaining":     lookup.Lookup(pod, "POD_EnergyStatus", "POD_nom_energy_remaining"),
+		"POD_nom_energy_to_be_charged": energyToBeCharged,
+		"POD_nom_full_pack_energy":     lookup.Lookup(pod, "POD_EnergyStatus", "POD_nom_full_pack_energy"),
+		"POD_state":                    nil,
+		keyAlerts:                      getActiveAlerts(tMap),
+		keyComponentParentDin:          parentName,
+		keyFirmwareVersion:             nil,
+		keyLastCommunicationTime:       nil,
+		keyManufacturer:                valTesla,
+		keyPartNumber:                  part,
+		keySerialNumber:                serial,
+		keyTeslaEnergyEcu: map[string]any{
+			keyEcuType: ecuTypePOD,
+		},
+	}
+}
+
+func buildPW2TEPINV(parentName, part, serial string, pinv, pinvMsa map[string]any) map[string]any {
+	return map[string]any{
+		"PINV_EnergyCharged":            pinvMsa["PINV_EnergyCharged"],
+		"PINV_EnergyDischarged":         pinvMsa["PINV_EnergyDischarged"],
+		"PINV_Fout":                     lookup.Lookup(pinv, "PINV_Status", "PINV_Fout"),
+		"PINV_GridState":                lookup.Lookup(pinv, "PINV_Status", "PINV_GridState"),
+		"PINV_HardwareEnableLine":       pinvMsa["PINV_HardwareEnableLine"],
+		"PINV_HeatsinkTemp":             pinvMsa["PINV_HeatsinkTemp"],
+		"PINV_LifetimeEnergyCharged":    pinvMsa["PINV_LifetimeEnergyCharged"],
+		"PINV_LifetimeEnergyDischarged": pinvMsa["PINV_LifetimeEnergyDischarged"],
+		"PINV_PllFrequency":             pinvMsa["PINV_PllFrequency"],
+		"PINV_PllLocked":                pinvMsa["PINV_PllLocked"],
+		"PINV_Pnom":                     lookup.Lookup(pinv, "PINV_PowerCapability", "PINV_Pnom"),
+		"PINV_Pout":                     lookup.Lookup(pinv, "PINV_Status", "PINV_Pout"),
+		"PINV_PowerLimiter":             pinvMsa["PINV_PowerLimiter"],
+		"PINV_Qout":                     pinvMsa["PINV_Qout"],
+		"PINV_ReadyForGridForming":      pinvMsa["PINV_ReadyForGridForming"],
+		"PINV_State":                    lookup.Lookup(pinv, "PINV_Status", "PINV_State"),
+		"PINV_VSplit1":                  lookup.Lookup(pinv, "PINV_AcMeasurements", "PINV_VSplit1"),
+		"PINV_VSplit2":                  lookup.Lookup(pinv, "PINV_AcMeasurements", "PINV_VSplit2"),
+		"PINV_Vout":                     lookup.Lookup(pinv, "PINV_Status", "PINV_Vout"),
+		keyAlerts:                       getActiveAlerts(pinv),
+		keyComponentParentDin:           parentName,
+		keyFirmwareVersion:              nil,
+		keyLastCommunicationTime:        nil,
+		keyManufacturer:                 valTesla,
+		keyPartNumber:                   part,
+		keySerialNumber:                 serial,
+		keyTeslaEnergyEcu: map[string]any{
+			keyEcuType: ecuTypePINV,
+		},
+	}
+}
+
+func extractMsaThcAndTemps(msa models.ComponentList) (map[string]any, map[string]map[string]any) {
+	tempSensors := make(map[string]any)
+	msaThc := make(map[string]map[string]any)
+	for _, c := range msa {
+		if c.SerialNumber == "" {
+			continue
+		}
+		if v := c.SignalValue("THC_AmbientTemp"); v != nil {
+			tempSensors[c.SerialNumber] = v
+		}
+		if msaFamily(c) == "THC" {
+			if _, exists := msaThc[c.SerialNumber]; !exists {
+				msaThc[c.SerialNumber] = msaSignals(c, "THC_")
+			}
+		}
+	}
+
+	return tempSensors, msaThc
+}
+
+func mergeMsaSyncSignals(msa models.ComponentList, syncMap map[string]any) {
+	for _, c := range msa {
+		for k, v := range msaSignals(c, "SYNC_") {
+			if _, exists := syncMap[k]; !exists && v != nil {
+				syncMap[k] = v
+			}
+		}
+	}
+}
+
+func extractPackageSerials(thcList []any) []string {
+	var packageSerials []string
+	for _, tAny := range thcList {
+		tMap, ok := tAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sn, okSn := tMap["packageSerialNumber"].(string); okSn && sn != "" {
+			packageSerials = append(packageSerials, sn)
+		}
+	}
+
+	return packageSerials
+}
+
+func extractMsaTepods(msa models.ComponentList) map[string]models.Component {
+	tepods := make(map[string]models.Component)
+	for _, c := range msa {
+		if c.SerialNumber != "" && msaFamily(c) == "POD" {
+			tepods[c.SerialNumber] = c
+		}
+	}
+
+	return tepods
+}
+
+func synthesizePW2Package(
+	din string,
+	i int,
+	tMap map[string]any,
+	tempSensors map[string]any,
+	msaThc map[string]map[string]any,
+	podList, pinvList []any,
+	pairedPinv map[string]models.Component,
+	msaTepods map[string]models.Component,
+	out map[string]any,
+) {
+	serial, _ := tMap["packageSerialNumber"].(string)
+	if serial == "" {
+		return
+	}
+	part, _ := tMap["packagePartNumber"].(string)
+	if part == "" {
+		part = strconv.Itoa(i)
+	}
+
+	parentName := fmt.Sprintf("TETHC--%s--%s", part, serial)
+	out[parentName] = buildPW2TETHC(din, part, serial, tMap, tempSensors, msaThc)
+
+	var pod map[string]any
+	if i < len(podList) {
+		pod, _ = podList[i].(map[string]any)
+	}
+	var podMsa map[string]any
+	if pairedPinv != nil {
+		if comp, okComp := pairedPinv[serial]; okComp {
+			if tepod, okTepod := msaTepods[comp.SerialNumber]; okTepod {
+				podMsa = msaSignals(tepod, "POD_")
+			}
+		}
+	}
+	out[fmt.Sprintf("TEPOD--%s--%s", part, serial)] = buildPW2TEPOD(parentName, part, serial, tMap, pod, podMsa)
+
+	var pinv map[string]any
+	if i < len(pinvList) {
+		pinv, _ = pinvList[i].(map[string]any)
+	}
+	var pinvMsa map[string]any
+	if pairedPinv != nil {
+		if comp, okComp := pairedPinv[serial]; okComp {
+			pinvMsa = msaSignals(comp, "PINV_")
+		}
+	}
+	out[fmt.Sprintf("TEPINV--%s--%s", part, serial)] = buildPW2TEPINV(parentName, part, serial, pinv, pinvMsa)
+}
+
+func synthesizePW2Vitals(controller map[string]any, din string, out map[string]any, syncMap map[string]any) {
+	components := models.ParseComponents(controller)
+	mergeMsaSyncSignals(components.MSA, syncMap)
+
+	thcList, _ := lookup.Lookup(controller, "esCan", "bus", "THC").([]any)
+	if len(thcList) == 0 {
+		return
+	}
+
+	packageSerials := extractPackageSerials(thcList)
+	pairedPinv := pw2MsaModulePairing(components.MSA, packageSerials)
+	tempSensors, msaThc := extractMsaThcAndTemps(components.MSA)
+	msaTepods := extractMsaTepods(components.MSA)
+
+	podList, _ := lookup.Lookup(controller, "esCan", "bus", "POD").([]any)
+	pinvList, _ := lookup.Lookup(controller, "esCan", "bus", "PINV").([]any)
+
+	for i, tAny := range thcList {
+		if tMap, ok := tAny.(map[string]any); ok {
+			synthesizePW2Package(din, i, tMap, tempSensors, msaThc, podList, pinvList, pairedPinv, msaTepods, out)
+		}
+	}
+}
+
 // Vitals returns Powerwall vitals in TEDAPI format.
 func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) {
 	out := make(map[string]any)
@@ -1439,10 +1932,12 @@ func (p *PyPowerwallTEDAPI) Vitals(ctx context.Context) (map[string]any, error) 
 		"componentParentDin": "STSTSM--" + din,
 	}
 	syncMap := map[string]any{}
-	if controller := p.client.GetDeviceController(ctx, false); controller != nil {
+	controller := p.client.GetDeviceController(ctx, false)
+	if controller != nil {
 		if uptime := p.getGatewayUptime(ctx, false); uptime != nil {
 			syncMap["SYNC_Uptime"] = uptime.uptimeMs
 		}
+		synthesizePW2Vitals(controller, din, out, syncMap)
 	}
 	out["TESYNC--None--None"] = syncMap
 

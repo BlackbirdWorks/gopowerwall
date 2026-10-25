@@ -105,6 +105,15 @@ func (c *ResponseCache) Set(key string, value any) {
 	}, c.defaultTTL)
 }
 
+// SetWithTimestamp stores a successful value in the cache with a specified timestamp and TTL.
+func (c *ResponseCache) SetWithTimestamp(key string, value any, ts time.Time, ttl time.Duration) {
+	c.cache.Set(key, &Entry{
+		Timestamp:  ts,
+		Value:      value,
+		IsNegative: false,
+	}, ttl)
+}
+
 // SetNegative stores a negative cache entry (e.g. 404 or persistent error).
 func (c *ResponseCache) SetNegative(key string, ttl time.Duration) {
 	c.cache.Set(key, &Entry{

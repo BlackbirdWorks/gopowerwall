@@ -157,6 +157,36 @@ func TestExtraSignals(t *testing.T) {
 			role:       tedapi.QueryRoleDeviceControllerFull,
 			wantSignal: "SYNC_Uptime",
 		},
+		{
+			name:       "device controller full includes PINV_EnergyCharged",
+			role:       tedapi.QueryRoleDeviceControllerFull,
+			wantSignal: "PINV_EnergyCharged",
+		},
+		{
+			name:       "device controller full includes THC_State",
+			role:       tedapi.QueryRoleDeviceControllerFull,
+			wantSignal: "THC_State",
+		},
+		{
+			name:       "device controller full includes SYNC_ExternallyPowered",
+			role:       tedapi.QueryRoleDeviceControllerFull,
+			wantSignal: "SYNC_ExternallyPowered",
+		},
+		{
+			name:       "device controller full includes SYNC_SiteSwitchEnabled",
+			role:       tedapi.QueryRoleDeviceControllerFull,
+			wantSignal: "SYNC_SiteSwitchEnabled",
+		},
+		{
+			name:       "device controller full includes POD_available_charge_power",
+			role:       tedapi.QueryRoleDeviceControllerFull,
+			wantSignal: "POD_available_charge_power",
+		},
+		{
+			name:       "device controller full includes TEPOD component type",
+			role:       tedapi.QueryRoleDeviceControllerFull,
+			wantSignal: "TEPOD",
+		},
 	}
 
 	for _, tc := range cases {

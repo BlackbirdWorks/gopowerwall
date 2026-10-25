@@ -69,6 +69,25 @@ func TestResponseCacheGetSet(t *testing.T) {
 			customTTL: []time.Duration{time.Millisecond},
 			wantFound: false,
 		},
+		{
+			name: "set with timestamp within custom TTL hits",
+			setup: func(c *cache.ResponseCache) {
+				c.SetWithTimestamp("/api/backdated", "back-val", time.Now().Add(-10*time.Millisecond), 500*time.Millisecond)
+			},
+			key:       "/api/backdated",
+			customTTL: []time.Duration{200 * time.Millisecond},
+			wantVal:   "back-val",
+			wantFound: true,
+		},
+		{
+			name: "set with timestamp exceeding custom TTL misses",
+			setup: func(c *cache.ResponseCache) {
+				c.SetWithTimestamp("/api/expired", "exp-val", time.Now().Add(-100*time.Millisecond), 500*time.Millisecond)
+			},
+			key:       "/api/expired",
+			customTTL: []time.Duration{50 * time.Millisecond},
+			wantFound: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
