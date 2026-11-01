@@ -20,6 +20,7 @@ import (
 	"github.com/blackbirdworks/gopowerwall/pkgs/cache"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
 	"github.com/blackbirdworks/gopowerwall/pkgs/lookup"
+	"github.com/blackbirdworks/gopowerwall/pkgs/validation"
 	"github.com/blackbirdworks/gopowerwall/powerwall/proto/tedapi"
 	"github.com/blackbirdworks/gopowerwall/powerwall/proto/tedapi/combined"
 	"github.com/blackbirdworks/gopowerwall/powerwall/stubs"
@@ -64,26 +65,33 @@ const (
 
 	sigPodAvailableChargePower = "POD_available_charge_power"
 	sigPodAvailableDischgPower = "POD_available_dischg_power"
+
+	wifiV1rReadyTTL = 60 * time.Second
 )
 
 // Client connects to the Tesla TEDAPI interface over WiFi or LAN.
 type Client struct {
-	configTime  time.Time
-	v1r         *TEDAPIv1r
-	cache       *cache.ResponseCache
-	client      *http.Client
-	configCache map[string]any
-	host        string
-	gwPwd       string
-	din         string
-	apiVersion  models.TEDAPIApiVersion
-	authMode    models.AuthMode
-	configHash  []byte
-	poolMaxSize int
-	configTTL   time.Duration
-	timeout     time.Duration
-	mu          sync.Mutex
-	pw3         bool
+	configTime        time.Time
+	wifiV1rReadyUntil time.Time
+	v1r               *TEDAPIv1r
+	wifiV1r           *TEDAPIv1r
+	cache             *cache.ResponseCache
+	client            *http.Client
+	configCache       map[string]any
+	host              string
+	gwPwd             string
+	din               string
+	apiVersion        models.TEDAPIApiVersion
+	authMode          models.AuthMode
+	configHash        []byte
+	poolMaxSize       int
+	configTTL         time.Duration
+	timeout           time.Duration
+	mu                sync.Mutex
+	pw3               bool
+	failover          bool
+	wifiV1rFallback   bool
+	lanFailed         bool
 }
 
 // NewClient creates a new Client instance.
@@ -121,6 +129,7 @@ func NewClient(
 		cache:       cache.NewResponseCache(cacheTTL),
 		configTTL:   cacheTTL,
 		client:      client,
+		failover:    true,
 	}
 }
 
@@ -132,29 +141,187 @@ func (c *Client) SetV1rTransport(v1r *TEDAPIv1r) {
 	c.pw3 = true
 }
 
+// SetWiFiV1rTransport sets the secondary signed-v1r transport over WiFi for opt-in failover.
+func (c *Client) SetWiFiV1rTransport(wifiV1r *TEDAPIv1r) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wifiV1r = wifiV1r
+}
+
+// SetFailover configures failover and strict signed WiFi-v1r fallback behavior.
+func (c *Client) SetFailover(failover, wifiV1rFallback bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failover = failover
+	c.wifiV1rFallback = wifiV1rFallback
+}
+
+// SetLANFailed marks whether the wired LAN v1r transport has tripped failover.
+// Resetting LAN failure also clears cached WiFi-v1r probe readiness so the next
+// failover episode re-probes before writing.
+func (c *Client) SetLANFailed(failed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lanFailed = failed
+	if !failed {
+		c.wifiV1rReadyUntil = time.Time{}
+	}
+}
+
+// IsLANFailed reports whether the wired LAN v1r transport is currently marked failed.
+func (c *Client) IsLANFailed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.lanFailed
+}
+
+func (c *Client) wifiV1rRequestedLocked() bool {
+	return c.v1r != nil && c.failover && c.lanFailed && c.wifiV1rFallback
+}
+
+func (c *Client) v1rReadTransport() *TEDAPIv1r {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.lanFailed {
+		return c.v1r
+	}
+	if !c.wifiV1rRequestedLocked() {
+		return nil
+	}
+
+	return c.wifiV1r
+}
+
+func (c *Client) v1rWriteTransport(ctx context.Context) *TEDAPIv1r {
+	c.mu.Lock()
+	if !c.lanFailed {
+		v1r := c.v1r
+		c.mu.Unlock()
+
+		return v1r
+	}
+	if !c.wifiV1rRequestedLocked() {
+		c.mu.Unlock()
+
+		return nil
+	}
+	wifiV1r := c.wifiV1r
+	readyUntil := c.wifiV1rReadyUntil
+	c.mu.Unlock()
+
+	if wifiV1r == nil {
+		return nil
+	}
+	if !time.Now().Before(readyUntil) {
+		if !c.WiFiV1rReady(ctx) {
+			return nil
+		}
+	}
+
+	return wifiV1r
+}
+
+func signedDin(ctx context.Context, transport *TEDAPIv1r) string {
+	if transport == nil {
+		return ""
+	}
+	var din string
+	if transport.HasToken() {
+		din, _ = transport.GetDin(ctx)
+	}
+	if din == "" {
+		if err := transport.Login(ctx); err == nil {
+			din, _ = transport.GetDin(ctx)
+		}
+	}
+
+	return din
+}
+
+// WiFiV1rReady performs a read-only signed config probe over the opt-in WiFi-v1r
+// fallback transport and caches a successful probe for 60 seconds to gate writes.
+func (c *Client) WiFiV1rReady(ctx context.Context) bool {
+	c.mu.Lock()
+	c.wifiV1rReadyUntil = time.Time{}
+	requested := c.wifiV1rRequestedLocked()
+	wifiV1r := c.wifiV1r
+	din := c.din
+	host := c.host
+	c.mu.Unlock()
+
+	if !requested || wifiV1r == nil || wifiV1r.host == "" || wifiV1r.host == host || din == "" {
+		return false
+	}
+
+	cfg := c.readV1rConfigFrom(ctx, wifiV1r, din)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cfg == nil {
+		c.wifiV1rReadyUntil = time.Time{}
+
+		return false
+	}
+	c.wifiV1rReadyUntil = time.Now().Add(wifiV1rReadyTTL)
+
+	return true
+}
+
+func (c *Client) connectV1r(
+	ctx context.Context,
+	v1r, wifiV1r *TEDAPIv1r,
+	failover, wifiV1rFallback bool,
+) bool {
+	if err := v1r.Login(ctx); err == nil {
+		if din, dinErr := v1r.GetDin(ctx); dinErr == nil && din != "" {
+			c.mu.Lock()
+			c.din = din
+			c.lanFailed = false
+			c.wifiV1rReadyUntil = time.Time{}
+			c.mu.Unlock()
+
+			return true
+		}
+	} else {
+		logger.Load(ctx).DebugContext(ctx, "TEDAPI v1r login failed", "error", err)
+	}
+
+	if !failover || !wifiV1rFallback {
+		return false
+	}
+	if wifiV1r == nil {
+		logger.Load(ctx).ErrorContext(ctx, "v1r: signed WiFi v1r transport is not configured for cold failover")
+
+		return false
+	}
+	din := signedDin(ctx, wifiV1r)
+	if din == "" {
+		return false
+	}
+	c.mu.Lock()
+	c.din = din
+	c.lanFailed = true
+	c.mu.Unlock()
+	logger.Load(ctx).WarnContext(
+		ctx,
+		"v1r: LAN unreachable — using signed WiFi v1r fallback",
+		"wifi_host", wifiV1r.host,
+	)
+
+	return true
+}
+
 // Connect checks connectivity to TEDAPI and initializes session.
 func (c *Client) Connect(ctx context.Context) bool {
 	c.mu.Lock()
 	v1r := c.v1r
+	failover := c.failover
+	wifiV1rFallback := c.wifiV1rFallback
+	wifiV1r := c.wifiV1r
 	c.mu.Unlock()
 
 	if v1r != nil {
-		if err := v1r.Login(ctx); err != nil {
-			logger.Load(ctx).DebugContext(ctx, "TEDAPI v1r login failed", "error", err)
-
-			return false
-		}
-		din, err := v1r.GetDin(ctx)
-		if err != nil || din == "" {
-			logger.Load(ctx).DebugContext(ctx, "TEDAPI v1r get_din failed", "error", err)
-
-			return false
-		}
-		c.mu.Lock()
-		c.din = din
-		c.mu.Unlock()
-
-		return true
+		return c.connectV1r(ctx, v1r, wifiV1r, failover, wifiV1rFallback)
 	}
 
 	// Direct TEDAPI HTTP check
@@ -206,7 +373,10 @@ func decompressResponse(body []byte) []byte {
 	return body
 }
 
-func (c *Client) readV1rConfig(ctx context.Context, din string) map[string]any {
+func (c *Client) readV1rConfigFrom(ctx context.Context, transport *TEDAPIv1r, din string) map[string]any {
+	if transport == nil {
+		return nil
+	}
 	msg := &combined.Message{
 		Message: &combined.MessageEnvelope{
 			DeliveryChannel: combined.DeliveryChannel_DELIVERY_CHANNEL_HERMES_COMMAND,
@@ -233,7 +403,7 @@ func (c *Client) readV1rConfig(ctx context.Context, din string) map[string]any {
 		},
 	}
 	wireBytes, _ := proto.Marshal(msg.GetMessage())
-	respBytes, err := c.v1r.PostV1r(ctx, wireBytes, din)
+	respBytes, err := transport.PostV1r(ctx, wireBytes, din)
 	if err != nil || len(respBytes) == 0 {
 		return nil
 	}
@@ -318,6 +488,38 @@ func (c *Client) readLegacyWiFiConfig(ctx context.Context) map[string]any {
 	return nil
 }
 
+func (c *Client) getConfigViaV1r(ctx context.Context, din string, wifiV1rFallback bool) (map[string]any, bool) {
+	transport := c.v1rReadTransport()
+	if wifiV1rFallback {
+		if transport == nil {
+			return nil, true
+		}
+		if din == "" {
+			din = signedDin(ctx, transport)
+		}
+		if din == "" {
+			return nil, true
+		}
+
+		return c.readV1rConfigFrom(ctx, transport, din), true
+	}
+
+	if transport == nil {
+		return nil, false
+	}
+	if din == "" {
+		din, _ = transport.GetDin(ctx)
+	}
+	if din == "" {
+		return nil, false
+	}
+	if cfg := c.readV1rConfigFrom(ctx, transport, din); cfg != nil {
+		return cfg, true
+	}
+
+	return nil, false
+}
+
 // GetConfig reads config.json via TEDAPI FileStore messages.
 func (c *Client) GetConfig(ctx context.Context, force bool) map[string]any {
 	c.mu.Lock()
@@ -328,17 +530,13 @@ func (c *Client) GetConfig(ctx context.Context, force bool) map[string]any {
 		return cfg
 	}
 	v1r := c.v1r
+	wifiV1rFallback := c.wifiV1rFallback
 	din := c.din
 	c.mu.Unlock()
 
 	if v1r != nil {
-		if din == "" {
-			din, _ = v1r.GetDin(ctx)
-		}
-		if din != "" {
-			if cfg := c.readV1rConfig(ctx, din); cfg != nil {
-				return cfg
-			}
+		if cfg, handled := c.getConfigViaV1r(ctx, din, wifiV1rFallback); handled {
+			return cfg
 		}
 	}
 
@@ -421,19 +619,62 @@ func (c *Client) GetDeviceController(ctx context.Context, force bool) map[string
 	return res
 }
 
-func (c *Client) execGraphQL(ctx context.Context, query *Query) map[string]any {
+// APIGet executes a native local API GET through whichever signed v1r transport is active.
+func (c *Client) APIGet(ctx context.Context, path string) (any, error) {
+	c.mu.Lock()
+	requested := c.wifiV1rRequestedLocked()
+	c.mu.Unlock()
+
+	transport := c.v1rReadTransport()
+	if transport == nil {
+		return nil, models.ErrUnsupported
+	}
+	if requested && !transport.HasToken() {
+		if err := transport.Login(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	return transport.APIGet(ctx, path)
+}
+
+func (c *Client) tryV1rSystemStatus(ctx context.Context) (map[string]any, bool) {
 	c.mu.Lock()
 	v1r := c.v1r
+	wifiV1rFallback := c.wifiV1rFallback
+	lanFailed := c.lanFailed
 	din := c.din
 	c.mu.Unlock()
 
-	if v1r != nil && din != "" {
-		res, err := v1r.APIGet(ctx, "/api/system_status")
+	if v1r == nil {
+		return nil, false
+	}
+	if lanFailed && wifiV1rFallback {
+		res, err := c.APIGet(ctx, "/api/system_status")
+		if err != nil {
+			return nil, true
+		}
+		if m, ok := res.(map[string]any); ok {
+			return m, true
+		}
+
+		return nil, true
+	}
+	if din != "" {
+		res, err := c.APIGet(ctx, "/api/system_status")
 		if err == nil {
 			if m, ok := res.(map[string]any); ok {
-				return m
+				return m, true
 			}
 		}
+	}
+
+	return nil, false
+}
+
+func (c *Client) execGraphQL(ctx context.Context, query *Query) map[string]any {
+	if status, handled := c.tryV1rSystemStatus(ctx); handled {
+		return status
 	}
 
 	// Legacy WiFi protobuf query
@@ -689,6 +930,9 @@ func (c *Client) Close() {
 	if c.v1r != nil {
 		c.v1r.Close()
 	}
+	if c.wifiV1r != nil {
+		c.wifiV1r.Close()
+	}
 	if c.cache != nil {
 		c.cache.Close()
 	}
@@ -742,9 +986,9 @@ func setInstantPower(stub map[string]any, key string, power any) {
 func (p *PyPowerwallTEDAPI) getAPIMetersAggregates(ctx context.Context, force bool) (any, error) {
 	stub := stubs.MetersAggregatesStub()
 
-	// If v1r is active, attempt native call
+	// If v1r is active, attempt native call through the selected v1r read transport
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet(ctx, "/api/meters/aggregates")
+		res, err := p.client.APIGet(ctx, "/api/meters/aggregates")
 		if err == nil && res != nil {
 			return res, nil
 		}
@@ -936,7 +1180,7 @@ func (p *PyPowerwallTEDAPI) getAPISiteInfo(ctx context.Context, force bool) (any
 
 func (p *PyPowerwallTEDAPI) getAPISiteMaster(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet(ctx, "/api/sitemaster")
+		res, err := p.client.APIGet(ctx, "/api/sitemaster")
 		if err == nil && res != nil {
 			return res, nil
 		}
@@ -1152,7 +1396,7 @@ func calculateInstantaneousPower(controller map[string]any) (float64, float64) {
 
 func (p *PyPowerwallTEDAPI) getAPISystemStatus(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet(ctx, "/api/system_status")
+		res, err := p.client.APIGet(ctx, "/api/system_status")
 		if err == nil && res != nil {
 			return res, nil
 		}
@@ -1207,7 +1451,7 @@ func checkConnectedAlert(alerts []any) bool {
 
 func (p *PyPowerwallTEDAPI) getAPIGridStatus(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet(ctx, "/api/system_status/grid_status")
+		res, err := p.client.APIGet(ctx, "/api/system_status/grid_status")
 		if err == nil && res != nil {
 			return res, nil
 		}
@@ -1240,7 +1484,7 @@ func (p *PyPowerwallTEDAPI) getAPIGridStatus(ctx context.Context, force bool) (a
 
 func (p *PyPowerwallTEDAPI) getAPISystemStatusSOE(ctx context.Context, force bool) (any, error) {
 	if p.v1r != nil {
-		res, err := p.v1r.APIGet(ctx, "/api/system_status/soe")
+		res, err := p.client.APIGet(ctx, "/api/system_status/soe")
 		if err == nil && res != nil {
 			return res, nil
 		}
@@ -2010,49 +2254,24 @@ func (p *PyPowerwallTEDAPI) FetchPower(ctx context.Context, sensor string, verbo
 	return power[sensor], nil
 }
 
-// ScheduleMaxBackup delegates to v1r if available.
-func (p *PyPowerwallTEDAPI) ScheduleMaxBackup(ctx context.Context, durationSeconds int) (map[string]any, error) {
-	if p.v1r == nil {
-		return nil, models.ErrUnsupported
-	}
-	ok, err := p.v1r.ScheduleMaxBackup(ctx, durationSeconds)
-	if err != nil {
-		return nil, err
+// WiFiV1rReady performs a read-only probe for the opt-in WiFi-v1r fallback.
+func (p *PyPowerwallTEDAPI) WiFiV1rReady(ctx context.Context) bool {
+	if p.client == nil {
+		return false
 	}
 
-	return map[string]any{"success": ok}, nil
+	return p.client.WiFiV1rReady(ctx)
 }
 
-// CancelMaxBackup delegates to v1r if available.
-func (p *PyPowerwallTEDAPI) CancelMaxBackup(ctx context.Context) (map[string]any, error) {
-	if p.v1r == nil {
-		return nil, models.ErrUnsupported
+func (p *PyPowerwallTEDAPI) resolveDin(ctx context.Context, transport *TEDAPIv1r) string {
+	var din string
+	if transport != nil {
+		din, _ = transport.GetDin(ctx)
 	}
-	ok, err := p.v1r.CancelMaxBackup(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return map[string]any{"success": ok}, nil
-}
-
-// GetBackupEvents delegates to v1r if available.
-func (p *PyPowerwallTEDAPI) GetBackupEvents(ctx context.Context) (map[string]any, error) {
-	if p.v1r == nil {
-		return nil, models.ErrUnsupported
-	}
-
-	return p.v1r.GetBackupEvents(ctx)
-}
-
-// GoOffGrid requests intentional islanding through the signed v1r transport.
-func (p *PyPowerwallTEDAPI) GoOffGrid(ctx context.Context) (models.Operation, error) {
-	if p.v1r == nil {
-		return models.Operation{}, models.ErrUnsupported
-	}
-	din, _ := p.v1r.GetDin(ctx)
 	if din == "" {
+		p.client.mu.Lock()
 		din = p.client.din
+		p.client.mu.Unlock()
 	}
 	if din == "" {
 		cfg := p.client.GetConfig(ctx, false)
@@ -2060,11 +2279,135 @@ func (p *PyPowerwallTEDAPI) GoOffGrid(ctx context.Context) (models.Operation, er
 			din = v
 		}
 	}
+
+	return din
+}
+
+func (p *PyPowerwallTEDAPI) invalidatePowerSamples() {
+	if p.client == nil || p.client.cache == nil {
+		return
+	}
+	p.client.cache.Invalidate("status")
+	p.client.cache.Invalidate("controller")
+	p.client.cache.Invalidate("components")
+}
+
+// DispatchBatteryPower sets battery power temporarily via the signed v1r command.
+//
+// Use at your own risk: it overrides the backup reserve and grid export
+// settings and could void your warranty.
+func (p *PyPowerwallTEDAPI) DispatchBatteryPower(
+	ctx context.Context,
+	powerWatts float64,
+	durationSeconds int,
+) (models.BatteryDispatchResult, error) {
+	if err := validation.ValidateBatteryDispatch(powerWatts, durationSeconds); err != nil {
+		return models.BatteryDispatchResult{}, fmt.Errorf("%w: %w", models.ErrInvalidBatteryDispatch, err)
+	}
+	if p.v1r == nil {
+		return models.BatteryDispatchResult{}, models.ErrUnsupported
+	}
+	transport := p.client.v1rWriteTransport(ctx)
+	if transport == nil {
+		return models.BatteryDispatchResult{}, models.ErrUnsupported
+	}
+	din := p.resolveDin(ctx, transport)
+	if din == "" {
+		return models.BatteryDispatchResult{}, models.ErrNotFound
+	}
+	res, err := transport.DispatchBatteryPower(ctx, din, powerWatts, durationSeconds)
+	if err != nil {
+		return models.BatteryDispatchResult{}, err
+	}
+	p.invalidatePowerSamples()
+
+	return res, nil
+}
+
+// ResumeBatteryOperation releases a v1r battery power setpoint.
+func (p *PyPowerwallTEDAPI) ResumeBatteryOperation(ctx context.Context) (models.BatteryResumeResult, error) {
+	if p.v1r == nil {
+		return models.BatteryResumeResult{}, models.ErrUnsupported
+	}
+	transport := p.client.v1rWriteTransport(ctx)
+	if transport == nil {
+		return models.BatteryResumeResult{}, models.ErrUnsupported
+	}
+	din := p.resolveDin(ctx, transport)
+	if din == "" {
+		return models.BatteryResumeResult{}, models.ErrNotFound
+	}
+	res, err := transport.ResumeBatteryOperation(ctx, din)
+	if err != nil {
+		return models.BatteryResumeResult{}, err
+	}
+	p.invalidatePowerSamples()
+
+	return res, nil
+}
+
+// ScheduleMaxBackup delegates to the active v1r write transport if available.
+func (p *PyPowerwallTEDAPI) ScheduleMaxBackup(ctx context.Context, durationSeconds int) (map[string]any, error) {
+	if p.v1r == nil {
+		return nil, models.ErrUnsupported
+	}
+	transport := p.client.v1rWriteTransport(ctx)
+	if transport == nil {
+		return nil, models.ErrUnsupported
+	}
+	ok, err := transport.ScheduleMaxBackup(ctx, durationSeconds)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{"success": ok}, nil
+}
+
+// CancelMaxBackup delegates to the active v1r write transport if available.
+func (p *PyPowerwallTEDAPI) CancelMaxBackup(ctx context.Context) (map[string]any, error) {
+	if p.v1r == nil {
+		return nil, models.ErrUnsupported
+	}
+	transport := p.client.v1rWriteTransport(ctx)
+	if transport == nil {
+		return nil, models.ErrUnsupported
+	}
+	ok, err := transport.CancelMaxBackup(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{"success": ok}, nil
+}
+
+// GetBackupEvents delegates to the active v1r read transport if available.
+func (p *PyPowerwallTEDAPI) GetBackupEvents(ctx context.Context) (map[string]any, error) {
+	if p.v1r == nil {
+		return nil, models.ErrUnsupported
+	}
+	transport := p.client.v1rReadTransport()
+	if transport == nil {
+		return nil, models.ErrUnsupported
+	}
+
+	return transport.GetBackupEvents(ctx)
+}
+
+// GoOffGrid requests intentional islanding through the signed v1r transport.
+func (p *PyPowerwallTEDAPI) GoOffGrid(ctx context.Context) (models.Operation, error) {
+	if p.v1r == nil {
+		return models.Operation{}, models.ErrUnsupported
+	}
+	transport := p.client.v1rWriteTransport(ctx)
+	if transport == nil {
+		return models.Operation{}, models.ErrUnsupported
+	}
+	din := p.resolveDin(ctx, transport)
 	if din == "" {
 		return models.Operation{}, models.ErrNotFound
 	}
 
-	_, err := p.v1r.SendIslandMode(ctx, din, IslandModeOffGrid, true)
+	_, err := transport.SendIslandMode(ctx, din, IslandModeOffGrid, true)
 	if err != nil {
 		return models.Operation{}, err
 	}
@@ -2077,21 +2420,16 @@ func (p *PyPowerwallTEDAPI) ReconnectGrid(ctx context.Context) (models.Operation
 	if p.v1r == nil {
 		return models.Operation{}, models.ErrUnsupported
 	}
-	din, _ := p.v1r.GetDin(ctx)
-	if din == "" {
-		din = p.client.din
+	transport := p.client.v1rWriteTransport(ctx)
+	if transport == nil {
+		return models.Operation{}, models.ErrUnsupported
 	}
-	if din == "" {
-		cfg := p.client.GetConfig(ctx, false)
-		if v, ok := cfg["vin"].(string); ok {
-			din = v
-		}
-	}
+	din := p.resolveDin(ctx, transport)
 	if din == "" {
 		return models.Operation{}, models.ErrNotFound
 	}
 
-	_, err := p.v1r.SendIslandMode(ctx, din, IslandModeReconnect, false)
+	_, err := transport.SendIslandMode(ctx, din, IslandModeReconnect, false)
 	if err != nil {
 		return models.Operation{}, err
 	}

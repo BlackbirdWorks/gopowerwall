@@ -38,6 +38,7 @@ type Powerwall struct {
 	mode                   ConnectionMode
 	configuredMode         ConnectionMode
 	tedapiMode             TEDAPIMode
+	connectError           string
 	mu                     sync.RWMutex
 	cloudmode              bool
 	configuredCloudmode    bool
@@ -45,6 +46,7 @@ type Powerwall struct {
 	configuredFleetapiFlag bool
 	tedapiFlag             bool
 	failover               bool
+	wifiV1rFallback        bool
 }
 
 // New builds a [Config] from [DefaultConfig] plus opts, validates it, and
@@ -100,16 +102,26 @@ func New(ctx context.Context, opts ...Option) (*Powerwall, error) {
 	pw.configuredCloudmode = pw.cloudmode
 	pw.configuredFleetapiFlag = pw.fleetapiFlag
 	pw.failover = cfg.Failover
+	pw.wifiV1rFallback = cfg.WiFiV1rFallback
 
 	if err := ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
 
 	if !pw.Connect(ctx, cfg.RetryModes) {
-		logger.Load(ctx).
-			ErrorContext(ctx, "unable to connect to Powerwall, verify host, credentials and network connectivity")
+		reason := pw.ConnectError()
+		if reason != "" {
+			logger.Load(ctx).ErrorContext(
+				ctx,
+				"unable to connect to Powerwall, verify host, credentials and network connectivity",
+				"reason", reason,
+			)
+		} else {
+			logger.Load(ctx).
+				ErrorContext(ctx, "unable to connect to Powerwall, verify host, credentials and network connectivity")
+		}
 
-		return pw, &models.ConnectError{Mode: string(pw.Mode())}
+		return pw, &models.ConnectError{Mode: string(pw.Mode()), Reason: reason}
 	}
 
 	return pw, nil
@@ -132,6 +144,23 @@ func (p *Powerwall) Failover() bool {
 	defer p.mu.RUnlock()
 
 	return p.failover
+}
+
+// WiFiV1rFallback reports whether strict signed WiFi v1r fallback is enabled.
+func (p *Powerwall) WiFiV1rFallback() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.wifiV1rFallback
+}
+
+// ConnectError returns the first failure reason recorded during the most
+// recent [Powerwall.Connect] attempt, or "" if the connection succeeded.
+func (p *Powerwall) ConnectError() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.connectError
 }
 
 // TEDAPIMode returns the active [TEDAPIMode] sub-mode: [TEDAPIOff] unless a

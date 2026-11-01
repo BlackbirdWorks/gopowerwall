@@ -2,10 +2,17 @@ package proxy_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -318,6 +325,94 @@ func TestHealthNilPowerwall(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, rec.Code)
 			assert.Contains(t, rec.Body.String(), tc.wantMode)
+		})
+	}
+}
+
+func writeSelfSignedCertKeyPair(t *testing.T, dir string) (string, string) {
+	t.Helper()
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	require.NoError(t, err)
+
+	certPath := filepath.Join(dir, "custom.crt")
+	keyPath := filepath.Join(dir, "custom.key")
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+
+	require.NoError(t, os.WriteFile(certPath, certPEM, 0o600))
+	require.NoError(t, os.WriteFile(keyPath, keyPEM, 0o600))
+
+	return certPath, keyPath
+}
+
+func TestHTTPSCertificate(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	validCert, validKey := writeSelfSignedCertKeyPair(t, dir)
+
+	type testCase struct {
+		wantErrIs error
+		name      string
+		cert      string
+		key       string
+		wantCert  string
+		wantKey   string
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:      "only cert set returns ErrHTTPSCertKeyMismatch",
+			cert:      validCert,
+			key:       "",
+			wantErrIs: proxy.ErrHTTPSCertKeyMismatch,
+		},
+		{
+			name:      "only key set returns ErrHTTPSCertKeyMismatch",
+			cert:      "",
+			key:       validKey,
+			wantErrIs: proxy.ErrHTTPSCertKeyMismatch,
+		},
+		{
+			name:      "missing cert and key files return ErrHTTPSCertKeyLoad",
+			cert:      filepath.Join(dir, "missing.crt"),
+			key:       filepath.Join(dir, "missing.key"),
+			wantErrIs: proxy.ErrHTTPSCertKeyLoad,
+		},
+		{
+			name:     "valid custom cert and key pair succeeds",
+			cert:     validCert,
+			key:      validKey,
+			wantCert: validCert,
+			wantKey:  validKey,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotCert, gotKey, err := proxy.HTTPSCertificate(t.Context(), tc.cert, tc.key)
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantCert, gotCert)
+			assert.Equal(t, tc.wantKey, gotKey)
 		})
 	}
 }

@@ -2,13 +2,26 @@
 package validation
 
 import (
+	"errors"
+	"math"
 	"net"
 	"net/mail"
 	"regexp"
 	"strings"
 )
 
-const maxHostLength = 255
+const (
+	maxHostLength              = 255
+	MinDispatchDurationSeconds = 1
+	MaxDispatchDurationSeconds = 86400
+)
+
+var (
+	// ErrInvalidDispatchPower indicates power_watts is NaN or infinite.
+	ErrInvalidDispatchPower = errors.New("power_watts must be a finite number")
+	// ErrInvalidDispatchDuration indicates duration_seconds is outside [1, 86400].
+	ErrInvalidDispatchDuration = errors.New("duration_seconds must be an integer from 1 to 86400")
+)
 
 // HostRegex matches valid hostnames or FQDNs.
 var HostRegex = regexp.MustCompile(
@@ -47,4 +60,17 @@ func IsValidEmail(email string) bool {
 	_, err := mail.ParseAddress(email)
 
 	return err == nil
+}
+
+// ValidateBatteryDispatch rejects non-finite powerWatts or durationSeconds outside [1, 86400].
+// Matches pypowerwall.helpers.validate_battery_dispatch.
+func ValidateBatteryDispatch(powerWatts float64, durationSeconds int) error {
+	if math.IsNaN(powerWatts) || math.IsInf(powerWatts, 0) {
+		return ErrInvalidDispatchPower
+	}
+	if durationSeconds < MinDispatchDurationSeconds || durationSeconds > MaxDispatchDurationSeconds {
+		return ErrInvalidDispatchDuration
+	}
+
+	return nil
 }

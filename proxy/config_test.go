@@ -32,6 +32,8 @@ func TestDefaultConfigDefaults(t *testing.T) {
 	assert.True(t, cfg.TedapiRecoveryEnabled)
 	assert.True(t, cfg.Failover)
 	assert.Empty(t, cfg.FleetAPIHTTP)
+	assert.Empty(t, cfg.HTTPSCert)
+	assert.Empty(t, cfg.HTTPSKey)
 	assert.False(t, cfg.DebugMode)
 	assert.False(t, cfg.FailFastMode)
 	assert.Equal(t, "/", cfg.APIBaseURL)
@@ -124,6 +126,14 @@ func TestDefaultConfigEnvOverrides(t *testing.T) {
 		{
 			name: "fleetapi http override", envKey: "PW_FLEETAPI_HTTP", envVal: "1.1",
 			check: func(t *testing.T, cfg proxy.Config) { t.Helper(); assert.Equal(t, "1.1", cfg.FleetAPIHTTP) },
+		},
+		{
+			name: "https cert override", envKey: "PW_HTTPS_CERT", envVal: "/etc/ssl/proxy.crt",
+			check: func(t *testing.T, cfg proxy.Config) { t.Helper(); assert.Equal(t, "/etc/ssl/proxy.crt", cfg.HTTPSCert) },
+		},
+		{
+			name: "https key override", envKey: "PW_HTTPS_KEY", envVal: "/etc/ssl/proxy.key",
+			check: func(t *testing.T, cfg proxy.Config) { t.Helper(); assert.Equal(t, "/etc/ssl/proxy.key", cfg.HTTPSKey) },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

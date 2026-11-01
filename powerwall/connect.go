@@ -2,6 +2,7 @@ package powerwall
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,6 +14,60 @@ import (
 	"github.com/blackbirdworks/gopowerwall/powerwall/local"
 	"github.com/blackbirdworks/gopowerwall/powerwall/tedapi"
 )
+
+type connectionSnapshot struct {
+	client       Client
+	local        *local.Client
+	tedapi       *tedapi.PyPowerwallTEDAPI
+	cloud        *cloud.Client
+	fleetapi     *fleetapi.Client
+	mode         ConnectionMode
+	tedapiMode   TEDAPIMode
+	cloudmode    bool
+	fleetapiFlag bool
+	tedapiFlag   bool
+}
+
+func (p *Powerwall) snapshotConnectionState() connectionSnapshot {
+	return connectionSnapshot{
+		client:       p.client,
+		local:        p.local,
+		tedapi:       p.tedapi,
+		cloud:        p.cloud,
+		fleetapi:     p.fleetapi,
+		mode:         p.mode,
+		tedapiMode:   p.tedapiMode,
+		cloudmode:    p.cloudmode,
+		fleetapiFlag: p.fleetapiFlag,
+		tedapiFlag:   p.tedapiFlag,
+	}
+}
+
+func (p *Powerwall) restoreFailedConnectState(prev connectionSnapshot) {
+	if prev.client != nil {
+		p.setClientLocked(prev.client)
+		p.local = prev.local
+		p.tedapi = prev.tedapi
+		p.cloud = prev.cloud
+		p.fleetapi = prev.fleetapi
+		p.mode = prev.mode
+		p.tedapiMode = prev.tedapiMode
+		p.cloudmode = prev.cloudmode
+		p.fleetapiFlag = prev.fleetapiFlag
+		p.tedapiFlag = prev.tedapiFlag
+
+		return
+	}
+
+	p.restoreConfiguredState()
+}
+
+func (p *Powerwall) noteConnectError(mode ConnectionMode, reason string) {
+	if reason == "" || p.connectError != "" {
+		return
+	}
+	p.connectError = fmt.Sprintf("%s mode failed: %s", mode, reason)
+}
 
 func (p *Powerwall) autoSelectMode(ctx context.Context, cfg *Config) {
 	if cfg.Host != "" && !cfg.CloudMode && !cfg.FleetAPI {
@@ -44,64 +99,87 @@ func (p *Powerwall) setClientLocked(c Client) {
 	}
 }
 
+func (p *Powerwall) connectV1r(cfg *Config) bool {
+	pwd := cfg.Password
+	if pwd == "" && cfg.GwPwd != "" && len(cfg.GwPwd) >= 5 {
+		pwd = cfg.GwPwd[len(cfg.GwPwd)-5:]
+	}
+	if pwd == "" {
+		p.noteConnectError(ModeLocal, "customer password or gw_pwd (last 5 chars) is required for TEDAPI v1r login")
+
+		return false
+	}
+	v1r, err := tedapi.NewTEDAPIv1r(cfg.Host, pwd, cfg.RSAKeyPath, cfg.Timeout, cfg.PoolMaxSize)
+	if err != nil {
+		p.noteConnectError(ModeLocal, err.Error())
+
+		return false
+	}
+	tedClient := tedapi.NewClient(
+		cfg.Host,
+		cfg.GwPwd,
+		cfg.Timeout,
+		cfg.PWCacheExpire,
+		cfg.PoolMaxSize,
+		cfg.TEDAPIApiVersion,
+		cfg.TEDAPIAuthMode,
+	)
+	tedClient.SetV1rTransport(v1r)
+	tedClient.SetFailover(p.failover, p.wifiV1rFallback)
+	if cfg.WiFiHost != "" && p.wifiV1rFallback {
+		wifiV1r, wifiErr := tedapi.NewTEDAPIv1r(cfg.WiFiHost, pwd, cfg.RSAKeyPath, cfg.Timeout, cfg.PoolMaxSize)
+		if wifiErr != nil {
+			p.noteConnectError(ModeLocal, wifiErr.Error())
+
+			return false
+		}
+		tedClient.SetWiFiV1rTransport(wifiV1r)
+	}
+	p.tedapi = tedapi.NewBackend(tedClient, v1r)
+	p.setClientLocked(p.tedapi)
+	p.tedapiMode = TEDAPIV1r
+	p.tedapiFlag = true
+	// Pure v1r: no local HTTP backend exists (p.local stays nil), so the
+	// facade's reads must dispatch on ModeV1r rather than the leftover
+	// ModeLocal value New() assigned before Connect ran - see
+	// pollInternal and friends' `case ModeTEDAPI, ModeV1r:` arms.
+	p.mode = ModeV1r
+
+	return true
+}
+
+func (p *Powerwall) connectPureTEDAPI(cfg *Config) bool {
+	tedClient := tedapi.NewClient(
+		cfg.Host,
+		cfg.GwPwd,
+		cfg.Timeout,
+		cfg.PWCacheExpire,
+		cfg.PoolMaxSize,
+		cfg.TEDAPIApiVersion,
+		cfg.TEDAPIAuthMode,
+	)
+	tedClient.SetFailover(p.failover, false)
+	p.tedapi = tedapi.NewBackend(tedClient, nil)
+	p.setClientLocked(p.tedapi)
+	p.tedapiMode = TEDAPIFull
+	p.tedapiFlag = true
+	// Pure TEDAPI: same reasoning as the v1r branch above - no local
+	// backend, so p.mode must reflect TEDAPI or every mode-dispatching
+	// read method silently falls through the dead ModeLocal branch.
+	p.mode = ModeTEDAPI
+
+	return true
+}
+
 func (p *Powerwall) connectLocal(ctx context.Context) bool {
 	cfg := p.config
 
 	if cfg.RSAKeyPath != "" {
-		pwd := cfg.Password
-		if pwd == "" && cfg.GwPwd != "" && len(cfg.GwPwd) >= 5 {
-			pwd = cfg.GwPwd[len(cfg.GwPwd)-5:]
-		}
-		if pwd == "" {
-			return false
-		}
-		v1r, err := tedapi.NewTEDAPIv1r(cfg.Host, pwd, cfg.RSAKeyPath, cfg.Timeout, cfg.PoolMaxSize)
-		if err != nil {
-			return false
-		}
-		tedClient := tedapi.NewClient(
-			cfg.Host,
-			cfg.GwPwd,
-			cfg.Timeout,
-			cfg.PWCacheExpire,
-			cfg.PoolMaxSize,
-			cfg.TEDAPIApiVersion,
-			cfg.TEDAPIAuthMode,
-		)
-		tedClient.SetV1rTransport(v1r)
-		p.tedapi = tedapi.NewBackend(tedClient, v1r)
-		p.setClientLocked(p.tedapi)
-		p.tedapiMode = TEDAPIV1r
-		p.tedapiFlag = true
-		// Pure v1r: no local HTTP backend exists (p.local stays nil), so the
-		// facade's reads must dispatch on ModeV1r rather than the leftover
-		// ModeLocal value New() assigned before Connect ran - see
-		// pollInternal and friends' `case ModeTEDAPI, ModeV1r:` arms.
-		p.mode = ModeV1r
-
-		return true
+		return p.connectV1r(cfg)
 	}
 
 	if cfg.Password == "" && cfg.GwPwd != "" {
-		tedClient := tedapi.NewClient(
-			cfg.Host,
-			cfg.GwPwd,
-			cfg.Timeout,
-			cfg.PWCacheExpire,
-			cfg.PoolMaxSize,
-			cfg.TEDAPIApiVersion,
-			cfg.TEDAPIAuthMode,
-		)
-		p.tedapi = tedapi.NewBackend(tedClient, nil)
-		p.setClientLocked(p.tedapi)
-		p.tedapiMode = TEDAPIFull
-		p.tedapiFlag = true
-		// Pure TEDAPI: same reasoning as the v1r branch above - no local
-		// backend, so p.mode must reflect TEDAPI or every mode-dispatching
-		// read method silently falls through the dead ModeLocal branch.
-		p.mode = ModeTEDAPI
-
-		return true
+		return p.connectPureTEDAPI(cfg)
 	}
 
 	localBackend := local.New(
@@ -136,7 +214,8 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 		}
 	}
 
-	if err := localBackend.Authenticate(ctx); err == nil {
+	authErr := localBackend.Authenticate(ctx)
+	if authErr == nil {
 		p.local = localBackend
 		p.setClientLocked(localBackend)
 		p.cloudmode = false
@@ -145,6 +224,7 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 		return true
 	}
 
+	p.noteConnectError(ModeLocal, authErr.Error())
 	_ = localBackend.Close(ctx)
 	p.tedapiMode = TEDAPIOff
 	p.tedapiFlag = false
@@ -154,7 +234,8 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 
 func (p *Powerwall) connectFleetAPI(ctx context.Context) bool {
 	fb := fleetapi.New(p.config.Email, p.config.PWCacheExpire, p.config.Timeout, p.config.SiteID, p.config.AuthPath)
-	if err := fb.Authenticate(ctx); err == nil {
+	authErr := fb.Authenticate(ctx)
+	if authErr == nil {
 		if p.tedapi != nil {
 			_ = p.tedapi.Close(ctx)
 			p.tedapi = nil
@@ -169,6 +250,7 @@ func (p *Powerwall) connectFleetAPI(ctx context.Context) bool {
 		return true
 	}
 
+	p.noteConnectError(ModeFleetAPI, authErr.Error())
 	_ = fb.Close(ctx)
 
 	return false
@@ -176,7 +258,8 @@ func (p *Powerwall) connectFleetAPI(ctx context.Context) bool {
 
 func (p *Powerwall) connectCloud(ctx context.Context) bool {
 	cb := cloud.New(p.config.Email, p.config.PWCacheExpire, p.config.Timeout, p.config.SiteID, p.config.AuthPath)
-	if err := cb.Authenticate(ctx); err == nil {
+	authErr := cb.Authenticate(ctx)
+	if authErr == nil {
 		if p.tedapi != nil {
 			_ = p.tedapi.Close(ctx)
 			p.tedapi = nil
@@ -191,6 +274,7 @@ func (p *Powerwall) connectCloud(ctx context.Context) bool {
 		return true
 	}
 
+	p.noteConnectError(ModeCloud, authErr.Error())
 	_ = cb.Close(ctx)
 
 	return false
@@ -251,13 +335,15 @@ func nextFailoverMode(mode ConnectionMode) ConnectionMode {
 	}
 }
 
-func (p *Powerwall) connectStrict(ctx context.Context, retry bool) bool {
+func (p *Powerwall) connectStrict(ctx context.Context, retry bool, prev connectionSnapshot) bool {
 	for {
 		if p.tryMode(ctx, p.configuredMode) {
+			p.connectError = ""
+
 			return true
 		}
 		if !retry {
-			p.restoreConfiguredState()
+			p.restoreFailedConnectState(prev)
 
 			return false
 		}
@@ -269,7 +355,7 @@ func (p *Powerwall) connectStrict(ctx context.Context, retry bool) bool {
 		)
 		select {
 		case <-ctx.Done():
-			p.restoreConfiguredState()
+			p.restoreFailedConnectState(prev)
 
 			return false
 		case <-time.After(connectRetryWait):
@@ -277,10 +363,12 @@ func (p *Powerwall) connectStrict(ctx context.Context, retry bool) bool {
 	}
 }
 
-func (p *Powerwall) connectWithFailover(ctx context.Context, retry bool) bool {
+func (p *Powerwall) connectWithFailover(ctx context.Context, retry bool, prev connectionSnapshot) bool {
 	for attempt := 0; attempt < maxConnectRetries; {
 		attempt++
 		if p.tryMode(ctx, p.mode) {
+			p.connectError = ""
+
 			return true
 		}
 		p.mode = nextFailoverMode(p.mode)
@@ -292,7 +380,7 @@ func (p *Powerwall) connectWithFailover(ctx context.Context, retry bool) bool {
 			)
 			select {
 			case <-ctx.Done():
-				p.restoreConfiguredState()
+				p.restoreFailedConnectState(prev)
 
 				return false
 			case <-time.After(connectRetryWait):
@@ -302,7 +390,7 @@ func (p *Powerwall) connectWithFailover(ctx context.Context, retry bool) bool {
 		}
 	}
 
-	p.restoreConfiguredState()
+	p.restoreFailedConnectState(prev)
 
 	return false
 }
@@ -319,6 +407,9 @@ func (p *Powerwall) Connect(ctx context.Context, retry bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.connectError = ""
+	prev := p.snapshotConnectionState()
+
 	if p.configuredMode == "" || p.configuredMode == ModeUnknown {
 		p.configuredMode = p.mode
 		p.configuredCloudmode = p.cloudmode
@@ -327,6 +418,7 @@ func (p *Powerwall) Connect(ctx context.Context, retry bool) bool {
 
 	if p.configuredMode == ModeUnknown {
 		logger.Load(ctx).ErrorContext(ctx, "unable to determine mode to connect")
+		p.connectError = "unable to determine mode to connect"
 
 		return false
 	}
@@ -336,10 +428,10 @@ func (p *Powerwall) Connect(ctx context.Context, retry bool) bool {
 	p.fleetapiFlag = p.configuredFleetapiFlag
 
 	if !p.failover {
-		return p.connectStrict(ctx, retry)
+		return p.connectStrict(ctx, retry, prev)
 	}
 
-	return p.connectWithFailover(ctx, retry)
+	return p.connectWithFailover(ctx, retry, prev)
 }
 
 // Close releases the active backend's resources and clears it, leaving p

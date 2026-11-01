@@ -27,6 +27,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/logger"
+	"github.com/blackbirdworks/gopowerwall/pkgs/validation"
 	"github.com/blackbirdworks/gopowerwall/powerwall/proto/tedapi/combined"
 	"github.com/blackbirdworks/gopowerwall/powerwall/proto/teslapower"
 
@@ -66,6 +67,8 @@ const (
 	IslandModeReconnect = 1
 	// IslandModeOffGrid is mode 6: open the contactor to physically island off-grid.
 	IslandModeOffGrid = 6
+
+	statusCodeUnimplemented = 12
 )
 
 // ErrNoDin is returned when a signed v1r request is attempted without a known DIN.
@@ -153,6 +156,14 @@ func (v *TEDAPIv1r) Close() {
 	if v.client != nil {
 		v.client.CloseIdleConnections()
 	}
+}
+
+// HasToken reports whether the v1r transport currently holds a Bearer token.
+func (v *TEDAPIv1r) HasToken() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	return v.token != ""
 }
 
 // Login authenticates with the gateway via /api/login/Basic to obtain a Bearer token.
@@ -640,21 +651,24 @@ func (v *TEDAPIv1r) GetBackupEvents(ctx context.Context) (map[string]any, error)
 // APIGet makes an authenticated GET request with the Bearer token to a standard gateway endpoint.
 func (v *TEDAPIv1r) APIGet(ctx context.Context, path string) (any, error) {
 	url := fmt.Sprintf("https://%s%s", v.host, path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	v.mu.Lock()
-	if v.token != "" {
-		req.Header.Set("Authorization", "Bearer "+v.token)
-	}
-	v.mu.Unlock()
-
-	resp, err := v.client.Do(req)
+	resp, err := v.doAPIGet(ctx, url)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		logger.Load(ctx).WarnContext(ctx, "v1r api_get auth error, attempting re-login", "status", resp.StatusCode)
+		if loginErr := v.Login(ctx); loginErr != nil {
+			return nil, loginErr
+		}
+		retryResp, retryErr := v.doAPIGet(ctx, url)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		defer retryResp.Body.Close()
+		resp = retryResp
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: API GET %s HTTP %d", models.ErrUnexpectedStatus, path, resp.StatusCode)
@@ -671,6 +685,137 @@ func (v *TEDAPIv1r) APIGet(ctx context.Context, path string) (any, error) {
 	}
 
 	return string(b), nil
+}
+
+func (v *TEDAPIv1r) doAPIGet(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	v.mu.Lock()
+	if v.token != "" {
+		req.Header.Set("Authorization", "Bearer "+v.token)
+	}
+	v.mu.Unlock()
+
+	return v.client.Do(req)
+}
+
+// DispatchBatteryPower sends a timed battery power setpoint over signed v1r:
+// positive watts discharge, negative watts charge, and zero requests zero battery power.
+//
+// Use at your own risk: a dispatch overrides the backup reserve and grid export
+// settings and could void your warranty. Each accepted dispatch is logged at WARN.
+func (v *TEDAPIv1r) DispatchBatteryPower(
+	ctx context.Context,
+	din string,
+	powerWatts float64,
+	durationSeconds int,
+) (models.BatteryDispatchResult, error) {
+	if err := validation.ValidateBatteryDispatch(powerWatts, durationSeconds); err != nil {
+		return models.BatteryDispatchResult{}, fmt.Errorf("%w: %w", models.ErrInvalidBatteryDispatch, err)
+	}
+	if durationSeconds < validation.MinDispatchDurationSeconds ||
+		durationSeconds > validation.MaxDispatchDurationSeconds {
+		return models.BatteryDispatchResult{}, models.ErrInvalidBatteryDispatch
+	}
+
+	teg := &combined.TEGMessages{
+		Message: &combined.TEGMessages_DispatchBatteryPowerRequest{
+			DispatchBatteryPowerRequest: &combined.TEGAPIDispatchBatteryPowerRequest{
+				RealPower: &combined.TEGAPIDispatchBatteryPowerRequest_RealPowerCommand{
+					PowerWatts:      powerWatts,
+					DurationSeconds: uint32(durationSeconds),
+				},
+			},
+		},
+	}
+
+	if err := v.sendBatteryDispatch(ctx, din, teg); err != nil {
+		return models.BatteryDispatchResult{}, err
+	}
+
+	action := "hold"
+	if powerWatts > 0 {
+		action = "discharge"
+	} else if powerWatts < 0 {
+		action = "charge"
+	}
+	logger.Load(ctx).WarnContext(
+		ctx,
+		fmt.Sprintf(
+			"Battery dispatch accepted: %s %g W for %d s. A dispatch overrides "+
+				"the backup reserve and grid export settings and could void your "+
+				"warranty - use at your own risk.",
+			action,
+			math.Abs(powerWatts),
+			durationSeconds,
+		),
+	)
+
+	return models.BatteryDispatchResult{
+		PowerWatts:      powerWatts,
+		DurationSeconds: durationSeconds,
+	}, nil
+}
+
+// ResumeBatteryOperation releases a timed battery dispatch and resumes the configured operating mode.
+func (v *TEDAPIv1r) ResumeBatteryOperation(ctx context.Context, din string) (models.BatteryResumeResult, error) {
+	teg := &combined.TEGMessages{
+		Message: &combined.TEGMessages_DispatchBatteryPowerRequest{
+			DispatchBatteryPowerRequest: &combined.TEGAPIDispatchBatteryPowerRequest{
+				ResumeDeviceMode: &combined.TEGAPIDispatchBatteryPowerRequest_ResumeDeviceOperatingMode{},
+			},
+		},
+	}
+
+	if err := v.sendBatteryDispatch(ctx, din, teg); err != nil {
+		return models.BatteryResumeResult{}, err
+	}
+
+	return models.BatteryResumeResult{
+		ResumeBatteryOperation: true,
+	}, nil
+}
+
+func (v *TEDAPIv1r) sendBatteryDispatch(ctx context.Context, din string, teg *combined.TEGMessages) error {
+	resp, err := v.SendTEGMessage(ctx, din, teg)
+	if err != nil {
+		logger.Load(ctx).ErrorContext(ctx, "Battery dispatch failed", "error", err)
+
+		return fmt.Errorf("battery dispatch failed: %w", err)
+	}
+	if resp == nil {
+		logger.Load(ctx).ErrorContext(ctx, "Battery dispatch: no v1r response")
+
+		return fmt.Errorf("%w: battery dispatch: no v1r response", models.ErrEmptyResponse)
+	}
+	if commonMsg := resp.GetCommon(); commonMsg != nil && commonMsg.GetErrorResponse() != nil {
+		status := commonMsg.GetErrorResponse().GetStatus()
+		note := ""
+		if status.GetCode() == statusCodeUnimplemented {
+			note = ", not supported by gateway firmware"
+		}
+		msg := fmt.Sprintf(
+			"Battery dispatch rejected: %s (status code %d%s)",
+			status.GetMessage(),
+			status.GetCode(),
+			note,
+		)
+		logger.Load(ctx).ErrorContext(ctx, msg)
+
+		return fmt.Errorf("%w: %s", models.ErrUnexpectedResponse, msg)
+	}
+	if tegMsg := resp.GetTeg(); tegMsg != nil && tegMsg.GetDispatchBatteryPowerResponse() != nil {
+		return nil
+	}
+
+	logger.Load(ctx).ErrorContext(ctx, "Battery dispatch: response omitted dispatch_battery_power_response")
+
+	return fmt.Errorf(
+		"%w: battery dispatch: response omitted dispatch_battery_power_response",
+		models.ErrUnexpectedResponse,
+	)
 }
 
 // SendIslandMode sends Tesla's TEGAPISetIslandModeRequest via the signed v1r path.

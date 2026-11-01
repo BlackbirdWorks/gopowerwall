@@ -11,12 +11,12 @@ can point at gopowerwall instead without changing their queries.
 
 Parity with pypowerwall is a deliberate, but *scoped*, goal: the `gopowerwall` CLI's
 subcommands/flags/output and the proxy's HTTP routes/JSON shapes track pypowerwall's
-documented surface (tracking as of [pypowerwall](https://github.com/jasonacox/pypowerwall) v0.21.0, Proxy t109, commit `1eb3f063d5`). Everything underneath that surface — package layout, exported Go
+documented surface (tracking as of [pypowerwall](https://github.com/jasonacox/pypowerwall) v0.23.1, Proxy t111, commit `8c554fa864`). Everything underneath that surface — package layout, exported Go
 identifiers, function signatures — is idiomatic Go rather than a line-for-line port.
 
 > [!NOTE]
 > This is a community Go implementation, not affiliated with or endorsed by Tesla, Inc. or
-> the pypowerwall project. Tracking upstream pypowerwall v0.21.0 (Proxy t109).
+> the pypowerwall project. Tracking upstream pypowerwall v0.23.1 (Proxy t111).
 
 ## Status overview
 
@@ -200,6 +200,8 @@ All configuration is via environment variables (`PW_*`), matching pypowerwall:
 | `PW_TIMEOUT` | `5` | Gateway request timeout (seconds) |
 | `PW_POOL_MAXSIZE` | `15` | HTTP connection pool size |
 | `PW_HTTPS` | `no` | `yes`/`http`/`no` — see note below |
+| `PW_HTTPS_CERT` | (empty) | Custom TLS certificate path when `PW_HTTPS=yes` |
+| `PW_HTTPS_KEY` | (empty) | Custom TLS private key path when `PW_HTTPS=yes` |
 | `PW_STYLE` | `clear` | Web UI background style (`.js` suffix added automatically) |
 | `PW_CONTROL_SECRET` | (empty) | Shared secret required to use `/control/*`; unset disables control endpoints |
 | `PW_WIFI_HOST` | (empty) | Fallback WiFi TEDAPI host for v1r mode |

@@ -91,7 +91,8 @@ func TestScaleBatteryLevel(t *testing.T) {
 		{name: "usable maximum maps to 100", level: 100.0, want: 100.0},
 		{name: "usable floor maps to 0", level: 5.0, want: 0.0},
 		{name: "midpoint maps proportionally", level: 52.5, want: 50.0},
-		{name: "below usable floor goes negative", level: 0.0, want: -5.263157894736841},
+		{name: "below usable floor at 3.9 clamps to 0", level: 3.9, want: 0.0},
+		{name: "below usable floor at 0 clamps to 0", level: 0.0, want: 0.0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

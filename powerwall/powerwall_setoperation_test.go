@@ -12,9 +12,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
 	"github.com/blackbirdworks/gopowerwall/powerwall"
+	"github.com/blackbirdworks/gopowerwall/powerwall/proto/tedapi/combined"
 )
 
 // operationGateway is a fake local gateway that serves cookie login and
@@ -407,6 +410,125 @@ func TestSolarOnlyReserveHandling(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tc.run(t, t.Context(), pw)
+		})
+	}
+}
+
+func TestPowerwallDispatchAndResumeBattery(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		wantErrIs       error
+		name            string
+		action          string
+		powerWatts      float64
+		durationSeconds int
+		useV1r          bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:            "dispatch validation error returned before checking mode",
+			action:          "dispatch",
+			powerWatts:      1000.0,
+			durationSeconds: 0,
+			useV1r:          false,
+			wantErrIs:       models.ErrInvalidBatteryDispatch,
+		},
+		{
+			name:            "dispatch in local mode returns ErrUnsupported",
+			action:          "dispatch",
+			powerWatts:      1000.0,
+			durationSeconds: 60,
+			useV1r:          false,
+			wantErrIs:       powerwall.ErrUnsupported,
+		},
+		{
+			name:      "resume in local mode returns ErrUnsupported",
+			action:    "resume",
+			useV1r:    false,
+			wantErrIs: powerwall.ErrUnsupported,
+		},
+		{
+			name:            "dispatch in v1r mode succeeds",
+			action:          "dispatch",
+			powerWatts:      4000.0,
+			durationSeconds: 120,
+			useV1r:          true,
+		},
+		{
+			name:   "resume in v1r mode succeeds",
+			action: "resume",
+			useV1r: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if !tc.useV1r {
+				gw := newOperationGateway()
+				pw := newOperationTestPowerwall(t, gw)
+				var err error
+				if tc.action == "dispatch" {
+					_, err = pw.DispatchBatteryPower(t.Context(), tc.powerWatts, tc.durationSeconds)
+				} else {
+					_, err = pw.ResumeBatteryOperation(t.Context())
+				}
+				require.ErrorIs(t, err, tc.wantErrIs)
+
+				return
+			}
+
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/din":
+					_, _ = w.Write([]byte("din-v1r"))
+				case "/tedapi/v1r":
+					respEnv := &combined.MessageEnvelope{
+						Payload: &combined.MessageEnvelope_Teg{
+							Teg: &combined.TEGMessages{
+								Message: &combined.TEGMessages_DispatchBatteryPowerResponse{
+									DispatchBatteryPowerResponse: &combined.TEGAPIDispatchBatteryPowerResponse{},
+								},
+							},
+						},
+					}
+					envBytes, err := proto.Marshal(respEnv)
+					assert.NoError(t, err)
+					routable := &combined.RoutableMessage{
+						Payload: &combined.RoutableMessage_ProtobufMessageAsBytes{
+							ProtobufMessageAsBytes: envBytes,
+						},
+					}
+					data, err := proto.Marshal(routable)
+					assert.NoError(t, err)
+					_, _ = w.Write(data)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			pw, err := powerwall.New(
+				t.Context(),
+				powerwall.WithHost(srv.Listener.Addr().String()),
+				powerwall.WithGwPwd("gatewaypassword"),
+				powerwall.WithRSAKeyPath(writeTestRSAKey(t)),
+				powerwall.WithCacheFile(filepath.Join(t.TempDir(), ".powerwall")),
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = pw.Close(t.Context()) })
+
+			if tc.action == "dispatch" {
+				res, dispErr := pw.DispatchBatteryPower(t.Context(), tc.powerWatts, tc.durationSeconds)
+				require.NoError(t, dispErr)
+				assert.InDelta(t, tc.powerWatts, res.PowerWatts, 0.001)
+				assert.Equal(t, tc.durationSeconds, res.DurationSeconds)
+			} else {
+				res, resErr := pw.ResumeBatteryOperation(t.Context())
+				require.NoError(t, resErr)
+				assert.True(t, res.ResumeBatteryOperation)
+			}
 		})
 	}
 }
