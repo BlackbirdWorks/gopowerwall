@@ -124,6 +124,7 @@ func SystemStatusStub() map[string]any {
 		"max_charge_power":                  nil,
 		"max_discharge_power":               nil,
 		"max_apparent_power":                nil,
+		"inverter_nominal_usable_power":     0.0,
 		"instantaneous_max_discharge_power": 0.0,
 		"instantaneous_max_charge_power":    0.0,
 		"grid_services_power":               0.0,

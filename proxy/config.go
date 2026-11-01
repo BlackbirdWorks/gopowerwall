@@ -12,6 +12,7 @@ import (
 // Config represents all configuration options for the Proxy server.
 type Config struct {
 	WifiHost              string
+	FleetAPIHTTP          string
 	APIBaseURL            string
 	Password              string
 	Email                 string
@@ -52,6 +53,7 @@ type Config struct {
 	GracefulDegradation   bool
 	NegSolar              bool
 	DebugMode             bool
+	Failover              bool
 }
 
 const (
@@ -134,6 +136,8 @@ func DefaultConfig() Config {
 		GwPwd:                 getEnv("PW_GW_PWD", ""),
 		RsaKeyPath:            getEnv("PW_RSA_KEY_PATH", ""),
 		WifiHost:              getEnv("PW_WIFI_HOST", ""),
+		FleetAPIHTTP:          getEnv("PW_FLEETAPI_HTTP", ""),
+		Failover:              strings.ToLower(getEnv("PW_FAILOVER", "yes")) != "no",
 		TedapiAPIVersion:      getEnv("PW_TEDAPI_API_VERSION", "V2024_06"),
 		TedapiAuthMode:        getEnv("PW_TEDAPI_AUTH_MODE", "basic"),
 		NegSolar:              getEnvBool("PW_NEG_SOLAR", true),

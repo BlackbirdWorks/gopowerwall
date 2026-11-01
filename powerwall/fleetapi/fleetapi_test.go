@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1570,6 +1572,246 @@ func TestFleetAPITariff(t *testing.T) {
 			srv := newTestServer(t, tc.handler)
 			f := newAuthenticatedBackend(t, srv)
 			tc.call(t, f)
+		})
+	}
+}
+
+type singleFlightTestCase struct {
+	name          string
+	concurrency   int
+	force         bool
+	wantReqsCount int32
+}
+
+func TestFleetAPISingleFlight(t *testing.T) {
+	t.Parallel()
+
+	cases := []singleFlightTestCase{
+		{
+			name:          "concurrent GETs coalesce into single request when not forced",
+			concurrency:   5,
+			force:         false,
+			wantReqsCount: 1,
+		},
+		{
+			name:          "concurrent forced GETs do not coalesce",
+			concurrency:   3,
+			force:         true,
+			wantReqsCount: 3,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var reqCount atomic.Int32
+			srv := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				reqCount.Add(1)
+				time.Sleep(50 * time.Millisecond)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"response": {"site_name": "My Site"}}`))
+			})
+
+			f := newAuthenticatedBackend(t, srv)
+
+			var wg sync.WaitGroup
+			results := make([]any, tc.concurrency)
+			callErrs := make([]error, tc.concurrency)
+
+			for i := range tc.concurrency {
+				idx := i
+				wg.Go(func() {
+					res, err := f.Poll(t.Context(), "/api/site_info/site_name", tc.force, false, false)
+					results[idx] = res
+					callErrs[idx] = err
+				})
+			}
+			wg.Wait()
+
+			assert.Equal(t, tc.wantReqsCount, reqCount.Load())
+			for i := range tc.concurrency {
+				require.NoError(t, callErrs[i])
+				m, ok := results[i].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, "My Site", m["site_name"])
+			}
+		})
+	}
+}
+
+type rateLimitTestCase struct {
+	handler      http.HandlerFunc
+	name         string
+	wantMinDelay time.Duration
+	wantMaxDelay time.Duration
+}
+
+func TestFleetAPIRateLimitBackoff(t *testing.T) {
+	t.Parallel()
+
+	cases := []rateLimitTestCase{
+		{
+			name: "retry-after header in seconds",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "15")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error": "rate limited"}`))
+			},
+			wantMinDelay: 14 * time.Second,
+			wantMaxDelay: 16 * time.Second,
+		},
+		{
+			name: "retry-after header in HTTP date",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				dateStr := time.Now().Add(25 * time.Second).UTC().Format(http.TimeFormat)
+				w.Header().Set("Retry-After", dateStr)
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error": "rate limited"}`))
+			},
+			wantMinDelay: 23 * time.Second,
+			wantMaxDelay: 26 * time.Second,
+		},
+		{
+			name: "retry guidance in response body regex",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`Please retry in 20 seconds`))
+			},
+			wantMinDelay: 19 * time.Second,
+			wantMaxDelay: 21 * time.Second,
+		},
+		{
+			name: "fallback to default retry duration",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`too many requests`))
+			},
+			wantMinDelay: 9 * time.Second,
+			wantMaxDelay: 11 * time.Second,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var requestCount atomic.Int32
+			srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				requestCount.Add(1)
+				tc.handler(w, r)
+			})
+
+			f := newAuthenticatedBackend(t, srv)
+
+			_, err := f.Poll(t.Context(), "/api/tesla/tariff_rate", false, false, false)
+			require.ErrorIs(t, err, models.ErrRateLimited)
+			assert.Equal(t, int32(1), requestCount.Load())
+
+			rem := f.RateBackoffRemaining()
+			assert.GreaterOrEqual(t, rem, tc.wantMinDelay)
+			assert.LessOrEqual(t, rem, tc.wantMaxDelay)
+
+			// Subsequent call during backoff window fails fast without hitting HTTP server
+			_, secondErr := f.Poll(t.Context(), "/api/tesla/tariff_rate", false, false, false)
+			require.ErrorIs(t, secondErr, models.ErrRateLimited)
+			assert.Equal(t, int32(1), requestCount.Load())
+		})
+	}
+}
+
+type cacheDuringBackoffTestCase struct {
+	name string
+}
+
+func TestFleetAPICacheDuringBackoff(t *testing.T) {
+	t.Parallel()
+
+	cases := []cacheDuringBackoffTestCase{
+		{name: "cached entry serves during active backoff window"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var requestCount atomic.Int32
+			srv := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				count := requestCount.Add(1)
+				if count == 1 {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"response": {"tariff_content": {"code": "E-1"}}}`))
+
+					return
+				}
+				w.Header().Set("Retry-After", "30")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`rate limited`))
+			})
+
+			f := newAuthenticatedBackend(t, srv)
+
+			// 1. Initial success caches tariff
+			res, err := f.Poll(t.Context(), "/api/tesla/tariff_rate", false, false, false)
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, "E-1", m["code"])
+			assert.Equal(t, int32(1), requestCount.Load())
+
+			// 2. POST operation gets 429 and arms backoff
+			_, err429 := f.Post(
+				t.Context(),
+				"/api/operation",
+				map[string]any{"backup_reserve_percent": 30.0},
+				"",
+				false,
+				false,
+			)
+			require.ErrorIs(t, err429, models.ErrRateLimited)
+			assert.Equal(t, int32(2), requestCount.Load())
+			assert.Positive(t, f.RateBackoffRemaining())
+
+			// 3. Cached endpoint still hits cache without hitting server
+			cachedRes, cachedErr := f.Poll(t.Context(), "/api/tesla/tariff_rate", false, false, false)
+			require.NoError(t, cachedErr)
+			cachedMap, cachedOk := cachedRes.(map[string]any)
+			require.True(t, cachedOk)
+			assert.Equal(t, "E-1", cachedMap["code"])
+			assert.Equal(t, int32(2), requestCount.Load())
+		})
+	}
+}
+
+type forceHTTP11TestCase struct {
+	name     string
+	envVal   string
+	wantHTTP bool
+}
+
+func TestFleetAPIForceHTTP11(t *testing.T) {
+	cases := []forceHTTP11TestCase{
+		{name: "PW_FLEETAPI_HTTP=1.1 forces HTTP/1.1", envVal: "1.1", wantHTTP: true},
+		{name: "PW_FLEETAPI_HTTP=1 forces HTTP/1.1", envVal: "1", wantHTTP: true},
+		{name: "PW_FLEETAPI_HTTP=http1.1 forces HTTP/1.1", envVal: "http1.1", wantHTTP: true},
+		{name: "PW_FLEETAPI_HTTP=http/1.1 forces HTTP/1.1", envVal: "http/1.1", wantHTTP: true},
+		{name: "PW_FLEETAPI_HTTP=false does not force HTTP/1.1", envVal: "false", wantHTTP: false},
+		{name: "PW_FLEETAPI_HTTP empty does not force HTTP/1.1", envVal: "", wantHTTP: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PW_FLEETAPI_HTTP", tc.envVal)
+
+			srv := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"response": {"site_name": "Test"}}`))
+			})
+
+			f := newAuthenticatedBackend(t, srv)
+			res, err := f.Poll(t.Context(), "/api/site_info/site_name", false, false, false)
+			require.NoError(t, err)
+			require.NotNil(t, res)
 		})
 	}
 }

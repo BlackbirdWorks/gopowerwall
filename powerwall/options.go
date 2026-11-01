@@ -100,6 +100,10 @@ type Config struct {
 	// instead of failing after the first exhausted mode. Set via
 	// [WithRetryModes].
 	RetryModes bool
+	// Failover enables [Powerwall.Connect]'s circular fallback across
+	// connection modes (local -> FleetAPI -> cloud -> local). When false,
+	// only the configured mode is attempted. Set via [WithFailover].
+	Failover bool
 }
 
 // Option is a functional option for configuring a [Powerwall] via [New], in
@@ -124,6 +128,7 @@ func DefaultConfig() *Config {
 		FleetAPI:         false,
 		AutoSelect:       false,
 		RetryModes:       false,
+		Failover:         true,
 		TEDAPIApiVersion: TEDAPIVersion2024_06,
 		TEDAPIAuthMode:   AuthModeBasic,
 	}
@@ -219,6 +224,13 @@ func WithAutoSelect(auto bool) Option {
 // modes instead of failing after the first exhausted mode.
 func WithRetryModes(retry bool) Option {
 	return func(c *Config) { c.RetryModes = retry }
+}
+
+// WithFailover sets [Config.Failover], enabling [Powerwall.Connect]'s
+// circular fallback across connection modes when true (the default).
+// When false, only the configured mode is attempted.
+func WithFailover(failover bool) Option {
+	return func(c *Config) { c.Failover = failover }
 }
 
 // WithGwPwd sets [Config.GwPwd], the full gateway WiFi password required

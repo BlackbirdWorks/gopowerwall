@@ -186,7 +186,7 @@ func TestHandleStatsFieldsAndConfig(t *testing.T) {
 	var stats map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&stats))
 
-	assert.Contains(t, stats["pypowerwall"], "Proxy t106")
+	assert.Contains(t, stats["pypowerwall"], "Proxy t109")
 	assert.Contains(t, stats, "uptime")
 	assert.Contains(t, stats, "ts")
 	assert.Contains(t, stats, "mem")
@@ -215,6 +215,152 @@ func TestHandleStatsOmitsHealthWhenDisabled(t *testing.T) {
 	var stats map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&stats))
 	assert.NotContains(t, stats, "connection_health")
+}
+
+func TestHandleStatsConfigMasking(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		modifyConfig func(c *proxy.Config)
+		check        func(t *testing.T, stats map[string]any)
+		name         string
+	}{
+		{
+			name: "unconfigured secrets remain empty or nil",
+			modifyConfig: func(c *proxy.Config) {
+				c.Password = ""
+				c.ControlSecret = ""
+				c.GwPwd = ""
+				c.Email = ""
+				c.SiteID = ""
+				c.AuthPath = ""
+				c.CacheFile = ""
+				c.RsaKeyPath = ""
+				c.Failover = true
+			},
+			check: func(t *testing.T, stats map[string]any) {
+				t.Helper()
+				config, ok := stats["config"].(map[string]any)
+				require.True(t, ok)
+				assert.Nil(t, config["PW_PASSWORD"])
+				assert.Nil(t, config["PW_CONTROL_SECRET"])
+				assert.Nil(t, config["PW_GW_PWD"])
+				assert.Empty(t, config["PW_EMAIL"])
+				assert.Empty(t, config["PW_SITEID"])
+				assert.Empty(t, config["PW_AUTH_PATH"])
+				assert.Empty(t, config["PW_CACHE_FILE"])
+				assert.Empty(t, config["PW_RSA_KEY_PATH"])
+				assert.Nil(t, stats["siteid"])
+				assert.Empty(t, stats["cf"])
+				assert.Equal(t, true, config["PW_FAILOVER"])
+				assert.Nil(t, config["PW_FLEETAPI_HTTP"])
+			},
+		},
+		{
+			name: "configured secrets are masked as 10 asterisks",
+			modifyConfig: func(c *proxy.Config) {
+				c.Password = "secret-pass"
+				c.ControlSecret = "secret-control"
+				c.GwPwd = "secret-gw"
+				c.Email = "secret@example.com"
+				c.SiteID = "12345"
+				c.AuthPath = "/var/secrets"
+				c.CacheFile = "/var/secrets/.powerwall"
+				c.RsaKeyPath = "/var/secrets/key.pem"
+				c.Failover = false
+				c.FleetAPIHTTP = "1.1"
+			},
+			check: func(t *testing.T, stats map[string]any) {
+				t.Helper()
+				config, ok := stats["config"].(map[string]any)
+				require.True(t, ok)
+				const masked = "**********"
+				assert.Equal(t, masked, config["PW_PASSWORD"])
+				assert.Equal(t, masked, config["PW_CONTROL_SECRET"])
+				assert.Equal(t, masked, config["PW_GW_PWD"])
+				assert.Equal(t, masked, config["PW_EMAIL"])
+				assert.Equal(t, masked, config["PW_SITEID"])
+				assert.Equal(t, masked, config["PW_AUTH_PATH"])
+				assert.Equal(t, masked, config["PW_CACHE_FILE"])
+				assert.Equal(t, masked, config["PW_RSA_KEY_PATH"])
+				assert.Equal(t, masked, stats["siteid"])
+				assert.Equal(t, masked, stats["cf"])
+				assert.Equal(t, false, config["PW_FAILOVER"])
+				assert.Equal(t, "1.1", config["PW_FLEETAPI_HTTP"])
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gw := newFakeGateway(t, nil)
+			pw := newLocalPowerwall(t, gw)
+			cfg := baseTestConfig()
+			tc.modifyConfig(&cfg)
+			ts := newProxyServer(t, cfg, pw)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/stats", nil)
+			require.NoError(t, err)
+			resp, err := ts.Client().Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			var stats map[string]any
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&stats))
+			tc.check(t, stats)
+		})
+	}
+}
+
+func TestHandleIndexEmailRemoval(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		email     string
+		wantEmail string
+	}{
+		{
+			name:      "default email is not leaked into index html",
+			email:     "secret-email@example.com",
+			wantEmail: "secret-email@example.com",
+		},
+		{
+			name:      "empty email is not leaked into index html",
+			email:     "",
+			wantEmail: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gw := newFakeGateway(t, nil)
+			pw := newLocalPowerwall(t, gw)
+			cfg := baseTestConfig()
+			cfg.Email = tc.email
+			ts := newProxyServer(t, cfg, pw)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/", nil)
+			require.NoError(t, err)
+			resp, err := ts.Client().Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			bodyStr := string(body)
+
+			assert.NotContains(t, bodyStr, "{EMAIL}")
+			if tc.wantEmail != "" {
+				assert.NotContains(t, bodyStr, tc.wantEmail)
+			}
+			assert.Contains(t, bodyStr, `"username": ""`)
+		})
+	}
 }
 
 func TestHandleHealthFieldsIncludeDegradedCacheSnapshot(t *testing.T) {

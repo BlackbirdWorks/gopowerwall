@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	Build                = "t106"
+	Build                = "t109"
 	MaxPostBody          = 4096
 	URIStatsMax          = 100
 	defaultServerTimeout = 5 * time.Second
@@ -156,6 +156,7 @@ func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server
 			powerwall.WithWiFiHost(cfg.WifiHost),
 			powerwall.WithTimeout(cfg.TimeoutDuration()),
 			powerwall.WithCacheFile(cfg.CacheFile),
+			powerwall.WithFailover(cfg.Failover),
 		)
 		if err != nil {
 			logger.Load(ctx).
