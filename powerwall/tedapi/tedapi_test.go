@@ -2020,3 +2020,310 @@ func TestBackendGetFanSpeeds(t *testing.T) {
 	assert.InDelta(t, 2200.0, *entry.ActualRPM, 0.001)
 	assert.InDelta(t, 2400.0, *entry.TargetRPM, 0.001)
 }
+
+func TestBackendDispatchAndResumeBattery(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		wantErrIs       error
+		name            string
+		action          string
+		powerWatts      float64
+		durationSeconds int
+		useV1r          bool
+		hasDin          bool
+		serverErr       bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:            "dispatch validation runs before checking v1r client",
+			action:          "dispatch",
+			powerWatts:      1000.0,
+			durationSeconds: 0,
+			useV1r:          false,
+			wantErrIs:       models.ErrInvalidBatteryDispatch,
+		},
+		{
+			name:            "dispatch without v1r returns ErrUnsupported",
+			action:          "dispatch",
+			powerWatts:      1000.0,
+			durationSeconds: 60,
+			useV1r:          false,
+			wantErrIs:       models.ErrUnsupported,
+		},
+		{
+			name:      "resume without v1r returns ErrUnsupported",
+			action:    "resume",
+			useV1r:    false,
+			wantErrIs: models.ErrUnsupported,
+		},
+		{
+			name:            "dispatch without din returns ErrNotFound",
+			action:          "dispatch",
+			powerWatts:      1000.0,
+			durationSeconds: 60,
+			useV1r:          true,
+			hasDin:          false,
+			wantErrIs:       models.ErrNotFound,
+		},
+		{
+			name:      "resume without din returns ErrNotFound",
+			action:    "resume",
+			useV1r:    true,
+			hasDin:    false,
+			wantErrIs: models.ErrNotFound,
+		},
+		{
+			name:            "dispatch server error propagates",
+			action:          "dispatch",
+			powerWatts:      1000.0,
+			durationSeconds: 60,
+			useV1r:          true,
+			hasDin:          true,
+			serverErr:       true,
+			wantErrIs:       models.ErrUnexpectedStatus,
+		},
+		{
+			name:      "resume server error propagates",
+			action:    "resume",
+			useV1r:    true,
+			hasDin:    true,
+			serverErr: true,
+			wantErrIs: models.ErrUnexpectedStatus,
+		},
+		{
+			name:            "dispatch succeeds and invalidates cached status",
+			action:          "dispatch",
+			powerWatts:      2500.0,
+			durationSeconds: 180,
+			useV1r:          true,
+			hasDin:          true,
+		},
+		{
+			name:   "resume succeeds and invalidates cached status",
+			action: "resume",
+			useV1r: true,
+			hasDin: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if !tc.useV1r {
+				p := newLegacyBackend("127.0.0.1:1")
+				var err error
+				if tc.action == "dispatch" {
+					_, err = p.DispatchBatteryPower(t.Context(), tc.powerWatts, tc.durationSeconds)
+				} else {
+					_, err = p.ResumeBatteryOperation(t.Context())
+				}
+				require.ErrorIs(t, err, tc.wantErrIs)
+
+				return
+			}
+
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/din":
+					if tc.hasDin {
+						_, _ = w.Write([]byte("din-dispatch"))
+					} else {
+						w.WriteHeader(http.StatusNotFound)
+					}
+				case "/tedapi/v1":
+					w.WriteHeader(http.StatusNotFound)
+				case "/tedapi/v1r":
+					if tc.serverErr {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					readRoutableEnvelope(t, r)
+					writeRoutableEnvelope(t, w, &combined.MessageEnvelope{
+						Payload: &combined.MessageEnvelope_Teg{
+							Teg: &combined.TEGMessages{
+								Message: &combined.TEGMessages_DispatchBatteryPowerResponse{
+									DispatchBatteryPowerResponse: &combined.TEGAPIDispatchBatteryPowerResponse{},
+								},
+							},
+						},
+					})
+				}
+			}
+			srv := newTLSServer(t, handler)
+			p := newV1rBackend(t, hostOf(srv))
+
+			if tc.action == "dispatch" {
+				res, err := p.DispatchBatteryPower(t.Context(), tc.powerWatts, tc.durationSeconds)
+				if tc.wantErrIs != nil {
+					require.ErrorIs(t, err, tc.wantErrIs)
+
+					return
+				}
+				require.NoError(t, err)
+				assert.InDelta(t, tc.powerWatts, res.PowerWatts, 0.001)
+				assert.Equal(t, tc.durationSeconds, res.DurationSeconds)
+			} else {
+				res, err := p.ResumeBatteryOperation(t.Context())
+				if tc.wantErrIs != nil {
+					require.ErrorIs(t, err, tc.wantErrIs)
+
+					return
+				}
+				require.NoError(t, err)
+				assert.True(t, res.ResumeBatteryOperation)
+			}
+		})
+	}
+}
+
+func TestWiFiV1rFallbackRoutingAndReady(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name            string
+		lanAlive        bool
+		wifiV1rFallback bool
+		wifiHasConfig   bool
+		wantConnect     bool
+		wantReady       bool
+		wantDispatchOK  bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:            "primary LAN healthy uses LAN transport directly",
+			lanAlive:        true,
+			wifiV1rFallback: true,
+			wifiHasConfig:   true,
+			wantConnect:     true,
+			wantReady:       false,
+			wantDispatchOK:  true,
+		},
+		{
+			name:            "LAN down with strict WiFiV1rFallback connects and routes reads and writes over WiFi v1r",
+			lanAlive:        false,
+			wifiV1rFallback: true,
+			wifiHasConfig:   true,
+			wantConnect:     true,
+			wantReady:       true,
+			wantDispatchOK:  true,
+		},
+		{
+			name:            "LAN down with strict WiFiV1rFallback but failed config probe blocks writes",
+			lanAlive:        false,
+			wifiV1rFallback: true,
+			wifiHasConfig:   false,
+			wantConnect:     true,
+			wantReady:       false,
+			wantDispatchOK:  false,
+		},
+		{
+			name:            "LAN down without WiFiV1rFallback does not allow v1r writes",
+			lanAlive:        false,
+			wifiV1rFallback: false,
+			wifiHasConfig:   true,
+			wantConnect:     false,
+			wantReady:       false,
+			wantDispatchOK:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			v1rHandler := func(hasConfig bool) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/api/login/Basic":
+						_, _ = w.Write([]byte(`{"token":"wifi-tok"}`))
+					case "/tedapi/din":
+						_, _ = w.Write([]byte("din-wifi"))
+					case "/api/meters/aggregates":
+						_, _ = w.Write([]byte(`{"site":{"instant_power":42}}`))
+					case "/tedapi/v1r":
+						env := readRoutableEnvelope(t, r)
+						switch {
+						case env.GetFilestore() != nil:
+							if !hasConfig {
+								w.WriteHeader(http.StatusInternalServerError)
+
+								return
+							}
+							writeRoutableEnvelope(t, w, &combined.MessageEnvelope{
+								Payload: &combined.MessageEnvelope_Filestore{
+									Filestore: &combined.FileStoreMessages{
+										Message: &combined.FileStoreMessages_ReadFileResponse{
+											ReadFileResponse: &combined.FileStoreAPIReadFileResponse{
+												File: &combined.FileStoreAPIFile{
+													Content: &combined.FileStoreAPIFile_Blob{
+														Blob: []byte(
+															`{"vin":"din-wifi","site_info":{"site_name":"WiFiSite"}}`,
+														),
+													},
+												},
+											},
+										},
+									},
+								},
+							})
+						case env.GetTeg() != nil && env.GetTeg().GetDispatchBatteryPowerRequest() != nil:
+							writeRoutableEnvelope(t, w, &combined.MessageEnvelope{
+								Payload: &combined.MessageEnvelope_Teg{
+									Teg: &combined.TEGMessages{
+										Message: &combined.TEGMessages_DispatchBatteryPowerResponse{
+											DispatchBatteryPowerResponse: &combined.TEGAPIDispatchBatteryPowerResponse{},
+										},
+									},
+								},
+							})
+						}
+					}
+				}
+			}
+
+			lanHost := "127.0.0.1:1"
+			if tc.lanAlive {
+				lanSrv := newTLSServer(t, v1rHandler(true))
+				lanHost = hostOf(lanSrv)
+			}
+			wifiSrv := newTLSServer(t, v1rHandler(tc.wifiHasConfig))
+			wifiHost := hostOf(wifiSrv)
+
+			lanV1r := newV1r(t, lanHost)
+			c := newLegacyClient(lanHost)
+			c.SetV1rTransport(lanV1r)
+			c.SetFailover(true, tc.wifiV1rFallback)
+			if tc.wifiV1rFallback {
+				wifiV1r := newV1r(t, wifiHost)
+				c.SetWiFiV1rTransport(wifiV1r)
+			}
+			backend := tedapi.NewBackend(c, lanV1r)
+
+			connected := c.Connect(t.Context())
+			assert.Equal(t, tc.wantConnect, connected)
+			if !tc.lanAlive && !tc.wifiV1rFallback {
+				c.SetLANFailed(true)
+			}
+
+			ready := backend.WiFiV1rReady(t.Context())
+			assert.Equal(t, tc.wantReady, ready)
+			if ready {
+				// Second call exercises the 60s cached probe path.
+				assert.True(t, backend.WiFiV1rReady(t.Context()))
+			}
+
+			_, dispErr := backend.DispatchBatteryPower(t.Context(), 1500.0, 120)
+			if tc.wantDispatchOK {
+				require.NoError(t, dispErr)
+				res, apiErr := c.APIGet(t.Context(), "/api/meters/aggregates")
+				require.NoError(t, apiErr)
+				require.NotNil(t, res)
+			} else {
+				require.ErrorIs(t, dispErr, models.ErrUnsupported)
+			}
+		})
+	}
+}

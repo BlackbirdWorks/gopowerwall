@@ -42,10 +42,11 @@ const (
 )
 
 // ScaleBatteryLevel converts a raw gateway battery percentage into the
-// user-facing percentage, mapping the gateway's usable 5-100 range onto 0-100.
-// Matches pypowerwall's (level / 0.95) - (5 / 0.95).
+// user-facing percentage, mapping the gateway's usable 5-100 range onto 0-100
+// and clamping at 0 when the battery dips under the 5% reserve.
+// Matches pypowerwall's max(0.0, (level / 0.95) - (5 / 0.95)).
 func ScaleBatteryLevel(level float64) float64 {
-	return (level / scaleUsableFraction) - (scaleReservedFloor / scaleUsableFraction)
+	return math.Max(0.0, (level/scaleUsableFraction)-(scaleReservedFloor/scaleUsableFraction))
 }
 
 // UnscaleBatteryLevel converts a user-facing battery percentage (such as

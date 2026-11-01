@@ -104,6 +104,10 @@ type Config struct {
 	// connection modes (local -> FleetAPI -> cloud -> local). When false,
 	// only the configured mode is attempted. Set via [WithFailover].
 	Failover bool
+	// WiFiV1rFallback opts into signed v1r reads and writes over WiFiHost
+	// when the primary LAN v1r host is unreachable. Set via
+	// [WithWiFiV1rFallback].
+	WiFiV1rFallback bool
 }
 
 // Option is a functional option for configuring a [Powerwall] via [New], in
@@ -249,6 +253,13 @@ func WithRSAKeyPath(path string) Option {
 // mode when the primary LAN host is unreachable.
 func WithWiFiHost(host string) Option {
 	return func(c *Config) { c.WiFiHost = host }
+}
+
+// WithWiFiV1rFallback sets [Config.WiFiV1rFallback], opting into signed v1r
+// reads and writes over [Config.WiFiHost] when the primary LAN v1r host is
+// unreachable.
+func WithWiFiV1rFallback(fallback bool) Option {
+	return func(c *Config) { c.WiFiV1rFallback = fallback }
 }
 
 // WithTEDAPIApiVersion sets [Config.TEDAPIApiVersion] ([TEDAPIVersion2024_06]

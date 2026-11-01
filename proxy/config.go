@@ -21,6 +21,8 @@ type Config struct {
 	TedapiAuthMode        string
 	Style                 string
 	HTTPSMode             string
+	HTTPSCert             string
+	HTTPSKey              string
 	GwPwd                 string
 	RsaKeyPath            string
 	InfluxURL             string
@@ -127,6 +129,8 @@ func DefaultConfig() Config {
 		Timeout:               getEnvInt("PW_TIMEOUT", defaultTimeout),
 		PoolMaxSize:           getEnvInt("PW_POOL_MAXSIZE", defaultPoolMaxSize),
 		HTTPSMode:             getEnv("PW_HTTPS", "no"),
+		HTTPSCert:             getEnv("PW_HTTPS_CERT", ""),
+		HTTPSKey:              getEnv("PW_HTTPS_KEY", ""),
 		Style:                 style,
 		SiteID:                getEnv("PW_SITEID", ""),
 		AuthPath:              authPath,

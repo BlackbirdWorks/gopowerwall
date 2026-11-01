@@ -11,12 +11,12 @@ const (
 	// Version is the library semantic version.
 	Version = "0.12.0"
 	// Build is the proxy build tag.
-	Build = "t109"
+	Build = "t111"
 
 	// UpstreamVersion is the upstream pypowerwall release version tracked for parity.
-	UpstreamVersion = "0.21.0"
+	UpstreamVersion = "0.23.1"
 	// UpstreamCommit is the git commit hash of jasonacox/pypowerwall tracked for parity.
-	UpstreamCommit = "1eb3f063d537b47be11b7da4ea52c3533d8e0e95"
+	UpstreamCommit = "8c554fa8646fd6a867972d6da75f8562faa5b3f4"
 
 	VersionMajor = 0
 	VersionMinor = 12

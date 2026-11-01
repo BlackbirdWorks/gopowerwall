@@ -54,6 +54,12 @@ func TestConnectErrorError(t *testing.T) {
 			err:  &models.ConnectError{Mode: "local"},
 			want: "failed to connect to Powerwall in local mode after exhausting all retries/fallbacks",
 		},
+		{
+			name: "formats error with mode and reason",
+			err:  &models.ConnectError{Mode: "local", Reason: "local mode failed: connection refused"},
+			want: "failed to connect to Powerwall in local mode " +
+				"(local mode failed: connection refused) after exhausting all retries/fallbacks",
+		},
 	}
 
 	for _, tc := range cases {

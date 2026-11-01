@@ -281,6 +281,8 @@ func buildStatsConfigMap(c Config) map[string]any {
 		"PW_TIMEOUT":             c.Timeout,
 		"PW_POOLMAXSIZE":         c.PoolMaxSize,
 		"PW_HTTPS":               c.HTTPSMode,
+		"PW_HTTPS_CERT":          maskSecret(c.HTTPSCert),
+		"PW_HTTPS_KEY":           maskSecret(c.HTTPSKey),
 		"PW_PORT":                c.Port,
 		"PW_STYLE":               c.Style,
 		"PW_SITEID":              maskValue(c.SiteID),

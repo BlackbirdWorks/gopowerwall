@@ -92,6 +92,10 @@ var (
 	// overwrite, so the write is refused rather than sent as a dangerous
 	// partial payload.
 	ErrOperationBackfillFailed = errors.New("failed to read current operation settings for local-mode backfill")
+
+	// ErrInvalidBatteryDispatch indicates invalid battery dispatch parameters
+	// (non-finite power_watts or duration_seconds outside 1..86400).
+	ErrInvalidBatteryDispatch = errors.New("invalid battery dispatch parameters")
 )
 
 // InvalidConfigError provides details about an invalid configuration parameter.
@@ -112,9 +116,15 @@ func (e *InvalidConfigError) Error() string {
 // configuration itself was valid) but the initial connection attempt across
 // every applicable mode failed.
 type ConnectError struct {
-	Mode string
+	Mode   string
+	Reason string
 }
 
 func (e *ConnectError) Error() string {
+	if e.Reason != "" {
+		return "failed to connect to Powerwall in " + e.Mode +
+			" mode (" + e.Reason + ") after exhausting all retries/fallbacks"
+	}
+
 	return "failed to connect to Powerwall in " + e.Mode + " mode after exhausting all retries/fallbacks"
 }

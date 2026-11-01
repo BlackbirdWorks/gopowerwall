@@ -23,11 +23,46 @@ import (
 )
 
 const (
-	Build                = "t109"
+	Build                = "t111"
 	MaxPostBody          = 4096
 	URIStatsMax          = 100
 	defaultServerTimeout = 5 * time.Second
 )
+
+var (
+	// ErrHTTPSCertKeyMismatch is returned when only one of PW_HTTPS_CERT or PW_HTTPS_KEY is set.
+	ErrHTTPSCertKeyMismatch = errors.New(
+		"both PW_HTTPS_CERT and PW_HTTPS_KEY must be set when using custom HTTPS certificates",
+	)
+	// ErrHTTPSCertKeyLoad is returned when the TLS certificate/key pair cannot be loaded.
+	ErrHTTPSCertKeyLoad = errors.New("unable to load HTTPS certificate/key")
+)
+
+// HTTPSCertificate resolves and validates the TLS certificate and key paths
+// used when PW_HTTPS=yes, matching pypowerwall's https_certificate() helper.
+func HTTPSCertificate(ctx context.Context, cert, key string) (string, string, error) {
+	if (cert != "") != (key != "") {
+		return "", "", ErrHTTPSCertKeyMismatch
+	}
+
+	resolvedCert := cert
+	resolvedKey := key
+	if resolvedCert == "" && resolvedKey == "" {
+		resolvedCert = "localhost.crt"
+		resolvedKey = "localhost.key"
+		logger.Load(ctx).WarnContext(
+			ctx,
+			"PW_HTTPS=yes is using bundled self-signed localhost certificate/key - for testing only. "+
+				"Set PW_HTTPS_CERT and PW_HTTPS_KEY for production.",
+		)
+	}
+
+	if _, err := tls.LoadX509KeyPair(resolvedCert, resolvedKey); err != nil {
+		return "", "", fmt.Errorf("%w (%s, %s): %w", ErrHTTPSCertKeyLoad, resolvedCert, resolvedKey, err)
+	}
+
+	return resolvedCert, resolvedKey, nil
+}
 
 // isAllowlisted reports whether the proxy forwards reqPath to the gateway.
 // A switch keeps the route set constant and allocation-free per request.
@@ -374,11 +409,17 @@ func (s *Server) Start(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	if s.Config.HTTPSMode == valYes {
+		certFile, keyFile, certErr := HTTPSCertificate(ctx, s.Config.HTTPSCert, s.Config.HTTPSKey)
+		if certErr != nil {
+			_ = s.Close(ctx)
+
+			return certErr
+		}
 		srv.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
 		go func() {
-			if err := srv.ListenAndServeTLS("localhost.crt", "localhost.key"); err != nil &&
+			if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil &&
 				!errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
 			}

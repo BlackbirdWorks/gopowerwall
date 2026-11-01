@@ -7,6 +7,7 @@ import (
 
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/calc"
+	"github.com/blackbirdworks/gopowerwall/pkgs/validation"
 )
 
 // Operation returns the decoded "/api/operation" response - the current
@@ -463,4 +464,58 @@ func (p *Powerwall) ReconnectGrid(ctx context.Context) (models.Operation, error)
 	}
 
 	return models.Operation{}, ErrUnsupported
+}
+
+// WiFiV1rReady performs a read-only probe for the opt-in WiFi-v1r fallback,
+// returning true when the primary LAN v1r transport is healthy or when a
+// signed WiFi v1r config read succeeds (cached for 60s).
+func (p *Powerwall) WiFiV1rReady(ctx context.Context) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.tedapi == nil {
+		return false
+	}
+
+	return p.tedapi.WiFiV1rReady(ctx)
+}
+
+// DispatchBatteryPower sets battery power temporarily via the local v1r API:
+// positive watts discharge, negative watts charge, and zero requests zero
+// battery power. Only [ModeV1r] supports this; other modes return
+// [ErrUnsupported].
+//
+// Use at your own risk: it overrides the backup reserve and grid export
+// settings and could void your warranty.
+func (p *Powerwall) DispatchBatteryPower(
+	ctx context.Context,
+	powerWatts float64,
+	durationSeconds int,
+) (models.BatteryDispatchResult, error) {
+	if err := validation.ValidateBatteryDispatch(powerWatts, durationSeconds); err != nil {
+		return models.BatteryDispatchResult{}, fmt.Errorf("%w: %w", models.ErrInvalidBatteryDispatch, err)
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.tedapi != nil {
+		return p.tedapi.DispatchBatteryPower(ctx, powerWatts, durationSeconds)
+	}
+
+	return models.BatteryDispatchResult{}, ErrUnsupported
+}
+
+// ResumeBatteryOperation releases a local v1r battery power setpoint and
+// returns the Powerwall to normal operation. Only [ModeV1r] supports this;
+// other modes return [ErrUnsupported].
+func (p *Powerwall) ResumeBatteryOperation(ctx context.Context) (models.BatteryResumeResult, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.tedapi != nil {
+		return p.tedapi.ResumeBatteryOperation(ctx)
+	}
+
+	return models.BatteryResumeResult{}, ErrUnsupported
 }

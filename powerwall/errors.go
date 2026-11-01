@@ -54,6 +54,10 @@ var (
 	// was refused rather than sent as a dangerous partial payload.
 	ErrOperationBackfillFailed = models.ErrOperationBackfillFailed
 
+	// ErrInvalidBatteryDispatch indicates invalid battery dispatch parameters
+	// (non-finite power_watts or duration_seconds outside 1..86400).
+	ErrInvalidBatteryDispatch = models.ErrInvalidBatteryDispatch
+
 	// ErrFieldMissing indicates a typed accessor's underlying poll
 	// succeeded, but the specific field it was after was absent from, or
 	// the wrong type in, the decoded response. Distinct from [ErrNoClient]

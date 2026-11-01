@@ -186,7 +186,7 @@ func TestHandleStatsFieldsAndConfig(t *testing.T) {
 	var stats map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&stats))
 
-	assert.Contains(t, stats["pypowerwall"], "Proxy t109")
+	assert.Contains(t, stats["pypowerwall"], "Proxy t111")
 	assert.Contains(t, stats, "uptime")
 	assert.Contains(t, stats, "ts")
 	assert.Contains(t, stats, "mem")
@@ -236,6 +236,8 @@ func TestHandleStatsConfigMasking(t *testing.T) {
 				c.AuthPath = ""
 				c.CacheFile = ""
 				c.RsaKeyPath = ""
+				c.HTTPSCert = ""
+				c.HTTPSKey = ""
 				c.Failover = true
 			},
 			check: func(t *testing.T, stats map[string]any) {
@@ -245,6 +247,8 @@ func TestHandleStatsConfigMasking(t *testing.T) {
 				assert.Nil(t, config["PW_PASSWORD"])
 				assert.Nil(t, config["PW_CONTROL_SECRET"])
 				assert.Nil(t, config["PW_GW_PWD"])
+				assert.Nil(t, config["PW_HTTPS_CERT"])
+				assert.Nil(t, config["PW_HTTPS_KEY"])
 				assert.Empty(t, config["PW_EMAIL"])
 				assert.Empty(t, config["PW_SITEID"])
 				assert.Empty(t, config["PW_AUTH_PATH"])
@@ -262,6 +266,8 @@ func TestHandleStatsConfigMasking(t *testing.T) {
 				c.Password = "secret-pass"
 				c.ControlSecret = "secret-control"
 				c.GwPwd = "secret-gw"
+				c.HTTPSCert = "/etc/ssl/proxy.crt"
+				c.HTTPSKey = "/etc/ssl/proxy.key"
 				c.Email = "secret@example.com"
 				c.SiteID = "12345"
 				c.AuthPath = "/var/secrets"
@@ -278,6 +284,8 @@ func TestHandleStatsConfigMasking(t *testing.T) {
 				assert.Equal(t, masked, config["PW_PASSWORD"])
 				assert.Equal(t, masked, config["PW_CONTROL_SECRET"])
 				assert.Equal(t, masked, config["PW_GW_PWD"])
+				assert.Equal(t, masked, config["PW_HTTPS_CERT"])
+				assert.Equal(t, masked, config["PW_HTTPS_KEY"])
 				assert.Equal(t, masked, config["PW_EMAIL"])
 				assert.Equal(t, masked, config["PW_SITEID"])
 				assert.Equal(t, masked, config["PW_AUTH_PATH"])

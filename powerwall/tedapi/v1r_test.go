@@ -927,6 +927,265 @@ func TestV1rAPIGetContextCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestV1rAPIGetReAuthRetry(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name       string
+		firstCode  int
+		loginCode  int
+		retryCode  int
+		wantErr    bool
+		wantTokens bool
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:       "401 triggers re-login and succeeds on retry",
+			firstCode:  http.StatusUnauthorized,
+			loginCode:  http.StatusOK,
+			retryCode:  http.StatusOK,
+			wantTokens: true,
+		},
+		{
+			name:       "403 triggers re-login and succeeds on retry",
+			firstCode:  http.StatusForbidden,
+			loginCode:  http.StatusOK,
+			retryCode:  http.StatusOK,
+			wantTokens: true,
+		},
+		{
+			name:      "401 with failing re-login returns login error",
+			firstCode: http.StatusUnauthorized,
+			loginCode: http.StatusUnauthorized,
+			retryCode: http.StatusOK,
+			wantErr:   true,
+		},
+		{
+			name:       "401 with retry still unauthorized returns ErrUnexpectedStatus",
+			firstCode:  http.StatusUnauthorized,
+			loginCode:  http.StatusOK,
+			retryCode:  http.StatusUnauthorized,
+			wantErr:    true,
+			wantTokens: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var getCalls atomic.Int32
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					w.WriteHeader(tc.loginCode)
+					if tc.loginCode == http.StatusOK {
+						_, _ = w.Write([]byte(`{"token":"refreshed-token"}`))
+					}
+				case "/api/meters/aggregates":
+					call := getCalls.Add(1)
+					if call == 1 {
+						w.WriteHeader(tc.firstCode)
+
+						return
+					}
+					assert.Equal(t, "Bearer refreshed-token", r.Header.Get("Authorization"))
+					w.WriteHeader(tc.retryCode)
+					_, _ = w.Write([]byte(`{"site":{"instant_power":123}}`))
+				}
+			}
+
+			srv := newTLSServer(t, handler)
+			v := newV1r(t, hostOf(srv))
+			assert.False(t, v.HasToken())
+
+			res, err := v.APIGet(t.Context(), "/api/meters/aggregates")
+			assert.Equal(t, tc.wantTokens, v.HasToken())
+			if tc.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
+			assert.Contains(t, m, "site")
+		})
+	}
+}
+
+func TestV1rDispatchAndResumeBattery(t *testing.T) {
+	t.Parallel()
+
+	type dispatchTestCase struct {
+		wantErrIs       error
+		respEnv         *combined.MessageEnvelope
+		name            string
+		din             string
+		powerWatts      float64
+		durationSeconds int
+		wantErr         bool
+	}
+
+	okDispatchEnv := &combined.MessageEnvelope{
+		Payload: &combined.MessageEnvelope_Teg{
+			Teg: &combined.TEGMessages{
+				Message: &combined.TEGMessages_DispatchBatteryPowerResponse{
+					DispatchBatteryPowerResponse: &combined.TEGAPIDispatchBatteryPowerResponse{},
+				},
+			},
+		},
+	}
+	commonErrEnv := &combined.MessageEnvelope{
+		Payload: &combined.MessageEnvelope_Common{
+			Common: &combined.CommonMessages{
+				ErrorResponse: &combined.CommonAPIErrorResponse{
+					Status: &combined.CommandStatus{
+						Code:    12,
+						Message: "rejected by gateway",
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range []dispatchTestCase{
+		{
+			name:            "discharge setpoint succeeds",
+			din:             "1232100-00-E--TG1234567890G1",
+			powerWatts:      5000.0,
+			durationSeconds: 300,
+			respEnv:         okDispatchEnv,
+		},
+		{
+			name:            "charge setpoint succeeds",
+			din:             "1232100-00-E--TG1234567890G1",
+			powerWatts:      -3500.0,
+			durationSeconds: 600,
+			respEnv:         okDispatchEnv,
+		},
+		{
+			name:            "zero hold setpoint succeeds",
+			din:             "1232100-00-E--TG1234567890G1",
+			powerWatts:      0.0,
+			durationSeconds: 60,
+			respEnv:         okDispatchEnv,
+		},
+		{
+			name:            "invalid duration rejected before network call",
+			din:             "1232100-00-E--TG1234567890G1",
+			powerWatts:      1000.0,
+			durationSeconds: 0,
+			wantErrIs:       models.ErrInvalidBatteryDispatch,
+		},
+		{
+			name:            "common error_response surfaces ErrUnexpectedResponse",
+			din:             "1232100-00-E--TG1234567890G1",
+			powerWatts:      1000.0,
+			durationSeconds: 60,
+			respEnv:         commonErrEnv,
+			wantErrIs:       models.ErrUnexpectedResponse,
+		},
+		{
+			name:            "missing dispatch response surfaces ErrUnexpectedResponse",
+			din:             "1232100-00-E--TG1234567890G1",
+			powerWatts:      1000.0,
+			durationSeconds: 60,
+			respEnv:         &combined.MessageEnvelope{},
+			wantErrIs:       models.ErrUnexpectedResponse,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotPower atomic.Int64
+			var gotDuration atomic.Uint32
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				env := readRoutableEnvelope(t, r)
+				if req := env.GetTeg().GetDispatchBatteryPowerRequest(); req != nil {
+					if rp := req.GetRealPower(); rp != nil {
+						gotPower.Store(int64(rp.GetPowerWatts()))
+						gotDuration.Store(rp.GetDurationSeconds())
+					}
+				}
+				writeRoutableEnvelope(t, w, tc.respEnv)
+			}
+			srv := newTLSServer(t, handler)
+			v := newV1r(t, hostOf(srv))
+
+			res, err := v.DispatchBatteryPower(t.Context(), tc.din, tc.powerWatts, tc.durationSeconds)
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+
+				return
+			}
+			if tc.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.InDelta(t, tc.powerWatts, res.PowerWatts, 0.001)
+			assert.Equal(t, tc.durationSeconds, res.DurationSeconds)
+			assert.Equal(t, int64(tc.powerWatts), gotPower.Load())
+			assert.Equal(t, uint32(tc.durationSeconds), gotDuration.Load())
+		})
+	}
+
+	type resumeTestCase struct {
+		wantErrIs error
+		respEnv   *combined.MessageEnvelope
+		name      string
+		din       string
+	}
+
+	for _, tc := range []resumeTestCase{
+		{
+			name:    "resume sends ResumeDeviceOperatingMode and returns ResumeBatteryOperation true",
+			din:     "1232100-00-E--TG1234567890G1",
+			respEnv: okDispatchEnv,
+		},
+		{
+			name:      "resume with common error_response returns ErrUnexpectedResponse",
+			din:       "1232100-00-E--TG1234567890G1",
+			respEnv:   commonErrEnv,
+			wantErrIs: models.ErrUnexpectedResponse,
+		},
+		{
+			name:      "resume with missing response returns ErrUnexpectedResponse",
+			din:       "1232100-00-E--TG1234567890G1",
+			respEnv:   &combined.MessageEnvelope{},
+			wantErrIs: models.ErrUnexpectedResponse,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var sawResume atomic.Bool
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				env := readRoutableEnvelope(t, r)
+				if req := env.GetTeg().GetDispatchBatteryPowerRequest(); req != nil {
+					if req.GetResumeDeviceMode() != nil {
+						sawResume.Store(true)
+					}
+				}
+				writeRoutableEnvelope(t, w, tc.respEnv)
+			}
+			srv := newTLSServer(t, handler)
+			v := newV1r(t, hostOf(srv))
+
+			res, err := v.ResumeBatteryOperation(t.Context(), tc.din)
+			if tc.wantErrIs != nil {
+				require.ErrorIs(t, err, tc.wantErrIs)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, res.ResumeBatteryOperation)
+			assert.True(t, sawResume.Load())
+		})
+	}
+}
+
 func TestSendIslandMode(t *testing.T) {
 	t.Parallel()
 

@@ -43,3 +43,16 @@ type GridCodeInfo struct {
 	// GridFreqSetting is the configured nominal grid frequency, in hertz.
 	GridFreqSetting float64 `json:"grid_freq_setting"`
 }
+
+// BatteryDispatchResult represents the acknowledgement from a timed v1r
+// battery power setpoint (DispatchBatteryPower).
+type BatteryDispatchResult struct {
+	PowerWatts      float64 `json:"power_watts"`
+	DurationSeconds int     `json:"duration_seconds"`
+}
+
+// BatteryResumeResult represents the acknowledgement from releasing a v1r
+// battery power setpoint (ResumeBatteryOperation).
+type BatteryResumeResult struct {
+	ResumeBatteryOperation bool `json:"resume_battery_operation"`
+}
