@@ -3,18 +3,25 @@ package fleetapi
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/blackbirdworks/gopowerwall/models"
 	"github.com/blackbirdworks/gopowerwall/pkgs/atomicfile"
@@ -33,6 +40,8 @@ import (
 // Powerwall.SetOperation), never a Tesla API response, so the malformed
 // field is never sent as a request.
 var errInvalidOperationPayload = errors.New("invalid operation payload field")
+
+var retrySecondsRe = regexp.MustCompile(`(?i)retry[^0-9]{0,20}(\d{1,5})\s*(?:seconds?|s)\b`)
 
 const (
 	// ConfigFile is the filename for cached FleetAPI configuration.
@@ -56,7 +65,30 @@ const (
 
 	gridStatusConnected = "SystemGridConnected"
 	gridStatusIslanded  = "SystemIslandedActive"
+
+	defaultRetryAfterSec = 10
+	capRetryAfterSec     = 60
+	jitterFactor         = 4
+	maxJitterLimit       = 10 * time.Second
 )
+
+func isForceHTTP11() bool {
+	val := strings.ToLower(strings.TrimSpace(os.Getenv("PW_FLEETAPI_HTTP")))
+
+	return val == "1.1" || val == "1" || val == "http1.1" || val == "http/1.1"
+}
+
+func buildBaseTransport() http.RoundTripper {
+	if isForceHTTP11() {
+		tr := &http.Transport{}
+		tr.ForceAttemptHTTP2 = false
+		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+
+		return tr
+	}
+
+	return nil
+}
 
 // BaseURL returns the FleetAPI endpoint URL for a given region code.
 func BaseURL(region string) string {
@@ -72,17 +104,21 @@ func BaseURL(region string) string {
 
 // Client implements the Tesla FleetAPI models.
 type Client struct {
-	cache      *cache.ResponseCache
-	client     *http.Client
-	configData map[string]any
-	pollAPIMap map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
-	postAPIMap map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
-	email      string
-	siteID     string
-	authPath   string
-	baseURL    string
-	timeout    time.Duration
-	mu         sync.Mutex
+	backoffUntil time.Time
+	sfGroup      singleflight.Group
+	client       *http.Client
+	configData   map[string]any
+	pollAPIMap   map[string]func(ctx context.Context, force, recursive, raw bool) (any, error)
+	postAPIMap   map[string]func(ctx context.Context, payload any, din string, recursive, raw bool) (any, error)
+	cache        *cache.ResponseCache
+	siteID       string
+	baseURL      string
+	authPath     string
+	email        string
+	timeout      time.Duration
+	cacheTTL     time.Duration
+	backoffMu    sync.RWMutex
+	mu           sync.Mutex
 }
 
 // PyPowerwallFleetAPI is an alias for Client.
@@ -90,15 +126,18 @@ type PyPowerwallFleetAPI = Client
 
 // New creates a new Client backend.
 func New(email string, cacheTTL, timeout time.Duration, siteID, authPath string) *Client {
+	baseTr := buildBaseTransport()
 	f := &Client{
 		email:    email,
 		siteID:   siteID,
 		authPath: authPath,
 		timeout:  timeout,
+		cacheTTL: cacheTTL,
 		baseURL:  BaseURL("na"),
 		cache:    cache.NewResponseCache(cacheTTL),
 		client: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: baseTr,
 		},
 	}
 	f.initAPIMaps()
@@ -218,10 +257,11 @@ func (f *Client) Authenticate(ctx context.Context) error {
 	}
 
 	f.client = oauthclient.New(ctx, oauthclient.Config{
-		ClientID: clientID,
-		TokenURL: TeslaAuthURL,
-		Token:    tok,
-		Timeout:  f.timeout,
+		ClientID:      clientID,
+		TokenURL:      TeslaAuthURL,
+		Token:         tok,
+		Timeout:       f.timeout,
+		BaseTransport: buildBaseTransport(),
 		OnRefresh: func(newTok *oauth2.Token) error {
 			return f.persistToken(cfgPath, newTok)
 		},
@@ -260,6 +300,75 @@ func checkStatus(resp *http.Response) error {
 	}
 }
 
+func parseRetryAfter(resp *http.Response, bodyBytes []byte) time.Duration {
+	delaySec := -1
+	val := resp.Header.Get("Retry-After")
+	if val != "" {
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			delaySec = int(f)
+		} else if t, timeErr := http.ParseTime(val); timeErr == nil {
+			diff := time.Until(t).Seconds()
+			delaySec = int(math.Ceil(diff))
+		}
+	}
+
+	if delaySec < 0 && len(bodyBytes) > 0 {
+		match := retrySecondsRe.FindSubmatch(bodyBytes)
+		if len(match) > 1 {
+			if s, err := strconv.Atoi(string(match[1])); err == nil {
+				delaySec = s
+			}
+		}
+	}
+
+	if delaySec < 0 {
+		delaySec = defaultRetryAfterSec
+	}
+
+	if delaySec < 0 {
+		delaySec = 0
+	} else if delaySec > capRetryAfterSec {
+		delaySec = capRetryAfterSec
+	}
+
+	return time.Duration(delaySec) * time.Second
+}
+
+func (f *Client) armBackoff(delay time.Duration) {
+	f.backoffMu.Lock()
+	defer f.backoffMu.Unlock()
+
+	target := time.Now().Add(delay)
+	if target.After(f.backoffUntil) {
+		f.backoffUntil = target
+	}
+}
+
+// RateBackoffRemaining returns the remaining duration of the shared 429
+// backoff window, or 0 if not backed off.
+func (f *Client) RateBackoffRemaining() time.Duration {
+	f.backoffMu.RLock()
+	defer f.backoffMu.RUnlock()
+
+	rem := time.Until(f.backoffUntil)
+	if rem > 0 {
+		return rem
+	}
+
+	return 0
+}
+
+func (f *Client) setCacheWithJitter(cacheKey string, data map[string]any, ttl time.Duration) {
+	maxJitter := min(ttl/jitterFactor, maxJitterLimit)
+	var jitter time.Duration
+	if maxJitter > 0 {
+		if n, err := rand.Int(rand.Reader, big.NewInt(int64(maxJitter))); err == nil {
+			jitter = time.Duration(n.Int64())
+		}
+	}
+	f.cache.SetWithTimestamp(cacheKey, data, time.Now().Add(-jitter), ttl-jitter)
+}
+
 // postJSON POSTs body as JSON to url using f.client, which - once
 // Authenticate has run - attaches and transparently refreshes the caller's
 // OAuth2 bearer token via pkgs/oauthclient. It never sets the Authorization
@@ -282,6 +391,19 @@ func (f *Client) postJSON(ctx context.Context, url string, body map[string]any) 
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		delay := parseRetryAfter(resp, bodyBytes)
+		f.armBackoff(delay)
+		logger.Load(ctx).WarnContext(
+			ctx,
+			"FleetAPI rate limited on POST - backing off all requests",
+			"delay_sec", delay.Seconds(),
+		)
+
+		return models.ErrRateLimited
+	}
 
 	return checkStatus(resp)
 }
@@ -348,17 +470,61 @@ func (f *Client) Post(ctx context.Context, api string, payload any, _ string, _,
 // siteConfigTTL) when force is false and a fresh entry exists. It is the
 // shared implementation behind getSiteData/getSiteConfig/getSiteBattery/
 // getBackupTimeRemaining, which differ only in cache key, URL, and TTL.
+// Concurrent cache misses for the same cacheKey coalesce into a single
+// HTTP request when force is false.
 func (f *Client) fetchSiteJSON(
 	ctx context.Context, cacheKey, url string, force bool, ttl ...time.Duration,
 ) (map[string]any, error) {
+	effectiveTTL := f.cacheTTL
+	if len(ttl) > 0 && ttl[0] > 0 {
+		effectiveTTL = ttl[0]
+	}
+
 	if !force {
-		if val, found, _ := f.cache.Get(cacheKey, ttl...); found {
+		if val, found, _ := f.cache.Get(cacheKey, effectiveTTL); found {
 			if m, ok := val.(map[string]any); ok {
 				return m, nil
 			}
 		}
 	}
 
+	if f.RateBackoffRemaining() > 0 {
+		logger.Load(ctx).DebugContext(ctx, "FleetAPI backoff window active - failing fast", "key", cacheKey)
+
+		return nil, models.ErrRateLimited
+	}
+
+	if force {
+		return f.doFetchSiteJSON(ctx, cacheKey, url, effectiveTTL)
+	}
+
+	val, err, _ := f.sfGroup.Do(cacheKey, func() (any, error) {
+		if cVal, found, _ := f.cache.Get(cacheKey, effectiveTTL); found {
+			if m, ok := cVal.(map[string]any); ok {
+				return m, nil
+			}
+		}
+		if f.RateBackoffRemaining() > 0 {
+			logger.Load(ctx).DebugContext(ctx, "FleetAPI backoff window active - failing fast", "key", cacheKey)
+
+			return nil, models.ErrRateLimited
+		}
+
+		return f.doFetchSiteJSON(ctx, cacheKey, url, effectiveTTL)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if m, ok := val.(map[string]any); ok {
+		return m, nil
+	}
+
+	return nil, models.ErrUnexpectedStatus
+}
+
+func (f *Client) doFetchSiteJSON(
+	ctx context.Context, cacheKey, url string, ttl time.Duration,
+) (map[string]any, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -370,16 +536,33 @@ func (f *Client) fetchSiteJSON(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, readErr
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		delay := parseRetryAfter(resp, bodyBytes)
+		f.armBackoff(delay)
+		logger.Load(ctx).WarnContext(
+			ctx,
+			"FleetAPI rate limited - backing off all requests",
+			"delay_sec", delay.Seconds(),
+		)
+
+		return nil, models.ErrRateLimited
+	}
+
 	if statusErr := checkStatus(resp); statusErr != nil {
 		return nil, statusErr
 	}
 
 	var data map[string]any
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
+	if decodeErr := json.Unmarshal(bodyBytes, &data); decodeErr != nil {
 		return nil, decodeErr
 	}
 
-	f.cache.Set(cacheKey, data)
+	f.setCacheWithJitter(cacheKey, data, ttl)
 
 	return data, nil
 }
@@ -442,12 +625,29 @@ func (f *Client) setAPITimeOfUseSettings(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, readErr
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		delay := parseRetryAfter(resp, bodyBytes)
+		f.armBackoff(delay)
+		logger.Load(ctx).WarnContext(
+			ctx,
+			"FleetAPI rate limited on POST - backing off all requests",
+			"delay_sec", delay.Seconds(),
+		)
+
+		return nil, models.ErrRateLimited
+	}
+
 	if statusErr := checkStatus(resp); statusErr != nil {
 		return nil, statusErr
 	}
 
 	var data map[string]any
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&data); decodeErr != nil {
+	if decodeErr := json.Unmarshal(bodyBytes, &data); decodeErr != nil {
 		return nil, decodeErr
 	}
 

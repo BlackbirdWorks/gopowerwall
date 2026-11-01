@@ -25,6 +25,8 @@ var ErrMissingRefreshToken = errors.New("missing refresh_token in auth file")
 
 // Config configures an OAuth2-backed HTTP client for a Tesla token endpoint.
 type Config struct {
+	// BaseTransport is an optional http.RoundTripper to use as the underlying transport.
+	BaseTransport http.RoundTripper
 	// Token is the current (possibly stale) token loaded from disk.
 	Token *oauth2.Token
 	// OnRefresh, when non-nil, is called with the new token whenever the
@@ -54,7 +56,7 @@ func New(ctx context.Context, cfg Config) *http.Client {
 	// token acquisition - never for requests made through the client this
 	// function returns - so this is the only place the configured timeout
 	// reaches token refresh requests.
-	base := &http.Client{Timeout: cfg.Timeout}
+	base := &http.Client{Timeout: cfg.Timeout, Transport: cfg.BaseTransport}
 	tokenCtx := context.WithValue(ctx, oauth2.HTTPClient, base)
 
 	oauthCfg := &oauth2.Config{
@@ -74,7 +76,7 @@ func New(ctx context.Context, cfg Config) *http.Client {
 
 	return &http.Client{
 		Timeout:   cfg.Timeout,
-		Transport: &oauth2.Transport{Source: src},
+		Transport: &oauth2.Transport{Source: src, Base: cfg.BaseTransport},
 	}
 }
 

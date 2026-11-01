@@ -230,7 +230,7 @@ linters:
       # Default: [ switch ]
       check:
         - switch
-        - map
+        - mapliteral
       # Presence of a default case in switch statements satisfies exhaustiveness.
       # Default: false
       default-signifies-exhaustive: true

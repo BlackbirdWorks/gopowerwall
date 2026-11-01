@@ -73,9 +73,47 @@ func getExtraSignalNames() map[string]map[string][]string {
 		QueryRoleDeviceControllerFull: {
 			"msaSignals": {
 				"SYNC_Uptime",
+				"PINV_EnergyCharged", "PINV_EnergyDischarged",
+				"PINV_LifetimeEnergyCharged", "PINV_LifetimeEnergyDischarged",
+				"PINV_HeatsinkTemp", "PINV_PllFrequency", "PINV_PllLocked", "PINV_Qout",
+				"PINV_ReadyForGridForming", "PINV_HardwareEnableLine", "PINV_PowerLimiter",
+				"THC_State", "SYNC_ExternallyPowered", "SYNC_SiteSwitchEnabled",
+				sigPodAvailableChargePower, sigPodAvailableDischgPower,
 			},
 		},
 	}
+}
+
+func getExtraComponentTypes() map[string]map[string][]string {
+	return map[string]map[string][]string{
+		QueryRoleDeviceControllerFull: {
+			"msaComp": {"TEPOD"},
+		},
+	}
+}
+
+func appendExtraComponentTypes(role, bVal string) string {
+	extras, ok := getExtraComponentTypes()[role]
+	if !ok || len(extras) == 0 {
+		return bVal
+	}
+	var vars map[string]any
+	if err := json.Unmarshal([]byte(bVal), &vars); err != nil {
+		return bVal
+	}
+	for key, types := range extras {
+		compFilter, okFilter := vars[key].(map[string]any)
+		if !okFilter {
+			continue
+		}
+		compFilter["types"] = mergeUniqueSignals(compFilter["types"], types)
+	}
+	encoded, err := json.Marshal(vars)
+	if err != nil {
+		return bVal
+	}
+
+	return string(encoded)
 }
 
 func mergeUniqueSignals(rawSlice any, extras []string) []string {
@@ -133,7 +171,7 @@ func loadQuerySet(data []byte, appendExtras bool) map[string]*Query {
 			bVal = "{}"
 		}
 		if appendExtras {
-			bVal = appendExtraSignals(k, bVal)
+			bVal = appendExtraComponentTypes(k, appendExtraSignals(k, bVal))
 		}
 		out[k] = &Query{
 			Text:        rec.Text,

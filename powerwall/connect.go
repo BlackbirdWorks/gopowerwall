@@ -155,6 +155,10 @@ func (p *Powerwall) connectLocal(ctx context.Context) bool {
 func (p *Powerwall) connectFleetAPI(ctx context.Context) bool {
 	fb := fleetapi.New(p.config.Email, p.config.PWCacheExpire, p.config.Timeout, p.config.SiteID, p.config.AuthPath)
 	if err := fb.Authenticate(ctx); err == nil {
+		if p.tedapi != nil {
+			_ = p.tedapi.Close(ctx)
+			p.tedapi = nil
+		}
 		p.fleetapi = fb
 		p.setClientLocked(fb)
 		p.cloudmode = true
@@ -173,6 +177,10 @@ func (p *Powerwall) connectFleetAPI(ctx context.Context) bool {
 func (p *Powerwall) connectCloud(ctx context.Context) bool {
 	cb := cloud.New(p.config.Email, p.config.PWCacheExpire, p.config.Timeout, p.config.SiteID, p.config.AuthPath)
 	if err := cb.Authenticate(ctx); err == nil {
+		if p.tedapi != nil {
+			_ = p.tedapi.Close(ctx)
+			p.tedapi = nil
+		}
 		p.cloud = cb
 		p.setClientLocked(cb)
 		p.cloudmode = true
@@ -188,63 +196,150 @@ func (p *Powerwall) connectCloud(ctx context.Context) bool {
 	return false
 }
 
+func (p *Powerwall) restoreConfiguredState() {
+	p.mode = p.configuredMode
+	p.cloudmode = p.configuredCloudmode
+	p.fleetapiFlag = p.configuredFleetapiFlag
+	p.tedapiFlag = false
+	p.tedapiMode = TEDAPIOff
+}
+
+func (p *Powerwall) tryMode(ctx context.Context, mode ConnectionMode) bool {
+	switch mode {
+	case ModeLocal, ModeTEDAPI, ModeV1r:
+		logger.Load(ctx).DebugContext(ctx, "trying local mode")
+		if p.connectLocal(ctx) {
+			return true
+		}
+		logger.Load(ctx).WarnContext(ctx, "local mode failed")
+
+		return false
+
+	case ModeFleetAPI:
+		logger.Load(ctx).DebugContext(ctx, "trying FleetAPI mode")
+		if p.connectFleetAPI(ctx) {
+			return true
+		}
+		logger.Load(ctx).WarnContext(ctx, "FleetAPI mode failed")
+
+		return false
+
+	case ModeCloud:
+		logger.Load(ctx).DebugContext(ctx, "trying cloud mode")
+		if p.connectCloud(ctx) {
+			return true
+		}
+		logger.Load(ctx).WarnContext(ctx, "cloud mode failed")
+
+		return false
+
+	default:
+		return false
+	}
+}
+
+func nextFailoverMode(mode ConnectionMode) ConnectionMode {
+	switch mode {
+	case ModeLocal, ModeTEDAPI, ModeV1r:
+		return ModeFleetAPI
+	case ModeFleetAPI:
+		return ModeCloud
+	case ModeCloud:
+		return ModeLocal
+	default:
+		return ModeUnknown
+	}
+}
+
+func (p *Powerwall) connectStrict(ctx context.Context, retry bool) bool {
+	for {
+		if p.tryMode(ctx, p.configuredMode) {
+			return true
+		}
+		if !retry {
+			p.restoreConfiguredState()
+
+			return false
+		}
+		logger.Load(ctx).WarnContext(
+			ctx,
+			"Failed to connect to Powerwall (failover off), waiting to retry",
+			"mode", p.configuredMode,
+			"wait", connectRetryWait,
+		)
+		select {
+		case <-ctx.Done():
+			p.restoreConfiguredState()
+
+			return false
+		case <-time.After(connectRetryWait):
+		}
+	}
+}
+
+func (p *Powerwall) connectWithFailover(ctx context.Context, retry bool) bool {
+	for attempt := 0; attempt < maxConnectRetries; {
+		attempt++
+		if p.tryMode(ctx, p.mode) {
+			return true
+		}
+		p.mode = nextFailoverMode(p.mode)
+		if retry && attempt == maxConnectRetries {
+			logger.Load(ctx).WarnContext(
+				ctx,
+				"failed to connect with all modes, waiting to retry",
+				"wait", connectRetryWait,
+			)
+			select {
+			case <-ctx.Done():
+				p.restoreConfiguredState()
+
+				return false
+			case <-time.After(connectRetryWait):
+			}
+			attempt = 0
+			p.mode = p.configuredMode
+		}
+	}
+
+	p.restoreConfiguredState()
+
+	return false
+}
+
 // Connect (re)establishes the backend connection for p's current
 // [ConnectionMode], with circular fallback across modes: Local -> FleetAPI
 // -> Cloud -> Local, up to three attempts total. It returns true as soon as
 // any mode connects, and updates [Powerwall.Mode] to whichever mode that
 // was - which may not be the mode p started with. If retry is true, Connect
 // sleeps 30 seconds before its last attempt rather than failing immediately.
-// [New] calls this once during construction; call it again to retry after a
-// connection has dropped or after changing credentials on the underlying
-// [Config] is not supported, so a fresh [New] is normally the simpler path
-// for that case.
+// When failover is disabled via [WithFailover], only the configured mode is
+// attempted.
 func (p *Powerwall) Connect(ctx context.Context, retry bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.mode == ModeUnknown {
+	if p.configuredMode == "" || p.configuredMode == ModeUnknown {
+		p.configuredMode = p.mode
+		p.configuredCloudmode = p.cloudmode
+		p.configuredFleetapiFlag = p.fleetapiFlag
+	}
+
+	if p.configuredMode == ModeUnknown {
 		logger.Load(ctx).ErrorContext(ctx, "unable to determine mode to connect")
 
 		return false
 	}
 
-	for attempt := range maxConnectRetries {
-		if retry && attempt == maxConnectRetries-1 {
-			logger.Load(ctx).
-				WarnContext(ctx, "failed to connect with all modes, waiting to retry", "wait", connectRetryWait)
-			time.Sleep(connectRetryWait)
-		}
+	p.mode = p.configuredMode
+	p.cloudmode = p.configuredCloudmode
+	p.fleetapiFlag = p.configuredFleetapiFlag
 
-		switch p.mode {
-		case ModeLocal:
-			logger.Load(ctx).DebugContext(ctx, "trying local mode")
-			if p.connectLocal(ctx) {
-				return true
-			}
-			logger.Load(ctx).WarnContext(ctx, "local mode failed, trying fleetapi mode")
-			p.mode = ModeFleetAPI
-
-		case ModeFleetAPI:
-			logger.Load(ctx).DebugContext(ctx, "trying FleetAPI mode")
-			if p.connectFleetAPI(ctx) {
-				return true
-			}
-			logger.Load(ctx).WarnContext(ctx, "FleetAPI mode failed, trying cloud mode")
-			p.mode = ModeCloud
-
-		case ModeCloud:
-			logger.Load(ctx).DebugContext(ctx, "trying cloud mode")
-			if p.connectCloud(ctx) {
-				return true
-			}
-			logger.Load(ctx).WarnContext(ctx, "cloud mode failed, trying local mode")
-			p.mode = ModeLocal
-		default:
-			// Remaining modes do not support this operation.
-		}
+	if !p.failover {
+		return p.connectStrict(ctx, retry)
 	}
 
-	return false
+	return p.connectWithFailover(ctx, retry)
 }
 
 // Close releases the active backend's resources and clears it, leaving p

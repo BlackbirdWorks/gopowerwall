@@ -28,19 +28,23 @@ const (
 // concurrent use by multiple goroutines. The zero value is not usable -
 // there is no exported way to build a Powerwall other than New.
 type Powerwall struct {
-	config       *Config
-	client       Client
-	poller       *poller.Poller
-	local        *local.Client
-	tedapi       *tedapi.PyPowerwallTEDAPI
-	cloud        *cloud.Client
-	fleetapi     *fleetapi.Client
-	mode         ConnectionMode
-	tedapiMode   TEDAPIMode
-	mu           sync.RWMutex
-	cloudmode    bool
-	fleetapiFlag bool
-	tedapiFlag   bool
+	config                 *Config
+	client                 Client
+	poller                 *poller.Poller
+	local                  *local.Client
+	tedapi                 *tedapi.PyPowerwallTEDAPI
+	cloud                  *cloud.Client
+	fleetapi               *fleetapi.Client
+	mode                   ConnectionMode
+	configuredMode         ConnectionMode
+	tedapiMode             TEDAPIMode
+	mu                     sync.RWMutex
+	cloudmode              bool
+	configuredCloudmode    bool
+	fleetapiFlag           bool
+	configuredFleetapiFlag bool
+	tedapiFlag             bool
+	failover               bool
 }
 
 // New builds a [Config] from [DefaultConfig] plus opts, validates it, and
@@ -92,6 +96,11 @@ func New(ctx context.Context, opts ...Option) (*Powerwall, error) {
 		pw.autoSelectMode(ctx, cfg)
 	}
 
+	pw.configuredMode = pw.mode
+	pw.configuredCloudmode = pw.cloudmode
+	pw.configuredFleetapiFlag = pw.fleetapiFlag
+	pw.failover = cfg.Failover
+
 	if err := ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -115,6 +124,14 @@ func (p *Powerwall) Mode() ConnectionMode {
 	defer p.mu.RUnlock()
 
 	return p.mode
+}
+
+// Failover reports whether automatic mode failover is enabled.
+func (p *Powerwall) Failover() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.failover
 }
 
 // TEDAPIMode returns the active [TEDAPIMode] sub-mode: [TEDAPIOff] unless a

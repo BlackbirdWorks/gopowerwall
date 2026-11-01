@@ -32,17 +32,23 @@ type BatteryBlock struct {
 
 // SystemStatus represents /api/system_status.
 type SystemStatus struct {
-	CommandSource              string         `json:"command_source"`
-	GridStatus                 string         `json:"grid_status"`
-	InverterType               string         `json:"inverter_type"`
-	GridFaults                 []GridFault    `json:"grid_faults"`
-	BatteryBlocks              []BatteryBlock `json:"battery_blocks"`
-	BatteryTargetPower         float64        `json:"battery_target_power"`
-	BatteryTargetReactivePower float64        `json:"battery_target_reactive_power"`
-	NominalFullPackEnergy      float64        `json:"nominal_full_pack_energy"`
-	NominalEnergyRemaining     float64        `json:"nominal_energy_remaining"`
-	MaxAvailChargePower        float64        `json:"max_avail_charge_power"`
-	MaxAvailDischargePower     float64        `json:"max_avail_discharge_power"`
+	MaxChargePower                 *float64       `json:"max_charge_power"`
+	MaxApparentPower               *float64       `json:"max_apparent_power"`
+	MaxDischargePower              *float64       `json:"max_discharge_power"`
+	GridStatus                     string         `json:"grid_status"`
+	InverterType                   string         `json:"inverter_type"`
+	CommandSource                  string         `json:"command_source"`
+	GridFaults                     []GridFault    `json:"grid_faults"`
+	BatteryBlocks                  []BatteryBlock `json:"battery_blocks"`
+	BatteryTargetReactivePower     float64        `json:"battery_target_reactive_power"`
+	MaxAvailChargePower            float64        `json:"max_avail_charge_power"`
+	MaxAvailDischargePower         float64        `json:"max_avail_discharge_power"`
+	InverterNominalUsablePower     float64        `json:"inverter_nominal_usable_power"`
+	InstantaneousMaxChargePower    float64        `json:"instantaneous_max_charge_power"`
+	InstantaneousMaxDischargePower float64        `json:"instantaneous_max_discharge_power"`
+	NominalEnergyRemaining         float64        `json:"nominal_energy_remaining"`
+	NominalFullPackEnergy          float64        `json:"nominal_full_pack_energy"`
+	BatteryTargetPower             float64        `json:"battery_target_power"`
 }
 
 // SOE represents /api/system_status/soe.

@@ -172,6 +172,24 @@ func (s *Server) handleVersionRoute(ctx context.Context, w http.ResponseWriter) 
 	})
 }
 
+const maskSecretString = "**********"
+
+func maskValue(val string) any {
+	if val == "" {
+		return val
+	}
+
+	return maskSecretString
+}
+
+func maskSecret(val string) any {
+	if val == "" {
+		return nil
+	}
+
+	return maskSecretString
+}
+
 func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 	s.statsMu.RLock()
 	now := time.Now()
@@ -211,6 +229,11 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 		siteName = orNil(sn, snErr)
 	}
 
+	var siteID any
+	if s.Config.SiteID != "" {
+		siteID = maskSecretString
+	}
+
 	stats := map[string]any{
 		"pypowerwall": fmt.Sprintf("%s Proxy %s", version.Version, Build),
 		"mode":        mode,
@@ -228,18 +251,9 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 		"cloudmode":   isCloud,
 		"fleetapi":    isFleetAPI,
 		"tedapi":      isTEDAPI,
-		"config": map[string]any{
-			"PW_BIND_ADDRESS":        s.Config.BindAddress,
-			"PW_HOST":                s.Config.Host,
-			"PW_EMAIL":               s.Config.Email,
-			"PW_TIMEZONE":            s.Config.Timezone,
-			"PW_PORT":                s.Config.Port,
-			"PW_STYLE":               s.Config.Style,
-			"PW_CACHE_EXPIRE":        s.Config.CacheExpire,
-			"PW_CACHE_TTL":           s.Config.CacheTTL,
-			"PW_NEG_SOLAR":           s.Config.NegSolar,
-			"PW_SITE_ZERO_THRESHOLD": s.Config.SiteZeroThreshold,
-		},
+		"siteid":      siteID,
+		"cf":          maskValue(s.Config.CacheFile),
+		"config":      buildStatsConfigMap(s.Config),
 	}
 
 	if s.Config.HealthCheckEnabled {
@@ -248,6 +262,42 @@ func (s *Server) handleStats(ctx context.Context, w http.ResponseWriter) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
+}
+
+func buildStatsConfigMap(c Config) map[string]any {
+	var fleetAPIHTTP any
+	if c.FleetAPIHTTP != "" {
+		fleetAPIHTTP = c.FleetAPIHTTP
+	}
+
+	return map[string]any{
+		"PW_BIND_ADDRESS":        c.BindAddress,
+		"PW_PASSWORD":            maskSecret(c.Password),
+		"PW_EMAIL":               maskValue(c.Email),
+		"PW_HOST":                c.Host,
+		"PW_TIMEZONE":            c.Timezone,
+		"PW_DEBUG":               c.DebugMode,
+		"PW_CACHE_EXPIRE":        c.CacheExpire,
+		"PW_TIMEOUT":             c.Timeout,
+		"PW_POOLMAXSIZE":         c.PoolMaxSize,
+		"PW_HTTPS":               c.HTTPSMode,
+		"PW_PORT":                c.Port,
+		"PW_STYLE":               c.Style,
+		"PW_SITEID":              maskValue(c.SiteID),
+		"PW_AUTH_PATH":           maskValue(c.AuthPath),
+		"PW_AUTH_MODE":           c.AuthMode,
+		"PW_CACHE_FILE":          maskValue(c.CacheFile),
+		"PW_CONTROL_SECRET":      maskSecret(c.ControlSecret),
+		"PW_GW_PWD":              maskSecret(c.GwPwd),
+		"PW_RSA_KEY_PATH":        maskValue(c.RsaKeyPath),
+		"PW_WIFI_HOST":           c.WifiHost,
+		"PW_FAILOVER":            c.Failover,
+		"PW_FLEETAPI_HTTP":       fleetAPIHTTP,
+		"PW_TEDAPI_API_VERSION":  c.TedapiAPIVersion,
+		"PW_TEDAPI_AUTH_MODE":    c.TedapiAuthMode,
+		"PW_NEG_SOLAR":           c.NegSolar,
+		"PW_SITE_ZERO_THRESHOLD": c.SiteZeroThreshold,
+	}
 }
 
 func (s *Server) handleHealth(_ context.Context, w http.ResponseWriter) {

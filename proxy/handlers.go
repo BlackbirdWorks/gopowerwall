@@ -148,7 +148,7 @@ func (s *Server) renderIndexHTML(ctx context.Context, content []byte) []byte {
 	replacer := strings.NewReplacer(
 		"{VERSION}", ver,
 		"{HASH}", hash,
-		"{EMAIL}", s.Config.Email,
+		"{EMAIL}", "",
 		"{STYLE}", assetPrefix+s.Config.Style,
 		"{ASSET_PREFIX}", assetPrefix,
 		"{API_BASE_URL}", s.Config.APIBaseURL+"api",
