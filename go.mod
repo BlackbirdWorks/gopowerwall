@@ -3,7 +3,7 @@ module github.com/blackbirdworks/gopowerwall
 go 1.27.3
 
 require (
-	github.com/alecthomas/kong v1.16.1
+	github.com/alecthomas/kong v1.17.0
 	github.com/andybalholm/brotli v1.2.7
 	github.com/google/renameio/v2 v2.0.2
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
