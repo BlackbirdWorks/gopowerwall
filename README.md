@@ -212,6 +212,7 @@ All configuration is via environment variables (`PW_*`), matching pypowerwall:
 | `PROXY_BASE_URL` | `/` | Base path prefix for reverse-proxy deployments |
 | `PW_SUPPRESS_NETWORK_ERRORS` | `false` | Suppress network error logging |
 | `PW_NETWORK_ERROR_RATE_LIMIT` | `5` | Rate limit for network error logs |
+| `PW_STREAM_INTERVAL` | `1s` (min `250ms`) | Gateway poll interval for `/stream`; a Go duration (`500ms`, `2s`) or bare milliseconds. Raised to `30s` in cloud/FleetAPI mode |
 | `PW_FAIL_FAST` | `false` | Serve cached data immediately once degraded, skipping a live retry |
 | `PW_GRACEFUL_DEGRADATION` | `true` | Serve last-known-good cached data when a live call fails |
 | `PW_HEALTH_CHECK` | `true` | Include connection health in `/health` and `/stats` |
@@ -225,6 +226,57 @@ All configuration is via environment variables (`PW_*`), matching pypowerwall:
 > from `localhost.crt`/`localhost.key` when set to `yes`. The `gopowerwall proxy`
 > subcommand does not currently read `PW_HTTPS` and always serves plain HTTP — use the
 > standalone binary if you need TLS termination in-process.
+
+### Server-sent events: `/stream`
+
+`GET /stream` pushes Powerwall data to clients as it changes, instead of having them poll
+`/aggregates` and `/soe` through the response caches.
+
+```bash
+curl -N http://localhost:8675/stream
+curl -N 'http://localhost:8675/stream?events=aggregates'   # filter: aggregates, soe (default both)
+```
+
+```text
+retry: 3000
+
+id: 1788950000123
+event: meta
+data: {"source":"local","interval_ms":1000}
+
+id: 1788950000456
+event: aggregates
+data: {"site":{...},"battery":{...},"load":{...},"solar":{...}}
+
+id: 1788950000456
+event: soe
+data: {"percentage":74.3}
+
+: ping
+```
+
+| Event | Data |
+|-------|------|
+| `aggregates` | Exactly the JSON body `/aggregates` returns |
+| `soe` | Exactly the JSON body `/soe` returns |
+| `meta` | `{"source":"local"\|"cloud","interval_ms":N}`, sent on connect and again when the stream recovers from an error. `"source":"cloud"` means a rate-limited cloud/FleetAPI source |
+| `error` | `{"error":"gateway fetch failed"}`, sent once when fetching starts failing (not repeated while it keeps failing) |
+
+- `id` is the gateway fetch time in unix milliseconds.
+- The current values are sent on connect; afterwards an event is sent only when its JSON changed.
+- While fetches fail, the last values are kept (nothing is sent for them), polling backs off
+  exponentially up to 10 s, and it resumes at the normal interval once the gateway answers.
+- A `: ping` comment is sent every 15 s; `retry: 3000` tells `EventSource` to reconnect after 3 s.
+- `/aggregates` and `/soe` responses carry `X-PW-Fetched-At` (unix milliseconds) giving the
+  age of the data. `GET /stream/meta` returns
+  `{"subscribers","interval_ms","last_fetch_unix_ms","last_error","source"}`.
+
+> [!NOTE]
+> **Gateway load.** A single shared poller fetches from the gateway once per
+> `PW_STREAM_INTERVAL` (default: 1 request per second per endpoint), bypassing but also
+> refilling the response caches. It runs **only while at least one client is connected**: it
+> starts with the first subscriber and stops after the last one disconnects, so an idle
+> proxy adds no gateway load. In cloud and FleetAPI modes the interval is never below 30 s.
 
 ## Library quickstart
 

@@ -32,7 +32,10 @@ const (
 func (s *Server) handleCoreAPIRoutes(ctx context.Context, w http.ResponseWriter, reqPath string) bool {
 	switch reqPath {
 	case "/aggregates", "/api/meters/aggregates":
-		msg, ok := s.cachedRouteHandler(ctx, "/aggregates", s.generateAggregates)
+		msg, ok := s.cachedRouteHandler(ctx, pathAggregates, s.generateAggregates)
+		if ok {
+			s.setFetchedHeader(w, pathAggregates)
+		}
 		s.respond(ctx, w, reqPath, "application/json", msg, ok)
 
 		return true
@@ -47,6 +50,10 @@ func (s *Server) handleCoreAPIRoutes(ctx context.Context, w http.ResponseWriter,
 			return str, nil
 		})
 		str, _ := raw.(string)
+		if ok && str != "" {
+			s.noteHandlerFetch(pathSOE)
+			s.setFetchedHeader(w, pathSOE)
+		}
 		s.respond(ctx, w, reqPath, "application/json", str, ok && str != "")
 
 		return true
@@ -88,6 +95,11 @@ func (s *Server) handleSystemManagementRoutes(ctx context.Context, w http.Respon
 	switch reqPath {
 	case "/stats":
 		s.handleStats(ctx, w)
+
+		return true
+
+	case "/stream/meta":
+		s.handleStreamMeta(ctx, w)
 
 		return true
 
