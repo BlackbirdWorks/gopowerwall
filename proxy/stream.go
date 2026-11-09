@@ -383,6 +383,34 @@ func (s *Server) streamTick(ctx context.Context, interval time.Duration, st *str
 	id := now.UnixMilli()
 	h := s.stream
 
+	if fr.err == nil {
+		h.mu.Lock()
+		h.lastFetch = now
+		h.lastErr = ""
+		h.mu.Unlock()
+		if st.failing {
+			st.failing = false
+			h.clearError()
+			// Tell clients the error cleared even if the data is unchanged.
+			h.publish(streamEvent{name: streamEventMeta, data: s.streamMetaJSON(), id: id})
+		}
+		st.failures = 0
+		st.lastMsg = ""
+	} else {
+		st.failures++
+		msg := "gateway fetch failed"
+		h.mu.Lock()
+		h.lastErr = msg
+		h.mu.Unlock()
+		if !st.failing || msg != st.lastMsg {
+			st.failing = true
+			st.lastMsg = msg
+			body, _ := json.Marshal(map[string]string{keyError: msg})
+			h.publish(streamEvent{name: streamEventError, data: body, id: id})
+		}
+		logger.Load(ctx).DebugContext(ctx, "stream fetch failed", "error", fr.err, "failures", st.failures)
+	}
+
 	if fr.agg != nil {
 		s.noteFetched(pathAggregates, now)
 		s.PerfCache.Set(pathAggregates, string(fr.agg))
@@ -398,36 +426,6 @@ func (s *Server) streamTick(ctx context.Context, interval time.Duration, st *str
 			h.publish(streamEvent{name: streamEventSOE, data: fr.soe, id: id})
 		}
 	}
-
-	if fr.err == nil {
-		h.mu.Lock()
-		h.lastFetch = now
-		h.lastErr = ""
-		h.mu.Unlock()
-		if st.failing {
-			st.failing = false
-			h.clearError()
-			// Tell clients the error cleared even if the data is unchanged.
-			h.publish(streamEvent{name: streamEventMeta, data: s.streamMetaJSON(), id: id})
-		}
-		st.failures = 0
-		st.lastMsg = ""
-
-		return
-	}
-
-	st.failures++
-	msg := "gateway fetch failed"
-	h.mu.Lock()
-	h.lastErr = msg
-	h.mu.Unlock()
-	if !st.failing || msg != st.lastMsg {
-		st.failing = true
-		st.lastMsg = msg
-		body, _ := json.Marshal(map[string]string{keyError: msg})
-		h.publish(streamEvent{name: streamEventError, data: body, id: id})
-	}
-	logger.Load(ctx).DebugContext(ctx, "stream fetch failed", "error", fr.err, "failures", st.failures)
 }
 
 // noteFetched records when an endpoint's data was last fetched from the

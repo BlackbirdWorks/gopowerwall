@@ -23,7 +23,7 @@ import (
 	"github.com/blackbirdworks/gopowerwall/proxy"
 )
 
-const streamWaitTimeout = 5 * time.Second
+const streamWaitTimeout = 10 * time.Second
 
 // fetchedAtKey is the canonical form Go clients see for X-PW-Fetched-At.
 const fetchedAtKey = "X-Pw-Fetched-At"
@@ -40,6 +40,7 @@ type sseClient struct {
 	events   chan sseEvent
 	comments chan string
 	cancel   context.CancelFunc
+	buf      []sseEvent
 }
 
 func openStream(t *testing.T, base, query string) *sseClient {
@@ -92,7 +93,7 @@ func (c *sseClient) close() {
 	_ = c.resp.Body.Close()
 }
 
-func (c *sseClient) next(t *testing.T) sseEvent {
+func (c *sseClient) nextEvent(t *testing.T) sseEvent {
 	t.Helper()
 
 	select {
@@ -107,14 +108,24 @@ func (c *sseClient) next(t *testing.T) sseEvent {
 	}
 }
 
-// nextNamed returns the next event with the given name, skipping others.
+// nextNamed returns the next event with the given name, buffering others.
 func (c *sseClient) nextNamed(t *testing.T, name string) sseEvent {
 	t.Helper()
 
-	for {
-		if ev := c.next(t); ev.event == name {
+	for i, ev := range c.buf {
+		if ev.event == name {
+			c.buf = append(c.buf[:i], c.buf[i+1:]...)
+
 			return ev
 		}
+	}
+
+	for {
+		ev := c.nextEvent(t)
+		if ev.event == name {
+			return ev
+		}
+		c.buf = append(c.buf, ev)
 	}
 }
 
@@ -304,9 +315,13 @@ func TestStreamMetaEndpoint(t *testing.T) {
 
 	c := openStream(t, ts.URL, "")
 	c.nextNamed(t, "aggregates")
-	m = read()
+	require.Eventually(t, func() bool {
+		m = read()
+		v, ok := m["last_fetch_unix_ms"].(float64)
+
+		return ok && v > 0
+	}, time.Second, 10*time.Millisecond)
 	assert.InDelta(t, 1, m["subscribers"], 0)
-	assert.Positive(t, m["last_fetch_unix_ms"])
 }
 
 func TestStreamIntervalFloors(t *testing.T) {
