@@ -152,6 +152,10 @@ type Server struct {
 	ClearTime     time.Time
 	pwGroup       singleflight.Group
 	routeGroup    singleflight.Group
+	streamGroup   singleflight.Group
+	stream        *streamHub
+	baseCtx       context.Context //nolint:containedctx // parent of the shared stream poller
+	fetched       map[string]time.Time
 	Health        *ConnectionHealth
 	compressor    *compress.Compressor
 	PW            *powerwall.Powerwall
@@ -169,6 +173,7 @@ type Server struct {
 	statsPost     int
 	statsGets     int
 	statsMu       sync.RWMutex
+	fetchedMu     sync.RWMutex
 }
 
 // NewServer creates a new Server instance.
@@ -234,6 +239,9 @@ func NewServer(ctx context.Context, cfg Config, pw *powerwall.Powerwall) *Server
 		StartTime:     now,
 		ClearTime:     now,
 		statsURI:      make(map[string]int),
+		stream:        newStreamHub(),
+		baseCtx:       context.WithoutCancel(ctx),
+		fetched:       make(map[string]time.Time),
 	}
 }
 
@@ -337,6 +345,7 @@ func (s *Server) fetchRoute(
 	if s.Config.CacheExpire > 0 {
 		s.PerfCache.Set(endpoint, val)
 	}
+	s.noteFetched(endpoint, time.Now())
 
 	return val, nil
 }
@@ -448,6 +457,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Close releases resources held by the Server.
 func (s *Server) Close(ctx context.Context) error {
+	s.stopStream()
 	if s.PerfCache != nil {
 		s.PerfCache.Close()
 	}

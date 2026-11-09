@@ -37,6 +37,7 @@ type Config struct {
 	BindAddress           string
 	InfluxOrg             string
 	InfluxToken           string
+	StreamInterval        time.Duration
 	Timeout               int
 	FirmwareCheckInterval int
 	Port                  int
@@ -98,6 +99,30 @@ func getEnvBool(key string, defaultVal bool) bool {
 	}
 
 	return defaultVal
+}
+
+// getEnvStreamInterval parses PW_STREAM_INTERVAL as a Go duration ("500ms",
+// "2s") or a bare integer number of milliseconds, clamped to
+// [MinStreamInterval]. Unset or invalid values yield [DefaultStreamInterval].
+func getEnvStreamInterval(key string) time.Duration {
+	val, ok := os.LookupEnv(key)
+	if !ok {
+		return DefaultStreamInterval
+	}
+	val = strings.TrimSpace(val)
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		ms, convErr := strconv.Atoi(val)
+		if convErr != nil || ms <= 0 {
+			return DefaultStreamInterval
+		}
+		d = time.Duration(ms) * time.Millisecond
+	}
+	if d <= 0 {
+		return DefaultStreamInterval
+	}
+
+	return max(d, MinStreamInterval)
 }
 
 // DefaultConfig loads Config from environment variables.
@@ -162,6 +187,7 @@ func DefaultConfig() Config {
 		InfluxBucket:          getEnvFirst("INFLUX_BUCKET", "INFLUXDB_BUCKET"),
 		InfluxSiteName:        getEnv("INFLUX_SITE_NAME", ""),
 		InfluxInterval:        getEnvInt("INFLUX_INTERVAL", defaultInfluxInterval),
+		StreamInterval:        getEnvStreamInterval("PW_STREAM_INTERVAL"),
 	}
 
 	if cfg.TedapiProbeInterval < minTedapiProbeInterval {

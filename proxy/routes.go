@@ -22,6 +22,8 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, reqPath strin
 	}
 
 	switch {
+	case reqPath == "/stream":
+		s.handleStream(w, r)
 	case strings.HasPrefix(reqPath, "/csv"):
 		s.handleCSVRoute(w, r, reqPath)
 	case strings.HasPrefix(reqPath, "/tedapi"):
