@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/alecthomas/kong v1.17.0
-	github.com/andybalholm/brotli v1.2.8
+	github.com/andybalholm/brotli v1.3.0
 	github.com/google/renameio/v2 v2.0.2
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
 	github.com/jellydator/ttlcache/v3 v3.4.1
