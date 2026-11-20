@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2324,6 +2325,511 @@ func TestWiFiV1rFallbackRoutingAndReady(t *testing.T) {
 			} else {
 				require.ErrorIs(t, dispErr, models.ErrUnsupported)
 			}
+		})
+	}
+}
+
+func TestBackendAggregatesGeneratorSection(t *testing.T) {
+	t.Parallel()
+
+	statusWithGenerator := `{"system":{"time":"2026-11-09T16:23:18Z"},"control":{"meterAggregates":[` +
+		`{"location":"SITE","realPowerW":-15.6},` +
+		`{"location":"LOAD","realPowerW":982.4},` +
+		`{"location":"SOLAR","realPowerW":2099.5},` +
+		`{"location":"BATTERY","realPowerW":-1120.0},` +
+		`{"location":"GENERATOR","realPowerW":1.73}` +
+		`]}}`
+
+	statusWithoutGenerator := `{"system":{"time":"2026-11-09T16:23:18Z"},"control":{"meterAggregates":[` +
+		`{"location":"SITE","realPowerW":-15.6},` +
+		`{"location":"LOAD","realPowerW":982.4},` +
+		`{"location":"SOLAR","realPowerW":2099.5},` +
+		`{"location":"BATTERY","realPowerW":-1120.0}` +
+		`]}}`
+
+	type testCase struct {
+		check      func(t *testing.T, m map[string]any)
+		name       string
+		configJSON string
+		queryJSON  string
+	}
+
+	cases := []testCase{
+		{
+			name:       "config declaring generator meter populates generator section",
+			configJSON: `{"vin":"GW--123","meters":[{"location":"site"},{"location":"generator"}]}`,
+			queryJSON:  statusWithGenerator,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				gen, ok := m["generator"].(map[string]any)
+				require.True(t, ok, "expected generator section")
+				assert.InDelta(t, 1.73, gen["instant_power"], 0.001)
+				assert.Equal(t, "2026-11-09T16:23:18Z", gen["last_communication_time"])
+				assert.Equal(t, m["site"].(map[string]any)["last_communication_time"], gen["last_communication_time"])
+				assert.Equal(t, 1, gen["num_meters_aggregated"])
+				assert.InDelta(t, 0.0, gen["energy_exported"], 0.001)
+				assert.InDelta(t, 0.0, gen["energy_imported"], 0.001)
+				assert.Equal(t, "generator: power from meterAggregates, no voltage/current", gen["disclaimer"])
+				assert.InDelta(t, 2099.5, m["solar"].(map[string]any)["instant_power"], 0.001)
+			},
+		},
+		{
+			name:       "generator location check is case-insensitive",
+			configJSON: `{"vin":"GW--123","meters":[{"location":"GENERATOR"}]}`,
+			queryJSON:  statusWithGenerator,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				gen, ok := m["generator"].(map[string]any)
+				require.True(t, ok)
+				assert.InDelta(t, 1.73, gen["instant_power"], 0.001)
+			},
+		},
+		{
+			name:       "config without generator meter omits generator section",
+			configJSON: `{"vin":"GW--123","meters":[{"location":"site"},{"location":"solar"}]}`,
+			queryJSON:  statusWithGenerator,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.NotContains(t, m, "generator")
+			},
+		},
+		{
+			name:       "config with non-map meters entries omits generator section",
+			configJSON: `{"vin":"GW--123","meters":["generator",null]}`,
+			queryJSON:  statusWithGenerator,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				assert.NotContains(t, m, "generator")
+			},
+		},
+		{
+			name:       "missing GENERATOR entry in meterAggregates keeps section with nil instant_power",
+			configJSON: `{"vin":"GW--123","meters":[{"location":"generator"}]}`,
+			queryJSON:  statusWithoutGenerator,
+			check: func(t *testing.T, m map[string]any) {
+				t.Helper()
+				gen, ok := m["generator"].(map[string]any)
+				require.True(t, ok)
+				assert.Contains(t, gen, "instant_power")
+				assert.Nil(t, gen["instant_power"])
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			host, _ := newLegacyTEDAPIServer(t, tc.configJSON, tc.queryJSON)
+			p := newLegacyBackend(host)
+
+			res, err := p.Poll(t.Context(), "/api/meters/aggregates", false, false, false)
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
+			tc.check(t, m)
+		})
+	}
+}
+
+func TestBackendAggregatesNativeEnergyRetention(t *testing.T) {
+	t.Parallel()
+
+	nativePayload := `{` +
+		`"site":{"instant_power":10,"energy_exported":1469391,"energy_imported":4902666.25},` +
+		`"battery":{"instant_power":20,"energy_exported":4712126,"energy_imported":4803385},` +
+		`"load":{"instant_power":30,"energy_exported":0,"energy_imported":11679089},` +
+		`"solar":{"instant_power":40,"energy_exported":8337073,"energy_imported":0},` +
+		`"generator":{"instant_power":1.67,"energy_exported":271310.88,"energy_imported":6768.85}` +
+		`}`
+
+	configWithGen := `{"vin":"GW--123","meters":[{"location":"site"},{"location":"generator"}]}`
+	configWithoutGen := `{"vin":"GW--123","meters":[{"location":"site"}]}`
+	queryWithGen := `{"system":{"time":"2026-11-09T16:23:18Z"},"control":{"meterAggregates":[` +
+		`{"location":"SITE","realPowerW":-15.6},` +
+		`{"location":"LOAD","realPowerW":982.4},` +
+		`{"location":"SOLAR","realPowerW":2099.5},` +
+		`{"location":"BATTERY","realPowerW":-1120.0},` +
+		`{"location":"GENERATOR","realPowerW":1.73}` +
+		`]}}`
+
+	type testCase struct {
+		check      func(t *testing.T, after map[string]any)
+		name       string
+		configJSON string
+	}
+
+	cases := []testCase{
+		{
+			name:       "failed v1r aggregates fetch retains prior lifetime energy including generator",
+			configJSON: configWithGen,
+			check: func(t *testing.T, after map[string]any) {
+				t.Helper()
+				site := after["site"].(map[string]any)
+				assert.InDelta(t, 4902666.25, site["energy_imported"], 0.001)
+				assert.InDelta(t, 1469391.0, site["energy_exported"], 0.001)
+				assert.Equal(t, "energy from gateway local API", site["disclaimer"])
+
+				gen := after["generator"].(map[string]any)
+				assert.InDelta(t, 1.73, gen["instant_power"], 0.001)
+				assert.InDelta(t, 271310.88, gen["energy_exported"], 0.001)
+				assert.InDelta(t, 6768.85, gen["energy_imported"], 0.001)
+				assert.Equal(
+					t,
+					"generator: power from meterAggregates, no voltage/current; energy from gateway local API",
+					gen["disclaimer"],
+				)
+			},
+		},
+		{
+			name:       "native generator energy ignored when config lacks generator meter",
+			configJSON: configWithoutGen,
+			check: func(t *testing.T, after map[string]any) {
+				t.Helper()
+				assert.NotContains(t, after, "generator")
+				site := after["site"].(map[string]any)
+				assert.InDelta(t, 4902666.25, site["energy_imported"], 0.001)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var failAggregates atomic.Bool
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/din":
+					_, _ = w.Write([]byte("din-1"))
+				case "/api/meters/aggregates":
+					if failAggregates.Load() {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					_, _ = w.Write([]byte(nativePayload))
+				case "/api/system_status":
+					w.WriteHeader(http.StatusNotFound)
+				case "/tedapi/v1":
+					env := readLegacyMessage(t, r)
+					if env.GetConfig() != nil {
+						_, _ = w.Write(buildLegacyConfigResponse(t, tc.configJSON))
+
+						return
+					}
+					if env.GetPayload() != nil {
+						_, _ = w.Write(buildLegacyQueryResponse(t, queryWithGen))
+					}
+				}
+			}
+			srv := newTLSServer(t, handler)
+			p := newV1rBackend(t, hostOf(srv))
+
+			before, err := p.Poll(t.Context(), "/api/meters/aggregates", false, false, false)
+			require.NoError(t, err)
+			require.NotNil(t, before)
+
+			failAggregates.Store(true)
+			after, err := p.Poll(t.Context(), "/api/meters/aggregates", true, false, false)
+			require.NoError(t, err)
+			m, ok := after.(map[string]any)
+			require.True(t, ok)
+			tc.check(t, m)
+		})
+	}
+}
+
+func TestClientGetNativeMetersAggregates(t *testing.T) {
+	t.Parallel()
+
+	validNative := `{"site":{"energy_exported":10,"energy_imported":20},"battery":{},"load":{},"solar":{}}`
+
+	type testCase struct {
+		run  func(t *testing.T, c *tedapi.Client, calls *atomic.Int32, fail *atomic.Bool)
+		name string
+	}
+
+	cases := []testCase{
+		{
+			name: "caches valid native response",
+			run: func(t *testing.T, c *tedapi.Client, calls *atomic.Int32, _ *atomic.Bool) {
+				t.Helper()
+				first := c.GetNativeMetersAggregates(t.Context(), false)
+				require.NotNil(t, first)
+				second := c.GetNativeMetersAggregates(t.Context(), false)
+				require.Equal(t, first, second)
+				assert.Equal(t, int32(1), calls.Load())
+			},
+		},
+		{
+			name: "unavailable endpoint backs off and returns nil",
+			run: func(t *testing.T, c *tedapi.Client, calls *atomic.Int32, fail *atomic.Bool) {
+				t.Helper()
+				fail.Store(true)
+				assert.Nil(t, c.GetNativeMetersAggregates(t.Context(), false))
+				assert.Nil(t, c.GetNativeMetersAggregates(t.Context(), false))
+				assert.Equal(t, int32(1), calls.Load())
+			},
+		},
+		{
+			name: "failed fetch after success serves last good payload and backs off",
+			run: func(t *testing.T, c *tedapi.Client, calls *atomic.Int32, fail *atomic.Bool) {
+				t.Helper()
+				first := c.GetNativeMetersAggregates(t.Context(), false)
+				require.NotNil(t, first)
+				time.Sleep(35 * time.Millisecond)
+
+				fail.Store(true)
+				second := c.GetNativeMetersAggregates(t.Context(), false)
+				require.Equal(t, first, second)
+				assert.Equal(t, int32(2), calls.Load())
+
+				third := c.GetNativeMetersAggregates(t.Context(), false)
+				require.Equal(t, first, third)
+				assert.Equal(t, int32(2), calls.Load())
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls atomic.Int32
+			var fail atomic.Bool
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/din":
+					_, _ = w.Write([]byte("din-1"))
+				case "/api/meters/aggregates":
+					calls.Add(1)
+					if fail.Load() {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					_, _ = w.Write([]byte(validNative))
+				}
+			}
+			srv := newTLSServer(t, handler)
+			host := hostOf(srv)
+			v1r := newV1r(t, host)
+			c := tedapi.NewClient(
+				host, testGWPassword, clientTimeout, 20*time.Millisecond, clientPoolSize,
+				models.TEDAPIVersion2024_06, models.AuthModeCookie,
+			)
+			c.SetV1rTransport(v1r)
+			t.Cleanup(c.Close)
+
+			tc.run(t, c, &calls, &fail)
+		})
+	}
+}
+
+func TestBackendStatusNativeUptimeFallback(t *testing.T) {
+	t.Parallel()
+
+	nativeStatus := `{"din":"GW--123","start_time":"2026-10-29 01:50:22 +0800",` +
+		`"up_time_seconds":"279h50m53.630302849s","device_type":"hec","sync_type":"v1"}`
+	syncUptimeQuery := `{"esCan":{"bus":{"SYNC":{"packageSerialNumber":"SN-SYNC-1"}}},` +
+		`"components":{"msa":[{"serialNumber":"SN-SYNC-1","signals":[{"name":"SYNC_Uptime","value":3600000}]}]},` +
+		`"system":{"time":"2026-09-24T21:28:16-07:00"}}`
+	nullUptimeQuery := `{"esCan":{"bus":{"SYNC":{"packageSerialNumber":"SN-SYNC-1"}}},` +
+		`"components":{"msa":[{"serialNumber":"SN-SYNC-1","signals":[{"name":"SYNC_Uptime","value":null}]}]},` +
+		`"system":{"time":"2026-09-24T21:28:16-07:00"}}`
+
+	type testCase struct {
+		wantStart       any
+		wantUptime      any
+		name            string
+		sysStatusJSON   string
+		nativeStatus    string
+		nativeStatusErr bool
+		wantStatusCalls int32
+	}
+
+	cases := []testCase{
+		{
+			name:            "SYNC_Uptime usable skips native /api/status",
+			sysStatusJSON:   syncUptimeQuery,
+			nativeStatus:    nativeStatus,
+			wantStart:       "2026-09-24 20:28:16 -0700",
+			wantUptime:      "1h0m0s",
+			wantStatusCalls: 0,
+		},
+		{
+			name:            "null SYNC_Uptime falls back to native /api/status verbatim",
+			sysStatusJSON:   nullUptimeQuery,
+			nativeStatus:    nativeStatus,
+			wantStart:       "2026-10-29 01:50:22 +0800",
+			wantUptime:      "279h50m53.630302849s",
+			wantStatusCalls: 1,
+		},
+		{
+			name:            "null SYNC_Uptime and unavailable native /api/status keeps nil",
+			sysStatusJSON:   nullUptimeQuery,
+			nativeStatusErr: true,
+			wantStart:       nil,
+			wantUptime:      nil,
+			wantStatusCalls: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var statusCalls atomic.Int32
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/din":
+					_, _ = w.Write([]byte("din-1"))
+				case "/api/system_status":
+					_, _ = w.Write([]byte(tc.sysStatusJSON))
+				case "/api/status":
+					statusCalls.Add(1)
+					if tc.nativeStatusErr {
+						w.WriteHeader(http.StatusNotFound)
+
+						return
+					}
+					_, _ = w.Write([]byte(tc.nativeStatus))
+				case "/tedapi/v1":
+					env := readLegacyMessage(t, r)
+					if env.GetConfig() != nil {
+						_, _ = w.Write(buildLegacyConfigResponse(t, `{"vin":"GW--123","version":"26.34.2"}`))
+
+						return
+					}
+					if env.GetPayload() != nil {
+						_, _ = w.Write(buildLegacyQueryResponse(t, tc.sysStatusJSON))
+					}
+				}
+			}
+			srv := newTLSServer(t, handler)
+			p := newV1rBackend(t, hostOf(srv))
+
+			res, err := p.Poll(t.Context(), "/api/status", false, false, false)
+			require.NoError(t, err)
+			m, ok := res.(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantStart, m["start_time"])
+			assert.Equal(t, tc.wantUptime, m["up_time_seconds"])
+			assert.Nil(t, m["device_type"])
+			assert.Equal(t, "unknown", m["sync_type"])
+			assert.Equal(t, tc.wantStatusCalls, statusCalls.Load())
+		})
+	}
+}
+
+func TestClientGetNativeStatus(t *testing.T) {
+	t.Parallel()
+
+	validStatus := `{"start_time":"2026-10-29 01:50:22 +0800","up_time_seconds":"279h50m53s"}`
+	validAgg := `{"site":{},"battery":{},"load":{},"solar":{}}`
+
+	type testCase struct {
+		run  func(t *testing.T, c *tedapi.Client, statusCalls *atomic.Int32, statusBody *atomic.Value)
+		name string
+	}
+
+	cases := []testCase{
+		{
+			name: "caches valid native status",
+			run: func(t *testing.T, c *tedapi.Client, statusCalls *atomic.Int32, _ *atomic.Value) {
+				t.Helper()
+				first := c.GetNativeStatus(t.Context(), false)
+				require.NotNil(t, first)
+				second := c.GetNativeStatus(t.Context(), false)
+				require.Equal(t, first, second)
+				assert.Equal(t, int32(1), statusCalls.Load())
+			},
+		},
+		{
+			name: "missing or non-string uptime fields count as unavailable and back off",
+			run: func(t *testing.T, c *tedapi.Client, statusCalls *atomic.Int32, statusBody *atomic.Value) {
+				t.Helper()
+				statusBody.Store(`{"start_time":12345,"up_time_seconds":"1h0m0s"}`)
+				assert.Nil(t, c.GetNativeStatus(t.Context(), false))
+				assert.Nil(t, c.GetNativeStatus(t.Context(), false))
+				assert.Equal(t, int32(1), statusCalls.Load())
+			},
+		},
+		{
+			name: "failed fetch after success serves last good status and backs off",
+			run: func(t *testing.T, c *tedapi.Client, statusCalls *atomic.Int32, statusBody *atomic.Value) {
+				t.Helper()
+				first := c.GetNativeStatus(t.Context(), false)
+				require.NotNil(t, first)
+				time.Sleep(35 * time.Millisecond)
+
+				statusBody.Store("ERR")
+				second := c.GetNativeStatus(t.Context(), false)
+				require.Equal(t, first, second)
+				assert.Equal(t, int32(2), statusCalls.Load())
+
+				third := c.GetNativeStatus(t.Context(), false)
+				require.Equal(t, first, third)
+				assert.Equal(t, int32(2), statusCalls.Load())
+			},
+		},
+		{
+			name: "status backoff is independent of meters aggregates backoff",
+			run: func(t *testing.T, c *tedapi.Client, _ *atomic.Int32, statusBody *atomic.Value) {
+				t.Helper()
+				statusBody.Store("ERR")
+				assert.Nil(t, c.GetNativeStatus(t.Context(), false))
+				agg := c.GetNativeMetersAggregates(t.Context(), false)
+				require.NotNil(t, agg)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var statusCalls atomic.Int32
+			var statusBody atomic.Value
+			statusBody.Store(validStatus)
+
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					_, _ = w.Write([]byte(`{"token":"tok"}`))
+				case "/tedapi/din":
+					_, _ = w.Write([]byte("din-1"))
+				case "/api/status":
+					statusCalls.Add(1)
+					body, _ := statusBody.Load().(string)
+					if body == "ERR" {
+						w.WriteHeader(http.StatusInternalServerError)
+
+						return
+					}
+					_, _ = w.Write([]byte(body))
+				case "/api/meters/aggregates":
+					_, _ = w.Write([]byte(validAgg))
+				}
+			}
+			srv := newTLSServer(t, handler)
+			host := hostOf(srv)
+			v1r := newV1r(t, host)
+			c := tedapi.NewClient(
+				host, testGWPassword, clientTimeout, 20*time.Millisecond, clientPoolSize,
+				models.TEDAPIVersion2024_06, models.AuthModeCookie,
+			)
+			c.SetV1rTransport(v1r)
+			t.Cleanup(c.Close)
+
+			tc.run(t, c, &statusCalls, &statusBody)
 		})
 	}
 }

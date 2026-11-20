@@ -111,6 +111,32 @@ func MetersAggregatesStub() map[string]any {
 	}
 }
 
+// MetersAggregatesGeneratorStub returns a fresh copy of the generator section
+// template for /api/meters/aggregates, added only when config.json declares a
+// generator meter.
+func MetersAggregatesGeneratorStub() map[string]any {
+	return map[string]any{
+		keyLastCommTime:         nil,
+		keyInstantPower:         nil,
+		keyInstantReactivePower: 0.0,
+		keyInstantApparentPower: 0.0,
+		keyFrequency:            0.0,
+		keyEnergyExported:       0.0,
+		keyEnergyImported:       0.0,
+		keyInstantAvgVoltage:    0.0,
+		keyInstantAvgCurrent:    0.0,
+		keyIACurrent:            0.0,
+		keyIBCurrent:            0.0,
+		keyICCurrent:            0.0,
+		keyLastPhaseVoltageTime: zeroTimeRFC3339,
+		keyLastPhasePowerTime:   zeroTimeRFC3339,
+		keyLastPhaseEnergyTime:  zeroTimeRFC3339,
+		keyTimeout:              meterTimeout1500ms,
+		keyNumMetersAggregated:  1,
+		keyInstantTotalCurrent:  nil,
+	}
+}
+
 // SystemStatusStub returns a fresh copy of the /api/system_status template.
 func SystemStatusStub() map[string]any {
 	return map[string]any{

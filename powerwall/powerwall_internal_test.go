@@ -208,6 +208,41 @@ func TestIntOrZero(t *testing.T) {
 	}
 }
 
+func TestLookupIntPtr(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		m       map[string]any
+		name    string
+		key     string
+		wantVal int
+		wantNil bool
+	}
+
+	for _, tc := range []testCase{
+		{name: "missing key", m: map[string]any{}, key: "flag", wantNil: true},
+		{name: "nil value", m: map[string]any{"flag": nil}, key: "flag", wantNil: true},
+		{name: "bool true", m: map[string]any{"flag": true}, key: "flag", wantVal: 1},
+		{name: "bool false", m: map[string]any{"flag": false}, key: "flag", wantVal: 0},
+		{name: "int value", m: map[string]any{"flag": 7}, key: "flag", wantVal: 7},
+		{name: "float64 value", m: map[string]any{"flag": 1.0}, key: "flag", wantVal: 1},
+		{name: "non-numeric string", m: map[string]any{"flag": "abc"}, key: "flag", wantVal: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := lookupIntPtr(tc.m, tc.key)
+			if tc.wantNil {
+				assert.Nil(t, got)
+
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, tc.wantVal, *got)
+		})
+	}
+}
+
 func TestLookupFloatPtr(t *testing.T) {
 	t.Parallel()
 

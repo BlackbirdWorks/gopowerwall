@@ -66,32 +66,43 @@ const (
 	sigPodAvailableChargePower = "POD_available_charge_power"
 	sigPodAvailableDischgPower = "POD_available_dischg_power"
 
+	meterSite      = "site"
+	meterSolar     = "solar"
+	meterBattery   = "battery"
+	meterLoad      = "load"
+	meterGenerator = "generator"
+
 	wifiV1rReadyTTL = 60 * time.Second
+	nativeFailRetry = 300 * time.Second
 )
 
 // Client connects to the Tesla TEDAPI interface over WiFi or LAN.
 type Client struct {
-	configTime        time.Time
-	wifiV1rReadyUntil time.Time
-	v1r               *TEDAPIv1r
-	wifiV1r           *TEDAPIv1r
-	cache             *cache.ResponseCache
-	client            *http.Client
-	configCache       map[string]any
-	host              string
-	gwPwd             string
-	din               string
-	apiVersion        models.TEDAPIApiVersion
-	authMode          models.AuthMode
-	configHash        []byte
-	poolMaxSize       int
-	configTTL         time.Duration
-	timeout           time.Duration
-	mu                sync.Mutex
-	pw3               bool
-	failover          bool
-	wifiV1rFallback   bool
-	lanFailed         bool
+	configTime            time.Time
+	wifiV1rReadyUntil     time.Time
+	nativeFailUntil       time.Time
+	nativeStatusFailUntil time.Time
+	v1r                   *TEDAPIv1r
+	wifiV1r               *TEDAPIv1r
+	cache                 *cache.ResponseCache
+	client                *http.Client
+	configCache           map[string]any
+	lastNativeAggregates  map[string]any
+	lastNativeStatus      map[string]any
+	host                  string
+	gwPwd                 string
+	din                   string
+	apiVersion            models.TEDAPIApiVersion
+	authMode              models.AuthMode
+	configHash            []byte
+	poolMaxSize           int
+	configTTL             time.Duration
+	timeout               time.Duration
+	mu                    sync.Mutex
+	pw3                   bool
+	failover              bool
+	wifiV1rFallback       bool
+	lanFailed             bool
 }
 
 // NewClient creates a new Client instance.
@@ -743,6 +754,135 @@ func (c *Client) GetFirmwareVersion(ctx context.Context, force bool) string {
 	return unknownStr
 }
 
+func isValidNativeStatus(d map[string]any) bool {
+	for _, k := range []string{"start_time", "up_time_seconds"} {
+		s, ok := d[k].(string)
+		if !ok || s == "" {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isValidNativeAggregates(d map[string]any) bool {
+	for _, s := range []string{meterSite, meterBattery, meterLoad, meterSolar} {
+		if _, ok := d[s].(map[string]any); !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (c *Client) isNativeBackedOff(failUntil *time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return time.Now().Before(*failUntil)
+}
+
+func (c *Client) checkNativeCache(
+	key string,
+	failUntil *time.Time,
+	lastGood *map[string]any,
+	force bool,
+) (map[string]any, bool) {
+	if !force {
+		if val, found, _ := c.cache.Get(key); found {
+			if m, ok := val.(map[string]any); ok {
+				return m, true
+			}
+		}
+		c.mu.Lock()
+		backedOff := time.Now().Before(*failUntil)
+		cached := *lastGood
+		c.mu.Unlock()
+		if backedOff {
+			return cached, true
+		}
+	}
+
+	return nil, false
+}
+
+func (c *Client) recordNativeSuccess(
+	key string,
+	data map[string]any,
+	failUntil *time.Time,
+	lastGood *map[string]any,
+) {
+	c.cache.Set(key, data)
+	c.mu.Lock()
+	*lastGood = data
+	*failUntil = time.Time{}
+	c.mu.Unlock()
+}
+
+func (c *Client) recordNativeFailure(failUntil *time.Time, lastGood *map[string]any) map[string]any {
+	c.mu.Lock()
+	*failUntil = time.Now().Add(nativeFailRetry)
+	cached := *lastGood
+	c.mu.Unlock()
+
+	return cached
+}
+
+func (c *Client) getNativeCached(
+	ctx context.Context,
+	key, path string,
+	isValid func(map[string]any) bool,
+	failUntil *time.Time,
+	lastGood *map[string]any,
+	force bool,
+) map[string]any {
+	if cached, ok := c.checkNativeCache(key, failUntil, lastGood, force); ok {
+		return cached
+	}
+
+	res, err := c.APIGet(ctx, path)
+	if err == nil {
+		if m, ok := res.(map[string]any); ok && isValid(m) {
+			c.recordNativeSuccess(key, m, failUntil, lastGood)
+
+			return m
+		}
+	}
+
+	return c.recordNativeFailure(failUntil, lastGood)
+}
+
+// GetNativeStatus fetches the gateway's native /api/status payload via the
+// active signed transport, caching valid responses, backing off for 300s on
+// unavailable/invalid payloads, and retaining the last good payload on failure.
+func (c *Client) GetNativeStatus(ctx context.Context, force bool) map[string]any {
+	return c.getNativeCached(
+		ctx,
+		"native_status",
+		"/api/status",
+		isValidNativeStatus,
+		&c.nativeStatusFailUntil,
+		&c.lastNativeStatus,
+		force,
+	)
+}
+
+// GetNativeMetersAggregates fetches the gateway's native /api/meters/aggregates
+// payload via the active signed transport, caching valid responses, backing off
+// for 300s on unavailable/invalid payloads, and serving the last good payload on
+// failure so lifetime energy counters never drop to zero for a poll.
+func (c *Client) GetNativeMetersAggregates(ctx context.Context, force bool) map[string]any {
+	return c.getNativeCached(
+		ctx,
+		"native_meters_aggregates",
+		"/api/meters/aggregates",
+		isValidNativeAggregates,
+		&c.nativeFailUntil,
+		&c.lastNativeAggregates,
+		force,
+	)
+}
+
 // ── PyPowerwallTEDAPI Facade Backend ───────────────────────────────────────
 
 type gatewayUptimeInfo struct {
@@ -983,25 +1123,141 @@ func setInstantPower(stub map[string]any, key string, power any) {
 	}
 }
 
-func (p *PyPowerwallTEDAPI) getAPIMetersAggregates(ctx context.Context, force bool) (any, error) {
-	stub := stubs.MetersAggregatesStub()
-
-	// If v1r is active, attempt native call through the selected v1r read transport
-	if p.v1r != nil {
-		res, err := p.client.APIGet(ctx, "/api/meters/aggregates")
-		if err == nil && res != nil {
-			return res, nil
+func hasGeneratorMeter(cfg map[string]any) bool {
+	meters, ok := cfg["meters"].([]any)
+	if !ok {
+		return false
+	}
+	for _, entry := range meters {
+		m, okMap := entry.(map[string]any)
+		if !okMap {
+			continue
+		}
+		if loc, okLoc := m["location"].(string); okLoc && strings.EqualFold(loc, meterGenerator) {
+			return true
 		}
 	}
+
+	return false
+}
+
+func extractStatusPower(status map[string]any, location string) any {
+	if status == nil {
+		return nil
+	}
+	if pwr := lookup.Lookup(status, "meters", strings.ToLower(location), "instant_power"); pwr != nil {
+		return pwr
+	}
+	aggList, ok := lookup.Lookup(status, "control", "meterAggregates").([]any)
+	if !ok {
+		return nil
+	}
+	for _, item := range aggList {
+		m, okMap := item.(map[string]any)
+		if !okMap {
+			continue
+		}
+		if loc, okLoc := m["location"].(string); okLoc && strings.EqualFold(loc, location) {
+			return m["realPowerW"]
+		}
+	}
+
+	return nil
+}
+
+func toNumericFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
+}
+
+func mergeSectionEnergy(stubSec, nativeSec map[string]any) {
+	merged := false
+	for _, field := range []string{"energy_exported", "energy_imported"} {
+		if val, ok := toNumericFloat(nativeSec[field]); ok {
+			stubSec[field] = val
+			merged = true
+		}
+	}
+	if !merged {
+		return
+	}
+	note := "energy from gateway local API"
+	disclaimer := note
+	if existing, okE := stubSec["disclaimer"].(string); okE && existing != "" {
+		disclaimer = existing + "; " + note
+	}
+	stubSec["disclaimer"] = disclaimer
+}
+
+func mergeNativeAggregatesEnergy(stub, native map[string]any) {
+	if native == nil {
+		return
+	}
+	for _, section := range []string{meterSite, meterBattery, meterLoad, meterSolar, meterGenerator} {
+		stubSec, okStub := stub[section].(map[string]any)
+		nativeSec, okNat := native[section].(map[string]any)
+		if !okStub || !okNat {
+			continue
+		}
+		mergeSectionEnergy(stubSec, nativeSec)
+	}
+}
+
+func (p *PyPowerwallTEDAPI) getAPIMetersAggregates(ctx context.Context, force bool) (any, error) {
+	// If v1r is active, attempt native call through the selected v1r read transport
+	if p.v1r != nil && (force || !p.client.isNativeBackedOff(&p.client.nativeFailUntil)) {
+		res, err := p.client.APIGet(ctx, "/api/meters/aggregates")
+		if err == nil && res != nil {
+			if m, ok := res.(map[string]any); ok && isValidNativeAggregates(m) {
+				p.client.recordNativeSuccess(
+					"native_meters_aggregates", m,
+					&p.client.nativeFailUntil, &p.client.lastNativeAggregates,
+				)
+			}
+
+			return res, nil
+		}
+		p.client.recordNativeFailure(&p.client.nativeFailUntil, &p.client.lastNativeAggregates)
+	}
+
+	stub := stubs.MetersAggregatesStub()
 
 	// Calculate from status
 	status := p.client.GetStatus(ctx, force)
 	if status != nil {
-		setInstantPower(stub, "site", lookup.Lookup(status, "meters", "site", "instant_power"))
-		setInstantPower(stub, "solar", lookup.Lookup(status, "meters", "solar", "instant_power"))
-		setInstantPower(stub, "battery", lookup.Lookup(status, "meters", "battery", "instant_power"))
-		setInstantPower(stub, "load", lookup.Lookup(status, "meters", "load", "instant_power"))
+		setInstantPower(stub, meterSite, extractStatusPower(status, meterSite))
+		setInstantPower(stub, meterSolar, extractStatusPower(status, meterSolar))
+		setInstantPower(stub, meterBattery, extractStatusPower(status, meterBattery))
+		setInstantPower(stub, meterLoad, extractStatusPower(status, meterLoad))
 	}
+
+	cfg := p.client.GetConfig(ctx, force)
+	if hasGeneratorMeter(cfg) {
+		genStub := stubs.MetersAggregatesGeneratorStub()
+		genStub["instant_power"] = extractStatusPower(status, meterGenerator)
+		genStub["disclaimer"] = "generator: power from meterAggregates, no voltage/current"
+		stub[meterGenerator] = genStub
+	}
+
+	if ts, ok := lookup.Lookup(status, "system", "time").(string); ok && ts != "" {
+		for _, sec := range stub {
+			if secMap, okSec := sec.(map[string]any); okSec {
+				secMap["last_communication_time"] = ts
+			}
+		}
+	}
+
+	mergeNativeAggregatesEnergy(stub, p.client.GetNativeMetersAggregates(ctx, false))
 
 	return stub, nil
 }
@@ -1232,6 +1488,12 @@ func (p *PyPowerwallTEDAPI) getAPIStatus(ctx context.Context, force bool) (any, 
 	if uptime := p.getGatewayUptime(ctx, force); uptime != nil {
 		startTime = uptime.startTime.Format(gatewayStartTimeFormat)
 		upTimeSeconds = (time.Duration(uptime.uptimeMs) * time.Millisecond).String()
+	}
+	if startTime == nil {
+		if native := p.client.GetNativeStatus(ctx, force); native != nil {
+			startTime = native["start_time"]
+			upTimeSeconds = native["up_time_seconds"]
+		}
 	}
 
 	p.uptimeMu.Lock()
@@ -2218,18 +2480,18 @@ func (p *PyPowerwallTEDAPI) Power(ctx context.Context) (map[string]float64, erro
 	payload, err := p.Poll(ctx, "/api/meters/aggregates", false, false, false)
 	if err == nil && payload != nil {
 		if s, ok := payload.(map[string]any); ok {
-			site = getMeterPower(s, "site")
-			solar = getMeterPower(s, "solar")
-			battery = getMeterPower(s, "battery")
-			load = getMeterPower(s, "load")
+			site = getMeterPower(s, meterSite)
+			solar = getMeterPower(s, meterSolar)
+			battery = getMeterPower(s, meterBattery)
+			load = getMeterPower(s, meterLoad)
 		}
 	}
 
 	return map[string]float64{
-		"site":    site,
-		"solar":   solar,
-		"battery": battery,
-		"load":    load,
+		meterSite:    site,
+		meterSolar:   solar,
+		meterBattery: battery,
+		meterLoad:    load,
 	}, nil
 }
 

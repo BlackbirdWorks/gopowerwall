@@ -717,6 +717,8 @@ func TestPODViewIncludesTEPODVitalsAugmentation(t *testing.T) {
 	type testCase struct {
 		name       string
 		wantDevice string
+		vitals     []*teslapower.DeviceVital
+		wantFlags  bool
 		wantHeat   int
 		wantCharge int
 	}
@@ -725,8 +727,35 @@ func TestPODViewIncludesTEPODVitalsAugmentation(t *testing.T) {
 		{
 			name:       "tepod vitals populated",
 			wantDevice: "TEPOD--1234--5678",
+			vitals: []*teslapower.DeviceVital{
+				vitalBool("POD_ActiveHeating", true),
+				vitalBool("POD_ChargeComplete", false),
+				vitalBool("POD_ChargeRequest", true),
+				vitalBool("POD_DischargeComplete", false),
+				vitalBool("POD_PermanentlyFaulted", false),
+				vitalBool("POD_PersistentlyFaulted", false),
+				vitalBool("POD_enable_line", true),
+				vitalFloat("POD_available_charge_power", 3300.0),
+				vitalFloat("POD_available_dischg_power", 3200.0),
+				vitalFloat("POD_nom_energy_remaining", 9000.0),
+				vitalFloat("POD_nom_energy_to_be_charged", 4500.0),
+				vitalFloat("POD_nom_full_pack_energy", 13500.0),
+			},
+			wantFlags:  true,
 			wantHeat:   1,
 			wantCharge: 1,
+		},
+		{
+			name:       "missing status flags remain nil",
+			wantDevice: "TEPOD--1234--9999",
+			vitals: []*teslapower.DeviceVital{
+				vitalFloat("POD_available_charge_power", 3300.0),
+				vitalFloat("POD_available_dischg_power", 3200.0),
+				vitalFloat("POD_nom_energy_remaining", 9000.0),
+				vitalFloat("POD_nom_energy_to_be_charged", 4500.0),
+				vitalFloat("POD_nom_full_pack_energy", 13500.0),
+			},
+			wantFlags: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -738,20 +767,7 @@ func TestPODViewIncludesTEPODVitalsAugmentation(t *testing.T) {
 						Device: &teslapower.SiteControllerConnectedDevice{
 							Device: &teslapower.Device{Din: &teslapower.StringValue{Value: tc.wantDevice}},
 						},
-						Vitals: []*teslapower.DeviceVital{
-							vitalBool("POD_ActiveHeating", true),
-							vitalBool("POD_ChargeComplete", false),
-							vitalBool("POD_ChargeRequest", true),
-							vitalBool("POD_DischargeComplete", false),
-							vitalBool("POD_PermanentlyFaulted", false),
-							vitalBool("POD_PersistentlyFaulted", false),
-							vitalBool("POD_enable_line", true),
-							vitalFloat("POD_available_charge_power", 3300.0),
-							vitalFloat("POD_available_dischg_power", 3200.0),
-							vitalFloat("POD_nom_energy_remaining", 9000.0),
-							vitalFloat("POD_nom_energy_to_be_charged", 4500.0),
-							vitalFloat("POD_nom_full_pack_energy", 13500.0),
-						},
+						Vitals: tc.vitals,
 					},
 				},
 			}
@@ -764,13 +780,30 @@ func TestPODViewIncludesTEPODVitalsAugmentation(t *testing.T) {
 			require.Len(t, view.TEPODEntries, 1)
 			entry := view.TEPODEntries[0]
 			assert.Equal(t, tc.wantDevice, entry.Device)
-			assert.Equal(t, tc.wantHeat, entry.ActiveHeating)
-			assert.Equal(t, 0, entry.ChargeComplete)
-			assert.Equal(t, tc.wantCharge, entry.ChargeRequest)
-			assert.Equal(t, 0, entry.DischargeComplete)
-			assert.Equal(t, 0, entry.PermanentlyFaulted)
-			assert.Equal(t, 0, entry.PersistentlyFaulted)
-			assert.Equal(t, 1, entry.EnableLine)
+			if tc.wantFlags {
+				require.NotNil(t, entry.ActiveHeating)
+				assert.Equal(t, tc.wantHeat, *entry.ActiveHeating)
+				require.NotNil(t, entry.ChargeComplete)
+				assert.Equal(t, 0, *entry.ChargeComplete)
+				require.NotNil(t, entry.ChargeRequest)
+				assert.Equal(t, tc.wantCharge, *entry.ChargeRequest)
+				require.NotNil(t, entry.DischargeComplete)
+				assert.Equal(t, 0, *entry.DischargeComplete)
+				require.NotNil(t, entry.PermanentlyFaulted)
+				assert.Equal(t, 0, *entry.PermanentlyFaulted)
+				require.NotNil(t, entry.PersistentlyFaulted)
+				assert.Equal(t, 0, *entry.PersistentlyFaulted)
+				require.NotNil(t, entry.EnableLine)
+				assert.Equal(t, 1, *entry.EnableLine)
+			} else {
+				assert.Nil(t, entry.ActiveHeating)
+				assert.Nil(t, entry.ChargeComplete)
+				assert.Nil(t, entry.ChargeRequest)
+				assert.Nil(t, entry.DischargeComplete)
+				assert.Nil(t, entry.PermanentlyFaulted)
+				assert.Nil(t, entry.PersistentlyFaulted)
+				assert.Nil(t, entry.EnableLine)
+			}
 			require.NotNil(t, entry.AvailableChargePower)
 			assert.InDelta(t, 3300.0, *entry.AvailableChargePower, 0.001)
 			require.NotNil(t, entry.AvailableDischargePower)

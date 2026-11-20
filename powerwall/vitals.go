@@ -199,6 +199,21 @@ func lookupFloatPtr(m map[string]any, key string) *float64 {
 	return &v
 }
 
+// lookupIntPtr retrieves m[key] as a *int, returning nil if the key is
+// absent or its value is nil, and otherwise coercing non-nil values via
+// intOrZero - matching pypowerwall's `None if value is None else int(value or 0)`
+// handling for /pod status flags (proxy/server.py:2245-2249).
+func lookupIntPtr(m map[string]any, key string) *int {
+	raw, ok := m[key]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	val := intOrZero(m, key)
+
+	return &val
+}
+
 // intOrZero coerces m[key] to an int, mirroring pypowerwall's
 // int(get_value(v, key) or 0) coercion used throughout generate_pod's
 // TEPOD vitals-augmentation pass (server.py:2196-2244): a missing, nil,
