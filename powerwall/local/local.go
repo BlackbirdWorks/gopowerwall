@@ -319,6 +319,21 @@ func (l *Client) applyAuth(req *http.Request) {
 	}
 }
 
+func (l *Client) renewSession(ctx context.Context) bool {
+	logger.Load(ctx).DebugContext(ctx, "session expired, requesting a new one")
+	l.mu.Lock()
+	loginErr := l.loginLocked(ctx)
+	l.mu.Unlock()
+	if loginErr != nil {
+		logger.Load(ctx).ErrorContext(ctx, "unable to renew session with Powerwall",
+			"host", l.host, "error", loginErr)
+
+		return false
+	}
+
+	return true
+}
+
 func (l *Client) handleHTTPStatus(
 	ctx context.Context,
 	statusCode int,
@@ -348,16 +363,13 @@ func (l *Client) handleHTTPStatus(
 
 		return nil, true, models.ErrRateLimited
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
-		if !recursive {
-			logger.Load(ctx).DebugContext(ctx, "session expired, requesting a new one")
-			l.mu.Lock()
-			loginErr := l.loginLocked(ctx)
-			l.mu.Unlock()
-			if loginErr == nil {
-				res, pollErr := l.Poll(ctx, api, force, true, raw)
+		if !recursive && l.renewSession(ctx) {
+			res, pollErr := l.Poll(ctx, api, force, true, raw)
 
-				return res, true, pollErr
-			}
+			return res, true, pollErr
+		}
+		if recursive {
+			logger.Load(ctx).ErrorContext(ctx, "unable to establish session with Powerwall", "url", url)
 		}
 		l.setEndpointNegative(api, negCacheTTL)
 
@@ -507,13 +519,15 @@ func (l *Client) Post(
 	}
 	defer resp.Body.Close()
 
-	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && !recursive {
-		l.mu.Lock()
-		loginErr := l.loginLocked(ctx)
-		l.mu.Unlock()
-		if loginErr == nil {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		if !recursive && l.renewSession(ctx) {
 			return l.Post(ctx, api, payload, din, true, raw)
 		}
+		if recursive {
+			logger.Load(ctx).ErrorContext(ctx, "unable to establish session with Powerwall", "url", url)
+		}
+
+		return nil, models.ErrLogin
 	}
 
 	respData, err := io.ReadAll(resp.Body)

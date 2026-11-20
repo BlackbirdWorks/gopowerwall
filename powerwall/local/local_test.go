@@ -752,32 +752,88 @@ func TestPost(t *testing.T) {
 func TestPostLoginRetry(t *testing.T) {
 	t.Parallel()
 
-	var opCalls atomic.Int32
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/login/Basic":
-			http.SetCookie(w, &http.Cookie{Name: "AuthCookie", Value: "c1"})
-			http.SetCookie(w, &http.Cookie{Name: "UserRecord", Value: "u1"})
-			w.WriteHeader(http.StatusOK)
-		case "/api/operation":
-			n := opCalls.Add(1)
-			if n == singleCall {
-				w.WriteHeader(http.StatusForbidden)
+	type testCase struct {
+		wantEqual    any
+		wantErrIs    error
+		name         string
+		firstOpCode  int
+		loginCode    int
+		retryOpCode  int
+		wantOpCalls  int32
+		wantLoginErr bool
+	}
+
+	cases := []testCase{
+		{
+			name:        "403 triggers re-login and succeeds on retry",
+			firstOpCode: http.StatusForbidden,
+			loginCode:   http.StatusOK,
+			retryOpCode: http.StatusOK,
+			wantEqual:   map[string]any{"status": "success"},
+			wantOpCalls: int32(doubleCall),
+		},
+		{
+			name:         "401 with failed re-login returns ErrLogin instead of parsing error body",
+			firstOpCode:  http.StatusUnauthorized,
+			loginCode:    http.StatusUnauthorized,
+			retryOpCode:  http.StatusOK,
+			wantLoginErr: true,
+			wantErrIs:    models.ErrLogin,
+			wantOpCalls:  int32(singleCall),
+		},
+		{
+			name:         "401 on recursive retry returns ErrLogin",
+			firstOpCode:  http.StatusUnauthorized,
+			loginCode:    http.StatusOK,
+			retryOpCode:  http.StatusUnauthorized,
+			wantLoginErr: true,
+			wantErrIs:    models.ErrLogin,
+			wantOpCalls:  int32(doubleCall),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var opCalls atomic.Int32
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/login/Basic":
+					if tc.loginCode == http.StatusOK {
+						http.SetCookie(w, &http.Cookie{Name: "AuthCookie", Value: "c1"})
+						http.SetCookie(w, &http.Cookie{Name: "UserRecord", Value: "u1"})
+					}
+					w.WriteHeader(tc.loginCode)
+				case "/api/operation":
+					n := opCalls.Add(1)
+					if n == singleCall {
+						w.WriteHeader(tc.firstOpCode)
+						_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+
+						return
+					}
+					w.WriteHeader(tc.retryOpCode)
+					_, _ = w.Write([]byte(`{"status":"success"}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}
+			host := hostOf(newTLSServer(t, handler))
+			b := newBackend(host, models.AuthModeCookie, "")
+
+			res, err := b.Post(t.Context(), "/api/operation", map[string]any{"real_mode": "backup"}, "", false, false)
+			assert.Equal(t, tc.wantOpCalls, opCalls.Load())
+			if tc.wantLoginErr {
+				require.ErrorIs(t, err, tc.wantErrIs)
+				assert.Nil(t, res)
 
 				return
 			}
-			_, _ = w.Write([]byte(`{"status":"success"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantEqual, res)
+		})
 	}
-	host := hostOf(newTLSServer(t, handler))
-	b := newBackend(host, models.AuthModeCookie, "")
-
-	res, err := b.Post(t.Context(), "/api/operation", map[string]any{"real_mode": "backup"}, "", false, false)
-	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"status": "success"}, res)
-	assert.Equal(t, int32(doubleCall), opCalls.Load())
 }
 
 func TestPostCacheInvalidation(t *testing.T) {

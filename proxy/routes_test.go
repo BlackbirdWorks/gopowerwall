@@ -844,61 +844,108 @@ func TestPodRouteIncludesTEPODVitalsAugmentation(t *testing.T) {
 		return &teslapower.DeviceVital{Name: &name, Value: &teslapower.DeviceVital_FloatValue{FloatValue: val}}
 	}
 
-	pb := &teslapower.DevicesWithVitals{
-		Devices: []*teslapower.SiteControllerConnectedDeviceWithVitals{
-			{
-				Device: &teslapower.SiteControllerConnectedDevice{
-					Device: &teslapower.Device{Din: strVal("TEPOD--9999--0001")},
-				},
-				Vitals: []*teslapower.DeviceVital{
-					boolVital("POD_ActiveHeating", true),
-					boolVital("POD_ChargeComplete", false),
-					boolVital("POD_ChargeRequest", true),
-					boolVital("POD_DischargeComplete", false),
-					boolVital("POD_PermanentlyFaulted", false),
-					boolVital("POD_PersistentlyFaulted", false),
-					boolVital("POD_enable_line", true),
-					floatVital("POD_available_charge_power", 3300.0),
-					floatVital("POD_available_dischg_power", 3200.0),
-					floatVital("POD_nom_energy_remaining", 9000.0),
-					floatVital("POD_nom_energy_to_be_charged", 4500.0),
-					floatVital("POD_nom_full_pack_energy", 13500.0),
-				},
-			},
-		},
+	type testCase struct {
+		name      string
+		vitals    []*teslapower.DeviceVital
+		wantFlags bool
 	}
-	data, err := proto.Marshal(pb)
-	require.NoError(t, err)
 
-	gw := newFakeGateway(t, map[string]http.HandlerFunc{
-		"/api/devices/vitals": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write(data)
+	for _, tc := range []testCase{
+		{
+			name: "populated status flags serialize as ints",
+			vitals: []*teslapower.DeviceVital{
+				boolVital("POD_ActiveHeating", true),
+				boolVital("POD_ChargeComplete", false),
+				boolVital("POD_ChargeRequest", true),
+				boolVital("POD_DischargeComplete", false),
+				boolVital("POD_PermanentlyFaulted", false),
+				boolVital("POD_PersistentlyFaulted", false),
+				boolVital("POD_enable_line", true),
+				floatVital("POD_available_charge_power", 3300.0),
+				floatVital("POD_available_dischg_power", 3200.0),
+				floatVital("POD_nom_energy_remaining", 9000.0),
+				floatVital("POD_nom_energy_to_be_charged", 4500.0),
+				floatVital("POD_nom_full_pack_energy", 13500.0),
+			},
+			wantFlags: true,
 		},
-	})
-	pw := newLocalPowerwall(t, gw)
-	ts := newProxyServer(t, baseTestConfig(), pw)
+		{
+			name: "missing status flags serialize as null",
+			vitals: []*teslapower.DeviceVital{
+				floatVital("POD_available_charge_power", 3300.0),
+				floatVital("POD_available_dischg_power", 3200.0),
+				floatVital("POD_nom_energy_remaining", 9000.0),
+				floatVital("POD_nom_energy_to_be_charged", 4500.0),
+				floatVital("POD_nom_full_pack_energy", 13500.0),
+			},
+			wantFlags: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	resp, err := ts.Client().Get(ts.URL + "/pod")
-	require.NoError(t, err)
-	defer resp.Body.Close()
+			pb := &teslapower.DevicesWithVitals{
+				Devices: []*teslapower.SiteControllerConnectedDeviceWithVitals{
+					{
+						Device: &teslapower.SiteControllerConnectedDevice{
+							Device: &teslapower.Device{Din: strVal("TEPOD--9999--0001")},
+						},
+						Vitals: tc.vitals,
+					},
+				},
+			}
+			data, err := proto.Marshal(pb)
+			require.NoError(t, err)
 
-	var body map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+			gw := newFakeGateway(t, map[string]http.HandlerFunc{
+				"/api/devices/vitals": func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write(data)
+				},
+			})
+			pw := newLocalPowerwall(t, gw)
+			ts := newProxyServer(t, baseTestConfig(), pw)
 
-	assert.Equal(t, "TEPOD--9999--0001", body["PW1_name"])
-	assert.InDelta(t, 1.0, body["PW1_POD_ActiveHeating"], 0)
-	assert.InDelta(t, 0.0, body["PW1_POD_ChargeComplete"], 0)
-	assert.InDelta(t, 1.0, body["PW1_POD_ChargeRequest"], 0)
-	assert.InDelta(t, 1.0, body["PW1_POD_enable_line"], 0)
-	assert.InDelta(t, 3300.0, body["PW1_POD_available_charge_power"], 0)
-	assert.InDelta(t, 3200.0, body["PW1_POD_available_dischg_power"], 0)
-	assert.InDelta(t, 9000.0, body["PW1_POD_nom_energy_remaining"], 0)
-	assert.InDelta(t, 4500.0, body["PW1_POD_nom_energy_to_be_charged"], 0)
-	assert.InDelta(t, 13500.0, body["PW1_POD_nom_full_pack_energy"], 0)
+			resp, err := ts.Client().Get(ts.URL + "/pod")
+			require.NoError(t, err)
+			defer resp.Body.Close()
 
-	// PW2 (the second battery block) has no matching TEPOD device, so it
-	// keeps the block loop's own placeholder: the key exists (upstream
-	// always emits it) but is JSON null, not a number.
-	assert.Contains(t, body, "PW2_POD_nom_energy_to_be_charged")
-	assert.Nil(t, body["PW2_POD_nom_energy_to_be_charged"])
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+
+			assert.Equal(t, "TEPOD--9999--0001", body["PW1_name"])
+			if tc.wantFlags {
+				assert.InDelta(t, 1.0, body["PW1_POD_ActiveHeating"], 0)
+				assert.InDelta(t, 0.0, body["PW1_POD_ChargeComplete"], 0)
+				assert.InDelta(t, 1.0, body["PW1_POD_ChargeRequest"], 0)
+				assert.InDelta(t, 0.0, body["PW1_POD_DischargeComplete"], 0)
+				assert.InDelta(t, 0.0, body["PW1_POD_PermanentlyFaulted"], 0)
+				assert.InDelta(t, 0.0, body["PW1_POD_PersistentlyFaulted"], 0)
+				assert.InDelta(t, 1.0, body["PW1_POD_enable_line"], 0)
+			} else {
+				for _, key := range []string{
+					"PW1_POD_ActiveHeating",
+					"PW1_POD_ChargeComplete",
+					"PW1_POD_ChargeRequest",
+					"PW1_POD_DischargeComplete",
+					"PW1_POD_PermanentlyFaulted",
+					"PW1_POD_PersistentlyFaulted",
+					"PW1_POD_enable_line",
+				} {
+					assert.Contains(t, body, key)
+					assert.Nil(t, body[key])
+				}
+			}
+			assert.InDelta(t, 3300.0, body["PW1_POD_available_charge_power"], 0)
+			assert.InDelta(t, 3200.0, body["PW1_POD_available_dischg_power"], 0)
+			assert.InDelta(t, 9000.0, body["PW1_POD_nom_energy_remaining"], 0)
+			assert.InDelta(t, 4500.0, body["PW1_POD_nom_energy_to_be_charged"], 0)
+			assert.InDelta(t, 13500.0, body["PW1_POD_nom_full_pack_energy"], 0)
+
+			// PW2 (the second battery block) has no matching TEPOD device, so it
+			// keeps the block loop's own placeholder: the key exists (upstream
+			// always emits it) but is JSON null, not a number.
+			assert.Contains(t, body, "PW2_POD_nom_energy_to_be_charged")
+			assert.Nil(t, body["PW2_POD_nom_energy_to_be_charged"])
+		})
+	}
 }

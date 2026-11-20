@@ -11,12 +11,12 @@ can point at gopowerwall instead without changing their queries.
 
 Parity with pypowerwall is a deliberate, but *scoped*, goal: the `gopowerwall` CLI's
 subcommands/flags/output and the proxy's HTTP routes/JSON shapes track pypowerwall's
-documented surface (tracking as of [pypowerwall](https://github.com/jasonacox/pypowerwall) v0.23.1, Proxy t111, commit `8c554fa864`). Everything underneath that surface — package layout, exported Go
+documented surface (tracking as of [pypowerwall](https://github.com/jasonacox/pypowerwall) v0.25.0, Proxy t115, commit `31214d0ff8`). Everything underneath that surface — package layout, exported Go
 identifiers, function signatures — is idiomatic Go rather than a line-for-line port.
 
 > [!NOTE]
 > This is a community Go implementation, not affiliated with or endorsed by Tesla, Inc. or
-> the pypowerwall project. Tracking upstream pypowerwall v0.23.1 (Proxy t111).
+> the pypowerwall project. Tracking upstream pypowerwall v0.25.0 (Proxy t115).
 
 ## Status overview
 
