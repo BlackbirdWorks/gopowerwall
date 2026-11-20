@@ -775,13 +775,6 @@ func isValidNativeAggregates(d map[string]any) bool {
 	return true
 }
 
-func (c *Client) isNativeBackedOff(failUntil *time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return time.Now().Before(*failUntil)
-}
-
 func (c *Client) checkNativeCache(
 	key string,
 	failUntil *time.Time,
@@ -1215,7 +1208,7 @@ func mergeNativeAggregatesEnergy(stub, native map[string]any) {
 
 func (p *PyPowerwallTEDAPI) getAPIMetersAggregates(ctx context.Context, force bool) (any, error) {
 	// If v1r is active, attempt native call through the selected v1r read transport
-	if p.v1r != nil && (force || !p.client.isNativeBackedOff(&p.client.nativeFailUntil)) {
+	if p.v1r != nil {
 		res, err := p.client.APIGet(ctx, "/api/meters/aggregates")
 		if err == nil && res != nil {
 			if m, ok := res.(map[string]any); ok && isValidNativeAggregates(m) {

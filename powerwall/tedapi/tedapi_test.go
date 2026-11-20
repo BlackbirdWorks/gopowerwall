@@ -2538,6 +2538,18 @@ func TestBackendAggregatesNativeEnergyRetention(t *testing.T) {
 			m, ok := after.(map[string]any)
 			require.True(t, ok)
 			tc.check(t, m)
+
+			// When native /api/meters/aggregates recovers, an ordinary (non-forced)
+			// poll immediately resumes serving live native readings rather than
+			// staying pinned on the fallback stub during the energy-cache backoff.
+			failAggregates.Store(false)
+			recovered, err := p.Poll(t.Context(), "/api/meters/aggregates", false, false, false)
+			require.NoError(t, err)
+			recMap, ok := recovered.(map[string]any)
+			require.True(t, ok)
+			recSite, ok := recMap["site"].(map[string]any)
+			require.True(t, ok)
+			assert.InDelta(t, 10.0, recSite["instant_power"], 0.001)
 		})
 	}
 }
